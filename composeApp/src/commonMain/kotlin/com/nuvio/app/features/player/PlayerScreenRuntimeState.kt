@@ -280,6 +280,8 @@ internal class PlayerScreenRuntime(
     var partyMessage by mutableStateOf("")
     var partyMessageToken by mutableStateOf(0L)
     var copyPartyInvite: () -> Unit = {}
+    // NUVIO_BROWSER_PARTY_BRIDGE_V1
+    var copyBrowserInvite: (String) -> Unit = {}
     var showPartyChat by mutableStateOf(false)
     var partyChatVisible by mutableStateOf(false)
     val isPanelOpen: Boolean

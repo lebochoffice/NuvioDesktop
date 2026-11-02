@@ -88,6 +88,10 @@ internal fun PlayerScreenRuntime.rememberPartyControlsState(): PlayerControlPart
     }
     val copiedLabel = stringResource(Res.string.party_invite_copied)
     SideEffect {
+        copyBrowserInvite = { url ->
+            clipboard.setText(AnnotatedString(url))
+            showPartyMessage("Browser link copied")
+        }
         copyPartyInvite = {
             if (invite != null) {
                 clipboard.setText(AnnotatedString(invite))
@@ -211,6 +215,25 @@ internal fun PlayerScreenRuntime.rememberPartyControlsState(): PlayerControlPart
 
 @OptIn(ExperimentalEncodingApi::class)
 internal fun PlayerScreenRuntime.handlePartyControlsEvent(type: String, value: Double): Boolean {
+    // NUVIO_BROWSER_PARTY_BRIDGE_V1: accept only this party's HTTPS browser invite.
+    if (type.startsWith(BROWSER_INVITE_EVENT)) {
+        val party = PartyRepository.state.value.party
+        val url = runCatching {
+            Base64.UrlSafe.withPadding(Base64.PaddingOption.ABSENT_OPTIONAL)
+                .decode(type.removePrefix(BROWSER_INVITE_EVENT))
+                .decodeToString()
+        }.getOrNull()
+        if (party?.isHost == true && url != null &&
+            url.length <= 2048 &&
+            Regex("^https://[A-Za-z0-9.-]+(?::[0-9]{1,5})?/party/${Regex.escape(party.code)}$").matches(url)) {
+            // A value of 1 is sent only by the explicit confirmation action.
+            if (value >= 0.5) PartyRepository.setSharing(true)
+            copyBrowserInvite(url)
+        } else {
+            showPartyMessage("Invalid browser invite")
+        }
+        return true
+    }
     if (type.startsWith(CHAT_SEND_EVENT)) {
         val text = runCatching {
             Base64.UrlSafe.withPadding(Base64.PaddingOption.ABSENT_OPTIONAL)
@@ -289,6 +312,7 @@ private fun partyControlLabels(): Map<String, String> = mapOf(
 
 private fun String.initial(): String = trim().take(1).uppercase()
 
+private const val BROWSER_INVITE_EVENT = "partyBrowserInvite:"
 private const val REMOVE_MEMBER_EVENT = "partyRemoveMember:"
 private const val CHAT_SEND_EVENT = "partyChatSend:"
 private const val CHAT_RETRY_EVENT = "partyChatRetry:"

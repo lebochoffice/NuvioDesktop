@@ -1,0 +1,17 @@
+{
+  "name": "nuvio-watchparty-browser-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.57.0",
+    "hls.js": "^1.6.10"
+  },
+  "devDependencies": { "vite": "^7.1.0" }
+}

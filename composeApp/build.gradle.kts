@@ -557,7 +557,10 @@ fun runtimeConfigBoolean(key: String, default: Boolean): Boolean =
 
 val generateRuntimeConfigs = tasks.register<GenerateRuntimeConfigsTask>("generateRuntimeConfigs") {
     outputDir.set(generatedRuntimeConfigDir)
-    localPropertiesFile.set(rootProject.layout.projectDirectory.file("local.properties"))
+    // NUVIO_BROWSER_PARTY_BRIDGE_V1: optional file must be unset if absent.
+    if (rootProject.file("local.properties").exists()) {
+        localPropertiesFile.set(rootProject.layout.projectDirectory.file("local.properties"))
+    }
     appVersionName.set(releaseAppVersionName)
     appVersionCode.set(releaseAppVersionCode)
     desktopAppVersionName.set(desktopReleaseVersionName)
