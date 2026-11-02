@@ -25,7 +25,7 @@ class Element {
   replaceChildren(...children) { this.children = children; }
 }
 class FakeHls {
-  static Events = {LEVEL_LOADED: 'level', ERROR: 'error', MANIFEST_PARSED: 'manifest', FRAG_LOADED: 'frag'};
+  static Events = {LEVEL_LOADED: 'level', ERROR: 'error', MANIFEST_PARSED: 'manifest', FRAG_LOADED: 'frag', LEVEL_SWITCHED: 'switched'};
   static isSupported() { return true; }
   constructor(config) { this.config = config; this.listeners = new Map(); }
   on(event, callback) { this.listeners.set(event, callback); }
@@ -34,7 +34,7 @@ class FakeHls {
   destroy() { this.destroyed = true; this.source = null; }
   emit(event, data) { this.listeners.get(event)?.(event, data); }
 }
-async function harness({debug = false} = {}) {
+async function harness({debug = false, guestControl = false} = {}) {
   const elements = new Map(), storageWrites = [], sent = [];
   let clock = 0, tick = () => {};
   const get = id => { if (!elements.has(id)) elements.set(id, new Element()); return elements.get(id); };
@@ -58,7 +58,7 @@ async function harness({debug = false} = {}) {
   const context = vm.createContext({
     ...protocol, ...syncPolicy, PersonalHlsSource, personalHlsUrlProblem, Hls: FakeHls, PartySession: FakeSession,
     createClient: () => client, callRpc: () => {throw Error('Unexpected RPC');},
-    env: {VITE_SUPABASE_URL: 'https://backend.example.test', VITE_SUPABASE_ANON_KEY: 'sb_publishable_TEST'},
+    env: {VITE_SUPABASE_URL: 'https://backend.example.test', VITE_SUPABASE_ANON_KEY: 'sb_publishable_TEST', ...(guestControl ? {VITE_PARTY_GUEST_CONTROL: '1'} : {})},
     document: {getElementById: get, createElement: () => new Element()}, location: {pathname: '/'},
     window: {addEventListener: (event, callback) => windowEvents.set(event, callback)},
     sessionStorage: {getItem: key => key === 'nuvio-party-debug' ? (debug ? '1' : null) : 'test-device', setItem: (...args) => storageWrites.push(args)},
@@ -163,8 +163,8 @@ test('a rejected native seek stops synchronization without reflecting a token-be
   assert.ok(!h.get('message').textContent.includes('INTEGRATION_PRIVATE_SENTINEL'));
 });
 
-async function readyGuest() {
-  const h = await harness(); h.enter(); h.metadata();
+async function readyGuest(options) {
+  const h = await harness(options); h.enter(); h.metadata();
   h.source().instance.emit(FakeHls.Events.LEVEL_LOADED, {details: vod});
   return h;
 }
@@ -457,8 +457,8 @@ function controllable(h, {confirm = true, hostOnlyAfter = false, hold = false} =
   };
   return {rpcs, sends, release: () => pending.shift()?.()};
 }
-async function playingGuest() {
-  const h = await readyGuest(); h.session.playback = {...playback, paused: false};
+async function playingGuest(options) {
+  const h = await readyGuest(options); h.session.playback = {...playback, paused: false};
   h.get('resync').fire('click'); await settlePlayback(); h.player.fire('seeked');
   return h;
 }
@@ -498,7 +498,7 @@ test('playback-rate nudging uses hysteresis instead of flapping every tick', asy
 });
 
 test('hostOnly=false: browser pause, seek and play become server-confirmed party commands without echo loops', async () => {
-  const h = await playingGuest(), c = controllable(h);
+  const h = await playingGuest({guestControl: true}), c = controllable(h);
   h.session.handlers.room(h.session.room);
   assert.match(h.get('controlInfo').textContent, /Gäste dürfen/);
   h.player.fire('pointerdown'); h.player.paused = true; h.player.fire('pause'); await settlePlayback();
@@ -517,7 +517,7 @@ test('hostOnly=false: browser pause, seek and play become server-confirmed party
 });
 
 test('hostOnly=true: browser gestures never send commands and only leave local sync', async () => {
-  const h = await playingGuest(), c = controllable(h); h.session.room.info.host_only = true;
+  const h = await playingGuest({guestControl: true}), c = controllable(h); h.session.room.info.host_only = true;
   assert.equal(h.session.canControl(), false);
   assert.throws(() => h.session.prepareControl({paused: true, positionMs: 0}), e => e.code === 'host_only');
   h.player.fire('pointerdown'); h.player.paused = true; h.player.fire('pause'); await settlePlayback();
@@ -526,7 +526,7 @@ test('hostOnly=true: browser gestures never send commands and only leave local s
 
 test('unconfirmed or host-revoked commands are never broadcast and the party state is restored', async () => {
   for (const options of [{confirm: false}, {hostOnlyAfter: true}]) {
-    const h = await playingGuest(), c = controllable(h, options);
+    const h = await playingGuest({guestControl: true}), c = controllable(h, options);
     h.player.fire('pointerdown'); h.player.paused = true; h.player.fire('pause'); await settlePlayback();
     assert.equal(c.rpcs.length, 1); assert.equal(c.sends.length, 0);
     assert.equal(h.session.playback.seq, 1); assert.equal(h.player.paused, false); // Party keeps playing.
@@ -536,7 +536,7 @@ test('unconfirmed or host-revoked commands are never broadcast and the party sta
 });
 
 test('concurrent commands resolve deterministically by sequence and member id; stale snapshots cannot override', async () => {
-  const h = await playingGuest(), c = controllable(h, {hold: true});
+  const h = await playingGuest({guestControl: true}), c = controllable(h, {hold: true});
   h.player.fire('pointerdown'); h.player.paused = true; h.player.fire('pause');
   // While our seq 2 is in flight, another guest's seq 2 arrives; 'zz-guest' > 'guest' wins everywhere.
   const other = {...playback, seq: 2, member_id: 'zz-guest', paused: false, position_ms: 60000};
@@ -549,7 +549,7 @@ test('concurrent commands resolve deterministically by sequence and member id; s
 });
 
 test('gestures during an in-flight command are coalesced to the latest one', async () => {
-  const h = await playingGuest(), c = controllable(h, {hold: true});
+  const h = await playingGuest({guestControl: true}), c = controllable(h, {hold: true});
   h.player.fire('pointerdown'); h.player.paused = true; h.player.fire('pause');
   for (const time of [20, 30, 50]) { h.player.currentTime = time; h.player.fire('seeking'); h.player.fire('seeked'); }
   assert.equal(c.rpcs.length, 1);
@@ -559,7 +559,7 @@ test('gestures during an in-flight command are coalesced to the latest one', asy
 });
 
 test('session end or member removal during a pending command never broadcasts it', async () => {
-  const h = await playingGuest(), c = controllable(h, {hold: true});
+  const h = await playingGuest({guestControl: true}), c = controllable(h, {hold: true});
   h.player.fire('pointerdown'); h.player.paused = true; h.player.fire('pause');
   await h.session.close(false);
   c.release(); await settlePlayback();
@@ -573,6 +573,7 @@ test('iOS-style native HLS skips hls.js and quality UI; Android-style hls.js get
   ios.get('loadStream').fire('click');
   assert.equal(ios.desktopHls(), null); assert.equal(ios.player.src, 'https://stream.example.test/ios.m3u8');
   assert.equal(ios.get('qualityWrap').hidden, true);
+  assert.match(ios.get('qualityNote').textContent, /vom Browser gewählt/); assert.equal(ios.get('qualityNote').hidden, false);
   ios.tick(); assert.equal(JSON.parse(ios.get('watchSection').children.at(-1).children.at(-1).textContent).playbackMode, 'native-hls');
 
   const android = await harness();
@@ -582,13 +583,57 @@ test('iOS-style native HLS skips hls.js and quality UI; Android-style hls.js get
   assert.equal(instance.config.backBufferLength, 30); assert.equal(instance.config.startFragPrefetch, true); assert.equal(instance.config.debug, false);
   instance.levels = [{height: 1080, bitrate: 6e6}]; instance.emit(FakeHls.Events.MANIFEST_PARSED);
   assert.equal(android.get('qualityWrap').hidden, true); // Single-variant playlists: no invented choices.
+  assert.match(android.get('qualityNote').textContent, /Automatisch – die Quelle liefert eine Qualität/);
   instance.levels = [{height: 720, bitrate: 3e6}, {height: 1080, bitrate: 6e6}, {height: 2160, bitrate: 15e6}];
   instance.emit(FakeHls.Events.MANIFEST_PARSED);
-  assert.equal(android.get('qualityWrap').hidden, false);
+  assert.equal(android.get('qualityWrap').hidden, false); assert.equal(android.get('qualityNote').hidden, true);
   assert.deepEqual(android.get('quality').children.map(o => o.textContent), ['Auto', '4K', '1080p', '720p']);
-  android.get('quality').value = '1'; android.get('quality').fire('change'); assert.equal(instance.loadLevel, 1);
-  android.get('quality').value = '7'; android.get('quality').fire('change'); assert.equal(instance.loadLevel, 1); // Unknown level ignored.
-  android.get('quality').value = '-1'; android.get('quality').fire('change'); assert.equal(instance.loadLevel, -1);
+  android.get('quality').value = '1'; android.get('quality').fire('change'); assert.equal(instance.nextLevel, 1);
+  instance.emit(FakeHls.Events.LEVEL_SWITCHED, {level: 1});
+  assert.equal(android.get('qualityNote').textContent, 'Aktiv: 1080p'); // The actually playing variant is visible.
+  assert.equal(android.get('qualityNote').hidden, false);
+  android.get('quality').value = '7'; android.get('quality').fire('change'); assert.equal(instance.nextLevel, 1); // Unknown level ignored.
+  android.get('quality').value = '-1'; android.get('quality').fire('change'); assert.equal(instance.nextLevel, -1);
+});
+
+test('TorBox single-variant HLS shows a fixed automatic-quality note instead of a selector', async () => {
+  const h = await harness();
+  h.session.handlers.stream({media_key: 'movie|tt1||', url: 'https://desktop.example.test/film.mkv', browser_hls: {url: 'https://stream.example.test/torbox.m3u8'}});
+  h.get('loadStream').fire('click'); const instance = h.desktopHls();
+  instance.levels = [{height: 1080, bitrate: 6e6}, {height: 1080, bitrate: 5e6}]; instance.emit(FakeHls.Events.MANIFEST_PARSED);
+  assert.equal(h.get('qualityWrap').hidden, true);
+  assert.equal(h.get('qualityNote').textContent, 'Qualität: Automatisch – TorBox liefert eine Qualität.');
+  h.session.handlers.stream(null);
+  assert.equal(h.get('qualityNote').hidden, true); // Cleared with the source.
+});
+
+test('production default: shared browser control is disabled even with host_only=false; Desktop control unaffected', async () => {
+  const h = await playingGuest({debug: true}), c = controllable(h);
+  h.session.handlers.room(h.session.room); h.tick();
+  assert.equal(h.get('partyControls').hidden, true);
+  assert.match(h.get('controlInfo').textContent, /deaktiviert/);
+  h.player.fire('pointerdown'); h.player.paused = true; h.player.fire('pause'); await settlePlayback();
+  assert.equal(c.rpcs.length, 0); assert.equal(c.sends.length, 0); assert.equal(h.sync(), false); // Local only, as in PR #2.
+  const data = JSON.parse(h.get('watchSection').children.at(-1).children.at(-1).textContent);
+  assert.equal(data.guestControl, false); assert.equal(data.controlBlockedReason, 'disabled_in_build');
+  // Host commands still apply.
+  h.get('resync').fire('click'); h.session.receive('state', {...playback, seq: 2, paused: true});
+  assert.equal(h.player.paused, true);
+});
+
+test('opt-in test build: dedicated pause/resume buttons send server-confirmed commands without video gestures', async () => {
+  const h = await playingGuest({guestControl: true, debug: true}), c = controllable(h);
+  h.tick();
+  assert.equal(h.get('partyControls').hidden, false);
+  assert.equal(h.get('partyPause').disabled, false); assert.equal(h.get('partyResume').disabled, true);
+  h.get('partyPause').fire('click'); await settlePlayback();
+  assert.equal(c.rpcs[0][1].p_playback.paused, true); assert.equal(c.sends[0].payload.paused, true);
+  assert.equal(h.player.paused, true); assert.equal(h.get('partyResume').disabled, false);
+  h.get('partyResume').fire('click'); await settlePlayback();
+  assert.equal(c.rpcs[1][1].p_playback.paused, false); assert.equal(h.player.paused, false);
+  delete h.session.room.info.host_only; h.tick(); // A snapshot without the field never grants control.
+  assert.equal(h.get('partyControls').hidden, true);
+  assert.equal(JSON.parse(h.get('watchSection').children.at(-1).children.at(-1).textContent).controlBlockedReason, 'host_only_missing');
 });
 
 test('diagnostics add resolution, bandwidth, buffer, segment timing and realtime latency without URLs', async () => {

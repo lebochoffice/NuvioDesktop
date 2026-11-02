@@ -10,6 +10,10 @@ const $ = id => document.getElementById(id);
 const player = $('player');
 const url = import.meta.env.VITE_SUPABASE_URL?.trim();
 const key = import.meta.env.VITE_SUPABASE_ANON_KEY?.trim();
+// Shared browser control stays OFF unless a build explicitly opts in (e.g. a
+// Cloudflare *Preview* for diagnosis). Server-side authorization of
+// watch_party_update for guests is unverified; Production must not set this.
+const guestControlEnabled = import.meta.env.VITE_PARTY_GUEST_CONTROL === '1';
 const configProblem = publicConfigProblem(url, key);
 const client = configProblem ? null : createClient(url, key, {
   auth: {autoRefreshToken: true, persistSession: true, detectSessionInUrl: false},
@@ -310,6 +314,13 @@ const currentHls = () => hls || personalHls.instance;
 // Listens only for level lists and fragment timing; never reads URLs.
 function watchHlsInstance(instance) {
   instance.on(Hls.Events.MANIFEST_PARSED, () => { if (currentHls() === instance) renderQuality(instance); });
+  // Shows the variant actually playing, so a manual choice is verifiable.
+  instance.on(Hls.Events.LEVEL_SWITCHED, (_event, data) => {
+    if (currentHls() !== instance || qualityOptions(instance.levels).length === 0) return;
+    const height = Number(instance.levels?.[data?.level]?.height);
+    $('qualityNote').textContent = Number.isInteger(height) && height > 0 ? `Aktiv: ${height >= 2000 ? '4K' : height + 'p'}` : '';
+    $('qualityNote').hidden = !$('qualityNote').textContent;
+  });
   instance.on(Hls.Events.FRAG_LOADED, (_event, data) => {
     const loading = data?.frag?.stats?.loading, duration = Number(data?.frag?.duration);
     if (currentHls() !== instance || !loading) return;
@@ -317,9 +328,10 @@ function watchHlsInstance(instance) {
     segmentStats = {loadMs: Number.isFinite(loadMs) && loadMs >= 0 ? Math.round(loadMs) : null, durationS: Number.isFinite(duration) ? Math.round(duration * 10) / 10 : null};
   });
 }
-// Real variants only (Auto + distinct heights). Single-variant HLS, native
-// Safari HLS and progressive files show no selector.
-function renderQuality(instance) {
+// Real variants only (Auto + distinct heights). A selector without effect is
+// never shown: one variant → fixed "Automatisch" note; native Safari HLS →
+// the browser chooses. No resolutions are invented.
+function renderQuality(instance, nativeHls = false) {
   const options = instance ? qualityOptions(instance.levels) : [];
   const select = $('quality');
   select.replaceChildren(...options.map(({value, label}) => {
@@ -328,23 +340,49 @@ function renderQuality(instance) {
   }));
   select.value = '-1';
   $('qualityWrap').hidden = options.length === 0;
+  const torbox = loadedStream?.name === 'TorBox HLS';
+  $('qualityNote').textContent = options.length ? ''
+    : instance ? (torbox ? 'Qualität: Automatisch – TorBox liefert eine Qualität.' : 'Qualität: Automatisch – die Quelle liefert eine Qualität.')
+    : nativeHls ? 'Qualität: Automatisch – vom Browser gewählt (natives HLS).' : '';
+  $('qualityNote').hidden = !$('qualityNote').textContent;
 }
 $('quality').addEventListener('change', () => {
   const instance = currentHls(), level = Number($('quality').value);
-  // loadLevel switches at the next fragment without flushing the buffer.
-  if (instance && qualityOptions(instance.levels).some(option => option.value === level)) instance.loadLevel = level;
+  // nextLevel replaces the buffered-ahead fragments, so a manual choice is
+  // visible within seconds (loadLevel could take a full 30 s buffer).
+  if (instance && qualityOptions(instance.levels).some(option => option.value === level)) instance.nextLevel = level;
 });
+const guestControl = () => guestControlEnabled && session?.canControl() === true;
+// Fixed labels for local diagnosis of why shared control is unavailable.
+function controlBlockedReason() {
+  const room = session?.room;
+  if (!guestControlEnabled) return 'disabled_in_build';
+  if (!room) return 'no_room';
+  if (room.info.host_member_id === room.memberId) return 'is_host';
+  if (room.info.host_only === true) return 'host_only';
+  if (room.info.host_only !== false) return 'host_only_missing';
+  if (!session.channel) return 'no_channel';
+  return 'allowed';
+}
 function renderControlInfo() {
-  const info = session?.room?.info;
+  const info = session?.room?.info, allowed = guestControl();
   $('controlInfo').textContent = !info ? 'Steuerung: nur der Host.'
-    : session.canControl() ? 'Steuerung: Gäste dürfen Play/Pause und Springen für alle auslösen (vom Host erlaubt). Jeder Befehl wird zuerst vom Backend bestätigt.'
+    : !guestControlEnabled ? 'Steuerung: Play/Pause und Springen steuert der Desktop-Host. Gemeinsame Browsersteuerung ist in dieser Version deaktiviert (Backend-Berechtigung nicht bestätigt). Lokale Bedienung trennt dich von der Party-Zeit.'
+    : allowed ? 'Steuerung (Test): Gäste dürfen die Party pausieren und fortsetzen. Jeder Befehl wird zuerst vom Backend bestätigt.'
     : info.host_only === false ? 'Steuerung: Gaststeuerung erlaubt, Realtime-Kanal aber noch nicht verbunden.'
     : 'Steuerung: nur der Host. Lokale Bedienung trennt dich von der Party-Zeit.';
+  const p = effectivePlayback(), ready = allowed && !!loadedStream && syncEnabled && !!p;
+  $('partyControls').hidden = !allowed;
+  $('partyPause').disabled = !ready || p.paused || !!pendingCommand;
+  $('partyResume').disabled = !ready || !p.paused || !!pendingCommand;
 }
+// Dedicated buttons: no dependency on native (mobile) video control gestures.
+$('partyPause').addEventListener('click', () => { if (sendControl(true, player.currentTime)) renderControlInfo(); });
+$('partyResume').addEventListener('click', () => { if (sendControl(false, player.currentTime)) renderControlInfo(); });
 // Local user gesture → shared command. Coalesced: one RPC in flight, the
 // latest gesture queued. Confirmed states arrive via acceptPlayback.
 function sendControl(paused, seconds) {
-  if (!session?.canControl()) return false;
+  if (!guestControl()) return false;
   const request = {paused, seconds};
   if (pendingCommand) { queuedCommand = request; return true; }
   let command;
@@ -365,7 +403,7 @@ function sendControl(paused, seconds) {
       : 'Steuerbefehl nicht gesendet: ' + friendlyError(error), true);
     renderControlInfo();
   }).finally(() => {
-    if (pendingCommand || !queuedCommand) { applySync(); return; }
+    if (pendingCommand || !queuedCommand) { applySync(); renderControlInfo(); return; }
     const next = queuedCommand; queuedCommand = null;
     sendControl(next.paused, next.seconds);
   });
@@ -383,7 +421,7 @@ function loadStream() {
   status('Quelle wird geladen. Erst nach erfolgreichem Laden ist die Synchronisierung verfügbar.');
   try {
     if (streamIsHls(stream)) {
-      if (player.canPlayType('application/vnd.apple.mpegurl') && !Object.keys(stream.headers || {}).length) player.src = stream.url;
+      if (player.canPlayType('application/vnd.apple.mpegurl') && !Object.keys(stream.headers || {}).length) { player.src = stream.url; renderQuality(null, true); }
       else if (Hls.isSupported()) {
         const instance = new Hls({...HLS_TUNING, debug: false, enableWorker: true, xhrSetup: xhr => {
           xhr.withCredentials = false;
@@ -518,7 +556,7 @@ for (const event of ['pause', 'seeking', 'ratechange']) player.addEventListener(
   if (event === 'ratechange') return;
   // Host allowed guest control: a real gesture becomes a shared command
   // instead of leaving the party. Programmatic pauses/seeks never reach here.
-  if (userControl && session?.canControl()) {
+  if (userControl && guestControl()) {
     if (event === 'pause') { sendControl(true, player.currentTime); return; }
     if (event === 'seeking') { userSeekPending = true; return; }
   }
@@ -545,7 +583,7 @@ player.addEventListener('play', () => {
   if (!syncEnabled || pendingPlay) return;
   const userControl = mediaPointerDown || performance.now() <= mediaGestureUntil;
   if (!userControl || !effectivePlayback()?.paused) return;
-  if (!sendControl(false, player.currentTime)) status('Nur der Host kann die Party starten. Die Party-Pause wird beibehalten.');
+  if (!sendControl(false, player.currentTime)) status('Die Party startet der Desktop-Host. Die Party-Pause wird beibehalten.');
 });
 // load() cancels old media tasks; their pause events may never be delivered.
 player.addEventListener('emptied', () => { expectedPauses = 0; });
@@ -591,12 +629,12 @@ function renderSyncDebug() {
     partyWaitsInWindow: number(stallTracker.waits.length), selfCatchUp: stallTracker.selfCatchUp === true,
     seekLeadSeconds: number(Math.round(seekLead.seconds * 100) / 100), rateNudging: nudging,
     playbackRate: number(player.playbackRate),
-    guestControl: session?.canControl?.() === true, commandPending: !!pendingCommand,
+    guestControl: guestControl(), controlBlockedReason: controlBlockedReason(), commandPending: !!pendingCommand,
     commandsSent: number(d.commands),
     lastCommandResult: choice(d.lastCommandResult, ['confirmed', 'stored_not_broadcast', 'host_only', 'not_confirmed', 'closed', 'rpc_failed']),
   }, null, 2);
 }
-setInterval(() => { applySync(); presence(); renderSyncDebug(); }, 1000);
+setInterval(() => { applySync(); presence(); renderControlInfo(); renderSyncDebug(); }, 1000);
 $('leaveButton').addEventListener('click', async () => { await session?.close(); showPanel('join'); status('Party verlassen.'); });
 $('logoutButton').addEventListener('click', async () => { await session?.close(); await client?.auth.signOut(); showPanel('auth'); status('Abgemeldet.'); });
 $('chatForm').addEventListener('submit', async e => {

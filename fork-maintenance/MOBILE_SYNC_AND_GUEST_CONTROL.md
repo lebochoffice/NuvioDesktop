@@ -1,6 +1,25 @@
 # Mobile-Synchronisierung und Browser-Steuerung
 
-Branch `feature/party-mobile-sync-control`, abgezweigt von `feature/torbox-hls-mvp` (`ca86fc4b`, PR #2 noch offen). Nur Browser-Code (`browser-site/`) geändert. Desktop-Originalstream, Kotlin-Code und `party.js` sind unverändert. Browser-Testsuite lokal ausgeführt (Node 24.19.0, `node --test`): 89/89 bestanden. Nicht ausgeführt: Vite-Build, Playwright-Smoke-Test, Live-Tests auf Smartphones bzw. Cloudflare-Preview.
+Branch `feature/party-mobile-sync-control`, abgezweigt von `feature/torbox-hls-mvp` (`ca86fc4b`, PR #2 noch offen). Nur Browser-Code (`browser-site/`) geändert. Desktop-Originalstream, Kotlin-Code und `party.js` sind unverändert. Stand `9ec3d8c5`: Browser-Testsuite lokal ausgeführt (Node 24.19.0, `node --test`), 89/89 bestanden. Die Release-Candidate-Änderungen danach (siehe nächster Abschnitt) wurden **nicht** erneut getestet.
+
+## Release-Candidate-Stand (Final Polish)
+
+**Gemeinsame Browsersteuerung ist für Production deaktiviert.** Im Praxistest funktionierte sie nicht, und die serverseitige Autorisierung von `watch_party_update` für Gäste lässt sich nicht bestätigen (SQL nicht im Repository, kein Live-Zugriff). Mögliche Ursachen, die der Code nicht unterscheiden kann:
+
+1. Der Snapshot liefert `host_only` nicht ausdrücklich als `false` (fehlendes Feld zählt als „nicht erlaubt“).
+2. Native Mobile-Videosteuerungen (iOS-Vollbild, Shadow-DOM-Controls) liefern keine erkennbaren Pointer-/Tastaturgesten am `<video>`; ohne erkannte Geste wird kein Befehl gesendet.
+3. `watch_party_update` speichert Gastbefehle nicht oder gibt einen anderen Zustand zurück; dann wird bewusst nichts verteilt (`lastCommandResult: not_confirmed`). Desktop-Gäste senden ihren Broadcast vor der Speicherung und funktionieren deshalb auch, wenn der Server Gastbefehle ignoriert. Der Browser tut das absichtlich nicht.
+4. Der Desktop übernimmt nur Zustände, die tatsächlich als `state` gesendet wurden.
+
+Umsetzung:
+
+- Build-Flag `VITE_PARTY_GUEST_CONTROL=1` (Standard: aus). Ohne Flag verhält sich der Browser wie in PR #2: Bedienung wirkt nur lokal, es gibt keine RPC und keinen Broadcast. Die Desktop-Steuerung ist unverändert.
+- Mit Flag (nur Cloudflare **Preview** zur Diagnose): eigene Buttons **Party pausieren** und **Party fortsetzen**, unabhängig von nativen Video-Gesten. Weiterhin gilt: nur serverbestätigte Befehle werden verteilt.
+- Die Diagnose zeigt `controlBlockedReason` (`disabled_in_build`, `no_room`, `is_host`, `host_only`, `host_only_missing`, `no_channel`, `allowed`) und `lastCommandResult`. Damit lassen sich die Punkte 1–3 in einer Preview eindeutig klären.
+- **Qualität:** Bei nur einer echten Variante gibt es keine Auswahl; stattdessen erscheint „Qualität: Automatisch – TorBox liefert eine Qualität.“ (bzw. „die Quelle“). Bei iOS-nativem HLS erscheint „vom Browser gewählt“. Bei mehreren Varianten erfolgt der Wechsel über `hls.nextLevel`; das ersetzt den Vorauspuffer, damit die Wahl nach wenigen Sekunden sichtbar wird. Die tatsächlich aktive Variante wird als „Aktiv: 1080p“ angezeigt (`LEVEL_SWITCHED`).
+- **Synchronisierung:** keine weitere Änderung. Hysterese, Wartebudget, Seek-Vorlauf und Seek-Sperre bleiben wie oben beschrieben; geringer Restversatz wird zugunsten ruckelfreier Wiedergabe akzeptiert.
+
+**Freigabekriterium für die Browsersteuerung:** Eine Preview mit Flag zeigt `controlBlockedReason: allowed`, `lastCommandResult: confirmed`, und der Desktop-Host folgt. **Zusätzlich** muss die Backend-Erweiterung unten (Punkte 1–3) bestätigt oder umgesetzt sein. Erst dann darf das Flag in Production gesetzt werden.
 
 ## Ursachen
 
@@ -96,5 +115,7 @@ Live mit MSI 0.1.36 und Cloudflare-Preview:
 6. iPhone Safari (natives HLS) und Android Chrome (hls.js) getrennt prüfen.
 
 ## Cloudflare und MSI
+
+`VITE_PARTY_GUEST_CONTROL` in Cloudflare **Production nicht setzen**; nur bei Bedarf in Preview auf `1`.
 
 Alle Änderungen betreffen **nur die Browser-Seite (Cloudflare Pages)**. **Kein neuer MSI erforderlich:** Desktop-Protokoll, Originalstream, Koordinator und `party.js` sind unverändert, und Desktop-Empfänger verarbeiten Gastbefehle bereits. Ein MSI wird erst für die optionale Server-Herkunftsprüfung (Backend-Erweiterung, Punkt 4) nötig.
