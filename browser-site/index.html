@@ -41,7 +41,8 @@
         </form>
         <p id="personalHlsStatus" class="muted" role="status" aria-live="polite">Die Eingabe wird nach dem Laden geleert und nicht dauerhaft gespeichert. Erst „Wiedergabe synchronisieren“ folgt der Party-Zeit.</p>
       </details>
-      <div class="row controls"><button id="loadStream" type="button" hidden>Freigegebenen Stream laden</button><button id="resync" type="button" class="secondary" disabled>Wiedergabe synchronisieren</button></div>
+      <div class="row controls"><button id="loadStream" type="button" hidden>Freigegebenen Stream laden</button><button id="resync" type="button" class="secondary" disabled>Wiedergabe synchronisieren</button><label id="qualityWrap" hidden>Qualität <select id="quality" aria-label="Videoqualität"></select></label></div>
+      <p id="controlInfo" class="muted">Steuerung: nur der Host.</p>
       <p id="streamInfo" class="muted">Nutze eine Desktop-Freigabe („Share my stream“) oder deine eigene zulässige HLS-Quelle (Beta). Die Quelle muss browserkompatibel sein.</p>
       <details><summary>Chat</summary><div id="chatLog" class="chat" aria-live="polite"></div><form id="chatForm" class="row"><input id="chatText" maxlength="500" placeholder="Nachricht" aria-label="Chatnachricht" required><button type="submit">Senden</button></form></details>
     </section>

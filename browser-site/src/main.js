@@ -1,9 +1,10 @@
 import {createClient} from '@supabase/supabase-js';
 import Hls from 'hls.js';
 import './style.css';
-import {normalizeCode, validCode, partyCodeFromPath, mediaKey, expectedPositionMs, streamProblem, streamIsHls, browserPartyStream, publicConfigProblem} from './protocol.js';
+import {normalizeCode, validCode, partyCodeFromPath, mediaKey, expectedPositionMs, isNewerPlayback, streamProblem, streamIsHls, browserPartyStream, publicConfigProblem} from './protocol.js';
 import {PartySession, callRpc} from './session.js';
 import {PersonalHlsSource, personalHlsUrlProblem} from './personal-hls.js';
+import {SYNC, HLS_TUNING, bufferedRanges, bufferAhead, correctionFor, seekTarget, SeekLead, StallTracker, qualityOptions} from './sync-policy.js';
 
 const $ = id => document.getElementById(id);
 const player = $('player');
@@ -26,14 +27,20 @@ let suppressUntil = 0, loading = false, buffering = false;
 let pendingChat = null;
 let pendingSeek = null, internalHlsSeek = null, pendingPlay = null;
 let waitingForTarget = false;
-let lastAlignedPlayback = null, bufferingSince = null;
+let lastAlignedPlayback = null;
 let presenceRoom = null, lastPresence = null;
+const stallTracker = new StallTracker(), seekLead = new SeekLead();
+let nudging = false, lastCorrectiveSeekAt = -Infinity, seekSettled = true, leadSeekStartedAt = null;
+let bufferingEvents = 0, segmentStats = {loadMs: null, durationS: null};
+// Guest control: optimistic command until the server confirms or rejects it.
+let pendingCommand = null, queuedCommand = null, userSeekPending = false;
 let expectedPauses = 0, mediaPointerDown = false, mediaGestureUntil = -1;
 let lastPlaybackError = 'none', debugOutput = null, debugEnabled = false;
 try { debugEnabled = sessionStorage.getItem('nuvio-party-debug') === '1'; } catch { /* Local opt-in unavailable. */ }
 let personalReadinessMessage = '';
 const personalHls = new PersonalHlsSource(Hls, player, {
   onInternalSeek: seconds => { internalHlsSeek = {seconds}; },
+  onInstance: instance => watchHlsInstance(instance),
   onPlaylist: playlist => {
     $('personalHlsStatus').textContent = playlist.message;
     updatePersonalHlsReadiness(true);
@@ -46,6 +53,7 @@ const session = client ? new PartySession(client, deviceId, {
     $('partyLabel').textContent = `PARTY ${room.info.code} · ${room.members.length} Mitglieder`;
     $('movieTitle').textContent = room.info.media?.episode_title || room.info.media?.title || 'Watch Party';
     $('movieInfo').textContent = `Host: ${room.members.find(m => m.id === room.info.host_member_id)?.display_name || 'Unbekannt'} · Bis zu ${room.info.max_members || 3} Personen`;
+    renderControlInfo();
     showPanel('watch');
   },
   connection: state => {
@@ -93,7 +101,7 @@ const session = client ? new PartySession(client, deviceId, {
     $('chatLog').scrollTop = $('chatLog').scrollHeight;
   },
   error: e => status(friendlyError(e), true),
-  closed: () => { resetVideo('Party-Verbindung geschlossen. Persönliche Quelle entfernt.'); $('chatLog').replaceChildren(); pendingChat = null; $('connection').textContent = 'Nicht verbunden'; },
+  closed: () => { resetVideo('Party-Verbindung geschlossen. Persönliche Quelle entfernt.'); $('chatLog').replaceChildren(); pendingChat = null; $('connection').textContent = 'Nicht verbunden'; renderControlInfo(); },
   ended: message => { resetVideo('Party beendet oder Mitgliedschaft verloren. Persönliche Quelle entfernt.'); showPanel('join'); status(message); },
 }) : null;
 
@@ -117,7 +125,8 @@ function pauseLocally() {
 function resetVideo(reason = 'Persönliche Quelle entfernt. Für diesen Film kann eine neue eigene Quelle geladen werden.') {
   pendingSeek = internalHlsSeek = pendingPlay = null;
   waitingForTarget = false;
-  lastAlignedPlayback = null; bufferingSince = null; lastPresence = null;
+  lastAlignedPlayback = null; lastPresence = null;
+  resetSyncState(); renderQuality(null);
   mediaPointerDown = false; mediaGestureUntil = -1; lastPlaybackError = 'none';
   personalHls.clear();
   personalReadinessMessage = '';
@@ -155,14 +164,14 @@ function updatePersonalHlsReadiness(announce = false) {
 function presence() {
   if (!session?.room) return;
   let state = 'browsing';
-  // Like Desktop, only report sustained media starvation. A play promise or a
-  // routine seek is not itself a reason for the coordinator to pause everyone.
-  if (buffering || waitingForTarget) bufferingSince ??= performance.now();
-  else bufferingSince = null;
-  const stalled = bufferingSince != null && performance.now() - bufferingSince >= 1000;
-  if (loadedStream) state = syncEnabled ? (stalled ? 'buffering' : 'ready') : 'behind';
+  // Only sustained starvation pauses the party (Desktop coordinator waits on
+  // "buffering"). Short mobile stalls stay local; hysteresis avoids flapping,
+  // and a guest that exhausted its wait budget catches up alone ("behind").
+  // A play promise or a routine seek is not itself a reason to pause everyone.
+  const stallState = stallTracker.update(performance.now(), !!loadedStream && syncEnabled && (buffering || waitingForTarget || loading));
+  if (loadedStream) state = syncEnabled ? stallState : 'behind';
   // Waiting for consent or an unsupported source must never stall the whole party.
-  if (loading) state = syncEnabled ? 'buffering' : 'browsing';
+  if (loading && !syncEnabled) state = 'browsing';
   const gap = session.playback ? Math.max(5000, expectedPositionMs(session.playback, session.now()) - player.currentTime * 1000) : 5000;
   const behind = state === 'behind' ? Math.round(gap / 5000) * 5000 : undefined;
   const signature = `${state}:${behind ?? ''}`;
@@ -173,8 +182,14 @@ function presence() {
     status('Status nicht gesendet. Party-Verbindung prüfen.', true);
   });
 }
+// The own command is followed optimistically until the server confirms it; a
+// newer accepted party state (other member, host) always wins.
+function effectivePlayback() {
+  const party = session?.playback, own = pendingCommand?.playback;
+  return own && isNewerPlayback(own, party) ? own : party;
+}
 function applySync(forcePlay = false) {
-  const p = session?.playback;
+  const p = effectivePlayback();
   if (!syncEnabled || !p || !loadedStream) return;
   // Host pause must not wait for metadata, seekability or buffer recovery.
   if (p.paused) { pendingPlay = null; if (!player.paused) pauseLocally(); }
@@ -197,15 +212,26 @@ function applySync(forcePlay = false) {
   // A missing seeked event must not impose a five-second delay if the native
   // seek is already complete. Keep the latest host command queued otherwise.
   if (pendingSeek && !player.seeking && (Math.abs(player.currentTime - pendingSeek.seconds) < .05 || performance.now() - pendingSeek.at > 5000)) pendingSeek = null;
-  const needsSeek = Math.abs(drift) > (p.paused ? .5 : 1.5);
+  const rate = p.rate ?? 1;
+  const correction = correctionFor({drift, paused: p.paused, nudging, rate});
+  const needsSeek = correction.kind === 'seek';
   // Queue the latest accepted command during a native seek. Once seeked fires,
   // apply it immediately, including when the old target was still buffering.
-  if (!pendingSeek && !player.seeking && (!buffering || lastAlignedPlayback !== p || forcePlay) && needsSeek) {
+  // For the same command, never re-seek while segments still load; after a
+  // corrective seek, wait until playback resumed or the cooldown elapsed.
+  const newCommand = lastAlignedPlayback !== p || forcePlay;
+  const recovered = seekSettled || performance.now() - lastCorrectiveSeekAt >= SYNC.seekCooldownMs;
+  if (!pendingSeek && !player.seeking && needsSeek && (newCommand || (!buffering && recovered))) {
     suppressUntil = performance.now() + 1000;
     try {
-      pendingSeek = {seconds: desired, at: performance.now()};
-      player.currentTime = desired;
+      // Unbuffered targets need a download while the party continues: land
+      // ahead by the measured recovery delay instead of chasing the host.
+      const target = seekTarget({desired, paused: p.paused, ranges: bufferedRanges(player.buffered), leadS: seekLead.seconds, duration: player.duration});
+      pendingSeek = {seconds: target.seconds, at: performance.now()};
+      player.currentTime = target.seconds;
       lastAlignedPlayback = p;
+      lastCorrectiveSeekAt = performance.now(); seekSettled = false;
+      leadSeekStartedAt = !target.buffered && !p.paused ? performance.now() : null;
     }
     catch {
       pendingSeek = null;
@@ -218,8 +244,11 @@ function applySync(forcePlay = false) {
     }
   }
   if (!needsSeek) lastAlignedPlayback = p;
-  const rate = p.rate ?? 1;
-  player.playbackRate = !p.paused && Math.abs(drift) > .25 && Math.abs(drift) <= 1.5 ? Math.max(.25, Math.min(4, rate * (drift > 0 ? .95 : 1.05))) : rate;
+  // Hysteresis like Desktop (start 250 ms, stop 80 ms): no per-tick rate
+  // flapping. No nudging while stalled or seeking; it cannot help there.
+  nudging = correction.kind === 'nudge' && !buffering && !pendingSeek && !player.seeking;
+  const nextRate = nudging ? correction.rate : rate;
+  if (player.playbackRate !== nextRate) player.playbackRate = nextRate;
   if (!p.paused && !pendingPlay && (forcePlay || player.paused)) {
     suppressUntil = performance.now() + 1000;
     const playbackSource = loadedStream;
@@ -254,7 +283,8 @@ function failVideo(message, errorCode = 'media_error') {
   lastPlaybackError = errorCode;
   pendingSeek = internalHlsSeek = pendingPlay = null;
   waitingForTarget = false;
-  bufferingSince = null; lastAlignedPlayback = null;
+  lastAlignedPlayback = null;
+  resetSyncState(); renderQuality(null);
   if (personalHls.active) $('personalHlsStatus').textContent = message;
   personalHls.dispose();
   if (hls) { hls.destroy(); hls = null; }
@@ -264,6 +294,82 @@ function failVideo(message, errorCode = 'media_error') {
   if (personalHls.active) $('noStream').textContent = 'Die persönliche HLS-Quelle konnte nicht verwendet werden. Details stehen oben.';
   $('loadStream').hidden = !selectedStream;
   presence(); status(message, true);
+}
+function resetSyncState() {
+  stallTracker.reset(); seekLead.reset();
+  nudging = false; lastCorrectiveSeekAt = -Infinity; seekSettled = true; leadSeekStartedAt = null;
+  bufferingEvents = 0; segmentStats = {loadMs: null, durationS: null};
+  pendingCommand = queuedCommand = null; userSeekPending = false;
+}
+// Playback resumed after a corrective seek: learn the real recovery delay.
+function mediaResumed() {
+  if (leadSeekStartedAt != null) { seekLead.observe(performance.now() - leadSeekStartedAt); leadSeekStartedAt = null; }
+  seekSettled = true;
+}
+const currentHls = () => hls || personalHls.instance;
+// Listens only for level lists and fragment timing; never reads URLs.
+function watchHlsInstance(instance) {
+  instance.on(Hls.Events.MANIFEST_PARSED, () => { if (currentHls() === instance) renderQuality(instance); });
+  instance.on(Hls.Events.FRAG_LOADED, (_event, data) => {
+    const loading = data?.frag?.stats?.loading, duration = Number(data?.frag?.duration);
+    if (currentHls() !== instance || !loading) return;
+    const loadMs = Number(loading.end) - Number(loading.start);
+    segmentStats = {loadMs: Number.isFinite(loadMs) && loadMs >= 0 ? Math.round(loadMs) : null, durationS: Number.isFinite(duration) ? Math.round(duration * 10) / 10 : null};
+  });
+}
+// Real variants only (Auto + distinct heights). Single-variant HLS, native
+// Safari HLS and progressive files show no selector.
+function renderQuality(instance) {
+  const options = instance ? qualityOptions(instance.levels) : [];
+  const select = $('quality');
+  select.replaceChildren(...options.map(({value, label}) => {
+    const option = document.createElement('option');
+    option.value = String(value); option.textContent = label; return option;
+  }));
+  select.value = '-1';
+  $('qualityWrap').hidden = options.length === 0;
+}
+$('quality').addEventListener('change', () => {
+  const instance = currentHls(), level = Number($('quality').value);
+  // loadLevel switches at the next fragment without flushing the buffer.
+  if (instance && qualityOptions(instance.levels).some(option => option.value === level)) instance.loadLevel = level;
+});
+function renderControlInfo() {
+  const info = session?.room?.info;
+  $('controlInfo').textContent = !info ? 'Steuerung: nur der Host.'
+    : session.canControl() ? 'Steuerung: Gäste dürfen Play/Pause und Springen für alle auslösen (vom Host erlaubt). Jeder Befehl wird zuerst vom Backend bestätigt.'
+    : info.host_only === false ? 'Steuerung: Gaststeuerung erlaubt, Realtime-Kanal aber noch nicht verbunden.'
+    : 'Steuerung: nur der Host. Lokale Bedienung trennt dich von der Party-Zeit.';
+}
+// Local user gesture → shared command. Coalesced: one RPC in flight, the
+// latest gesture queued. Confirmed states arrive via acceptPlayback.
+function sendControl(paused, seconds) {
+  if (!session?.canControl()) return false;
+  const request = {paused, seconds};
+  if (pendingCommand) { queuedCommand = request; return true; }
+  let command;
+  try { command = session.prepareControl({paused, positionMs: seconds * 1000}); }
+  catch { return false; }
+  pendingCommand = command;
+  applySync();
+  session.commitControl(command).then(() => {
+    if (pendingCommand !== command) return;
+    pendingCommand = null;
+    status(paused ? 'Pause für alle bestätigt.' : 'Wiedergabe für alle bestätigt.');
+  }, error => {
+    if (pendingCommand !== command) return;
+    pendingCommand = null; queuedCommand = null;
+    status(error?.code === 'host_only' ? 'Der Host hat die Gaststeuerung deaktiviert. Party-Zeit wird wieder übernommen.'
+      : error?.code === 'not_confirmed' ? 'Das Backend hat den Steuerbefehl nicht bestätigt. Party-Zeit wird beibehalten.'
+      : error?.code === 'closed' ? 'Party-Verbindung geschlossen.'
+      : 'Steuerbefehl nicht gesendet: ' + friendlyError(error), true);
+    renderControlInfo();
+  }).finally(() => {
+    if (pendingCommand || !queuedCommand) { applySync(); return; }
+    const next = queuedCommand; queuedCommand = null;
+    sendControl(next.paused, next.seconds);
+  });
+  return true;
 }
 function loadStream() {
   if (personalHls.active) return;
@@ -279,11 +385,12 @@ function loadStream() {
     if (streamIsHls(stream)) {
       if (player.canPlayType('application/vnd.apple.mpegurl') && !Object.keys(stream.headers || {}).length) player.src = stream.url;
       else if (Hls.isSupported()) {
-        const instance = new Hls({debug: false, enableWorker: true, xhrSetup: xhr => {
+        const instance = new Hls({...HLS_TUNING, debug: false, enableWorker: true, xhrSetup: xhr => {
           xhr.withCredentials = false;
           for (const [name, value] of Object.entries(stream.headers || {})) xhr.setRequestHeader(name, value);
         }});
         hls = instance;
+        watchHlsInstance(instance);
         instance.on(Hls.Events.ERROR, (_event, error) => {
           if (personalHls.active || hls !== instance || loadedStream !== stream) return;
           if (!error.fatal && ['bufferSeekOverHole', 'bufferNudgeOnStall'].includes(error.details)) internalHlsSeek = {seconds: player.currentTime};
@@ -409,18 +516,42 @@ for (const event of ['pause', 'seeking', 'ratechange']) player.addEventListener(
   else if (!userControl && !hlsPlayback && performance.now() <= suppressUntil) return;
   // Rate correction is applied by us on every sync tick.
   if (event === 'ratechange') return;
+  // Host allowed guest control: a real gesture becomes a shared command
+  // instead of leaving the party. Programmatic pauses/seeks never reach here.
+  if (userControl && session?.canControl()) {
+    if (event === 'pause') { sendControl(true, player.currentTime); return; }
+    if (event === 'seeking') { userSeekPending = true; return; }
+  }
   syncEnabled = false; $('resync').textContent = 'Wiedergabe synchronisieren';
   pendingPlay = null;
   pendingSeek = internalHlsSeek = null;
   mediaPointerDown = false; mediaGestureUntil = -1;
   status('Lokal pausiert oder gespult. Zum Anschluss an die Party erneut synchronisieren.'); presence();
 });
-player.addEventListener('seeked', () => { pendingSeek = internalHlsSeek = null; applySync(); presence(); });
+player.addEventListener('seeked', () => {
+  pendingSeek = internalHlsSeek = null;
+  // seeked = target position decodable; also the end of a seek's load delay.
+  if (!buffering) mediaResumed();
+  if (userSeekPending) {
+    userSeekPending = false;
+    const p = effectivePlayback();
+    if (syncEnabled && sendControl(p?.paused ?? player.paused, player.currentTime)) { presence(); return; }
+  }
+  applySync(); presence();
+});
+// Guest presses play while the party is paused: shared resume, if allowed.
+// Our own play() attempts (pendingPlay) are never echoed as commands.
+player.addEventListener('play', () => {
+  if (!syncEnabled || pendingPlay) return;
+  const userControl = mediaPointerDown || performance.now() <= mediaGestureUntil;
+  if (!userControl || !effectivePlayback()?.paused) return;
+  if (!sendControl(false, player.currentTime)) status('Nur der Host kann die Party starten. Die Party-Pause wird beibehalten.');
+});
 // load() cancels old media tasks; their pause events may never be delivered.
 player.addEventListener('emptied', () => { expectedPauses = 0; });
-player.addEventListener('waiting', () => { buffering = true; presence(); });
-player.addEventListener('playing', () => { buffering = false; applySync(); presence(); });
-player.addEventListener('canplay', () => { buffering = false; applySync(); presence(); });
+player.addEventListener('waiting', () => { if (!buffering) bufferingEvents++; buffering = true; presence(); });
+player.addEventListener('playing', () => { buffering = false; mediaResumed(); applySync(); presence(); });
+player.addEventListener('canplay', () => { buffering = false; mediaResumed(); applySync(); presence(); });
 player.addEventListener('error', () => { if (loadedStream && player.error) failVideo('Video nicht abspielbar: möglicher Codec-/Containerfehler, CORS, DRM, abgelaufener Link oder fehlende Zugriffsrechte. Der Browser nennt die Ursache häufig nicht genauer.'); });
 function renderSyncDebug() {
   if (!debugEnabled) return;
@@ -438,8 +569,9 @@ function renderSyncDebug() {
     realtime: choice(d.connection, ['SUBSCRIBED', 'CHANNEL_ERROR', 'TIMED_OUT', 'CLOSED', 'CONNECTING']),
     realtimeStateCount: number(d.realtimeStates), snapshotStateCount: number(d.snapshotStates),
     lastRealtimeStateAt: number(d.lastRealtimeAt), lastAcceptedAt: number(d.lastAcceptedAt),
-    acceptedSource: choice(d.acceptedSource, ['realtime', 'snapshot']),
-    lastEventSource: choice(d.lastSource, ['realtime', 'snapshot']),
+    acceptedSource: choice(d.acceptedSource, ['realtime', 'snapshot', 'command']),
+    lastEventSource: choice(d.lastSource, ['realtime', 'snapshot', 'command']),
+    realtimeLatencyMs: number(d.realtimeLatencyMs),
     lastDecision: choice(d.lastDecision, ['no_room', 'invalid_playback', 'wrong_media', 'not_host', 'not_newer', 'accepted']),
     lastCandidateSeq: number(d.candidateSeq), playbackSeq: number(p?.seq),
     hostPaused: typeof p?.paused === 'boolean' ? p.paused : null, hostWaiting: p?.waiting === true,
@@ -448,6 +580,20 @@ function renderSyncDebug() {
     syncActive: syncEnabled, buffering, waitingForTarget, seeking: player.seeking === true,
     browserPaused: player.paused === true, playPending: !!pendingPlay,
     lastPlaybackError: choice(lastPlaybackError, ['none', 'AbortError', 'NotAllowedError', 'NotSupportedError', 'play_failed', 'seek_failed', 'hls_error', 'media_error']),
+    // Media/network quality: numbers and fixed labels only, never URLs.
+    playbackMode: !loadedStream ? null : currentHls() ? 'hls.js' : streamIsHls(loadedStream) ? 'native-hls' : 'progressive',
+    videoWidth: number(player.videoWidth), videoHeight: number(player.videoHeight),
+    bandwidthKbps: currentHls() && Number.isFinite(currentHls().bandwidthEstimate) ? Math.round(currentHls().bandwidthEstimate / 1000) : null,
+    qualityVariants: currentHls() ? number(currentHls().levels?.length) : null,
+    bufferAheadSeconds: number(Math.round(bufferAhead(bufferedRanges(player.buffered), player.currentTime) * 10) / 10),
+    lastSegmentLoadMs: number(segmentStats.loadMs), lastSegmentDurationSeconds: number(segmentStats.durationS),
+    bufferingEvents: number(bufferingEvents), stallsSinceLoad: number(stallTracker.stalls),
+    partyWaitsInWindow: number(stallTracker.waits.length), selfCatchUp: stallTracker.selfCatchUp === true,
+    seekLeadSeconds: number(Math.round(seekLead.seconds * 100) / 100), rateNudging: nudging,
+    playbackRate: number(player.playbackRate),
+    guestControl: session?.canControl?.() === true, commandPending: !!pendingCommand,
+    commandsSent: number(d.commands),
+    lastCommandResult: choice(d.lastCommandResult, ['confirmed', 'stored_not_broadcast', 'host_only', 'not_confirmed', 'closed', 'rpc_failed']),
   }, null, 2);
 }
 setInterval(() => { applySync(); presence(); renderSyncDebug(); }, 1000);

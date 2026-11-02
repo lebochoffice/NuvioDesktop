@@ -1,4 +1,5 @@
 import {safeStreamUrl} from './protocol.js';
+import {HLS_TUNING} from './sync-policy.js';
 
 export function personalHlsUrlProblem(value) {
   if (typeof value !== 'string' || !value.trim() || value.length > 16384 || /[\u0000-\u0020\u007f]/.test(value.trim())) {
@@ -53,9 +54,9 @@ export function personalHlsErrorMessage(error) {
 // Private, in-memory media transport only. No PartySession, storage, telemetry
 // or console access. Callbacks expose fixed messages/playlist kind, never URLs.
 export class PersonalHlsSource {
-  constructor(Hls, player, {onPlaylist = () => {}, onError = () => {}, onInternalSeek = () => {}} = {}) {
+  constructor(Hls, player, {onPlaylist = () => {}, onError = () => {}, onInternalSeek = () => {}, onInstance = () => {}} = {}) {
     this.Hls = Hls; this.player = player; this.onPlaylist = onPlaylist; this.onError = onError;
-    this.onInternalSeek = onInternalSeek;
+    this.onInternalSeek = onInternalSeek; this.onInstance = onInstance;
     this.active = false; this.mediaKey = null; this.playlist = null; this.instance = null;
   }
   open(value, mediaKey) {
@@ -69,6 +70,7 @@ export class PersonalHlsSource {
         return '';
       }
       const instance = new this.Hls({
+        ...HLS_TUNING,
         debug: false,
         enableWorker: true,
         // Also applies to relative segments after hls.js resolves their URLs.
@@ -79,6 +81,8 @@ export class PersonalHlsSource {
         },
       });
       this.instance = instance;
+      // Quality/diagnostic listeners only; they receive the instance, no URL.
+      this.onInstance(instance);
       instance.on(this.Hls.Events.LEVEL_LOADED, (_event, data) => {
         if (this.instance !== instance) return;
         this.playlist = inspectHlsPlaylist(data?.details);

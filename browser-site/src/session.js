@@ -9,7 +9,9 @@ export async function callRpc(client, name, args = {}) {
 }
 
 // Uses only RPCs and channel events present in Nuvio Dev PartyApi/PartyChannel.
-// Browser controls remain local; guests do not publish playback or become coordinators.
+// Guests never become coordinators. With host_only=false they may issue the
+// same playback command as a Desktop guest, but only after watch_party_update
+// has stored it under the server's own authentication/membership checks.
 export class PartySession {
   constructor(client, deviceId, handlers = {}) {
     this.client = client; this.deviceId = deviceId; this.handlers = handlers;
@@ -21,7 +23,47 @@ export class PartySession {
     // Local, allowlisted telemetry only: never retain payloads, identities or URLs.
     this.diagnostics = {connection: 'CLOSED', realtimeStates: 0, snapshotStates: 0,
       lastRealtimeAt: null, lastAcceptedAt: null, acceptedSource: null,
-      lastSource: null, lastDecision: null, candidateSeq: null};
+      lastSource: null, lastDecision: null, candidateSeq: null, realtimeLatencyMs: null,
+      commands: 0, lastCommandResult: null};
+  }
+  // Authoritative DB snapshot only (join/heartbeat); never a broadcast claim.
+  canControl() {
+    const room = this.room;
+    return !!room && !!this.channel && room.info.host_only === false && !!room.info.host_member_id && room.info.host_member_id !== room.memberId;
+  }
+  prepareControl({paused, positionMs}) {
+    const room = this.room;
+    if (!this.canControl()) throw Object.assign(new Error('host_only'), {code: 'host_only'});
+    const base = this.playback;
+    const next = {seq: (base?.seq ?? 0) + 1, member_id: room.memberId, paused: paused === true,
+      position_ms: Math.max(0, Math.round(Number(positionMs) || 0)), rate: base?.rate ?? 1,
+      at: Math.round(this.now()), media_key: mediaKey(room.info.media), waiting: false};
+    if (!validPlayback(next) || !next.media_key) throw Object.assign(new Error('invalid_command'), {code: 'invalid_command'});
+    return {room, gen: this.generation, playback: next};
+  }
+  // Persist first; distribute only the state the server returned for exactly
+  // this member and sequence. No server confirmation means no broadcast.
+  async commitControl(command) {
+    const {room, gen, playback} = command;
+    const d = this.diagnostics;
+    d.commands++;
+    try {
+      if (gen !== this.generation || room !== this.room) throw Object.assign(new Error('closed'), {code: 'closed'});
+      const result = await this.rpc('watch_party_update', {p_party_id: room.info.id, p_device_id: this.deviceId, p_playback: playback});
+      if (gen !== this.generation || room !== this.room) throw Object.assign(new Error('closed'), {code: 'closed'});
+      const party = result?.party, stored = party?.playback;
+      if (party && party.host_only !== room.info.host_only) { room.info.host_only = party.host_only === true; this.emit('room', room); }
+      if (party?.host_only !== false) throw Object.assign(new Error('host_only'), {code: 'host_only'});
+      if (!stored || stored.seq !== playback.seq || stored.member_id !== room.memberId || stored.paused !== playback.paused ||
+          mediaKey(party.media) !== playback.media_key) throw Object.assign(new Error('not_confirmed'), {code: 'not_confirmed'});
+      this.acceptPlayback(stored, 'command');
+      const sent = await this.channel?.send({type: 'broadcast', event: 'state', payload: stored});
+      d.lastCommandResult = sent && sent !== 'ok' ? 'stored_not_broadcast' : 'confirmed';
+      return stored;
+    } catch (e) {
+      d.lastCommandResult = ['host_only', 'not_confirmed', 'closed'].includes(e?.code) ? e.code : 'rpc_failed';
+      throw e;
+    }
   }
   rpc(name, args) { return callRpc(this.client, name, args); }
   emit(name, value) { this.handlers[name]?.(value); }
@@ -90,9 +132,15 @@ export class PartySession {
     if (event === 'ended' || event === 'member_left') this.refresh();
   }
   acceptPlayback(next, source = 'snapshot') {
-    source = source === 'realtime' ? 'realtime' : 'snapshot';
+    source = ['realtime', 'command'].includes(source) ? source : 'snapshot';
     const d = this.diagnostics, receivedAt = Date.now();
-    if (source === 'realtime') { d.realtimeStates++; d.lastRealtimeAt = receivedAt; }
+    if (source === 'realtime') {
+      d.realtimeStates++; d.lastRealtimeAt = receivedAt;
+      // Publish-to-receive delay in server time; separates network latency
+      // from video buffering. Clock offset error is included.
+      const latency = this.now() - Number(next?.at);
+      d.realtimeLatencyMs = Number.isFinite(latency) && Math.abs(latency) < 60000 ? Math.round(latency) : null;
+    }
     else d.snapshotStates++;
     d.lastSource = source;
     d.candidateSeq = Number.isSafeInteger(next?.seq) ? next.seq : null;

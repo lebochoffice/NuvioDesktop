@@ -254,3 +254,66 @@ test('a newer snapshot remains a fallback; later stale realtime cannot roll it b
   assert.equal(f.session.playback.seq, 5); assert.equal(f.session.playback.paused, true);
   assert.equal(f.session.diagnostics.lastDecision, 'not_newer');
 });
+
+test('guest control requires an authoritative host_only=false snapshot, membership and a channel', async t => {
+  const f = fixture(); t.after(() => f.session.close());
+  assert.equal(f.session.canControl(), false); // No room.
+  await f.session.join('UXZ83H', 'Guest'); await f.connect();
+  assert.equal(f.session.canControl(), false); // Fixture snapshot: host_only=true.
+  f.session.room.info.host_only = false; assert.equal(f.session.canControl(), true);
+  f.session.room.info.host_only = true;
+  assert.equal(f.session.canControl(), false);
+  assert.throws(() => f.session.prepareControl({paused: true, positionMs: 1000}), e => e.code === 'host_only');
+  // A broadcast cannot grant control: only DB snapshots change host_only.
+  f.emit('control', {host_only: false});
+  assert.equal(f.session.room.info.host_only, true);
+  assert.ok(!f.calls.some(c => c[0] === 'watch_party_update'));
+});
+
+test('a guest command is persisted via watch_party_update first and broadcast only as the server-confirmed state', async t => {
+  const f = fixture(); t.after(() => f.session.close());
+  await f.session.join('UXZ83H', 'Guest'); await f.connect();
+  f.session.room.info.host_only = false;
+  const rpc = f.client.rpc;
+  f.client.rpc = async (name, args) => name === 'watch_party_update'
+    ? (f.calls.push([name, args]), {data: {party: {...snapshot().party, host_only: false, playback: {...args.p_playback, at: 5000}}}})
+    : rpc(name, args);
+  const command = f.session.prepareControl({paused: true, positionMs: 61234.4});
+  assert.deepEqual([command.playback.seq, command.playback.member_id, command.playback.position_ms, command.playback.waiting], [3, 'guest', 61234, false]);
+  const before = f.messages.length;
+  const stored = await f.session.commitControl(command);
+  const update = f.calls.find(c => c[0] === 'watch_party_update');
+  assert.equal(update[1].p_party_id, 'room-1'); assert.equal(update[1].p_device_id, 'device');
+  assert.equal(update[1].p_playback.media_key, 'movie|tt1||');
+  const broadcast = f.messages.slice(before).find(m => m.event === 'state');
+  assert.equal(broadcast.payload, stored); assert.equal(broadcast.payload.at, 5000); // Server-normalised value, not ours.
+  assert.equal(f.session.playback, stored); assert.equal(f.session.diagnostics.acceptedSource, 'command');
+});
+
+test('rejected, stale or foreign server results are never broadcast', async t => {
+  for (const reply of [
+    args => ({error: 'forbidden'}),
+    args => ({party: {...snapshot().party, host_only: false, playback: null}}), // No stored playback.
+    args => ({party: {...snapshot().party, host_only: false, playback: {...args.p_playback, member_id: 'host'}}}),
+    args => ({party: {...snapshot().party, host_only: false, playback: {...args.p_playback, seq: 99}}}),
+    args => ({party: {...snapshot().party, host_only: false, media: {meta_type: 'movie', meta_id: 'tt2'}, playback: args.p_playback}}),
+  ]) {
+    const f = fixture(); t.after(() => f.session.close());
+    await f.session.join('UXZ83H', 'Guest'); await f.connect();
+    f.session.room.info.host_only = false;
+    const rpc = f.client.rpc;
+    f.client.rpc = async (name, args) => name === 'watch_party_update' ? {data: reply(args)} : rpc(name, args);
+    const before = f.messages.length;
+    await assert.rejects(f.session.commitControl(f.session.prepareControl({paused: true, positionMs: 0})));
+    assert.ok(!f.messages.slice(before).some(m => m.event === 'state'));
+    assert.equal(f.session.playback.seq, 2);
+  }
+});
+
+test('realtime latency is measured in server time and bounded', async t => {
+  const f = fixture(); t.after(() => f.session.close());
+  await f.session.join('UXZ83H', 'Guest'); await f.connect();
+  f.session.now = () => 10400;
+  f.emit('state', {...playback, seq: 3, at: 10000}); assert.equal(f.session.diagnostics.realtimeLatencyMs, 400);
+  f.emit('state', {...playback, seq: 4, at: -1e9}); assert.equal(f.session.diagnostics.realtimeLatencyMs, null);
+});
