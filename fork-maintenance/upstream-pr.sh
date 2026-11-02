@@ -32,17 +32,61 @@ fi
 body="$(mktemp)"
 trap 'rm -f "$body"' EXIT
 cat > "$body" <<EOF
-This draft proposes the official NuvioDesktop Dev tip for this personal fork.
+## Summary
+
+Propose the official NuvioDesktop Dev tip for this personal fork. Implementation changes are unapproved until reviewed.
+
+## PR type
+
+- [x] Proposed upstream update for human review
+
+## Why
+
+Keep the personal fork current while preserving its own Watch in Browser integration.
+
+## Desktop scope
+
+Desktop upstream commits; inspect the complete diff for platform/shared-code effects.
+
+## Issue or approval
+
+The owner requested update proposals, not automatic approval of their contents. No approval or merge is implied.
+
+## UI / behavior impact
+
+- [x] Impact remains subject to human review of the upstream diff
+
+## Policy check
+
+- [x] This automation only proposes changes inside the personal fork.
+- [x] No merge, approval, deployment, tag or release was performed.
+
+## Scope boundaries
 
 Upstream: https://github.com/NuvioMedia/NuvioDesktop/commit/$tip
 Fork base when proposed: $base
 
 Review the diff, resolve any conflicts, and retain Watch in Browser, browser-site,
-fork-maintenance, and the fork-only workflows. No merge, approval, deployment,
-tag, or release is performed by this automation. This PR remains for a human.
+fork-maintenance, and the fork-only workflows. This PR remains for a human.
+
+## Testing
+
+No application test is claimed by the update proposal. Review the separate Fork - Windows MSI PR checks.
 
 After your review and manual merge into Dev, run **Fork - Windows MSI** manually
 on Dev to build a downloadable artifact. This draft does not authorize a release.
+
+## Screenshots / Video
+
+No upstream UI verification is claimed. Inspect UI-affecting changes before accepting this proposal.
+
+## Breaking changes
+
+Unknown until reviewed; inspect upstream migrations, build settings and protocol changes.
+
+## Linked issues
+
+No issue is created automatically. Consult the linked upstream commit and its referenced PRs.
 EOF
 gh pr create --repo "$GITHUB_REPOSITORY" --base Dev --head "$branch" --draft \
   --title 'Review Nuvio Desktop Dev updates' --body-file "$body"
