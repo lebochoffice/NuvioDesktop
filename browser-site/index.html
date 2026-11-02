@@ -2,53 +2,118 @@
 <html lang="de">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#08090c">
   <meta name="referrer" content="no-referrer">
-  <title>Nuvio Watch Party – Browser Bridge (Prototyp)</title>
+  <title>Nuvio Watch Party</title>
 </head>
 <body>
-  <main class="shell">
-    <header class="top"><div><div class="eyebrow">INOFFIZIELLER PROTOTYP</div><h1>Nuvio <em>Watch Party</em></h1></div><span id="connection" class="state">Nicht verbunden</span></header>
-    <p id="message" class="message" role="status" aria-live="polite">Öffne eine Party-Einladung und melde dich mit deinem Nuvio-Konto an.</p>
+  <header class="brandbar">
+    <a class="brand" href="/" aria-label="Nuvio Watch Party – Startseite"><span class="brand-mark" aria-hidden="true"></span><span>nuvio</span><span class="brand-sub">Watch Party</span></a>
+    <span id="connection" class="pill" role="status">Nicht verbunden</span>
+  </header>
 
-    <section id="authSection" class="panel">
-      <h2>Bei Nuvio anmelden</h2>
-      <p class="muted">Melde dich nur auf einer Browser-Seite an, deren Betreiber du vertraust. Die Anmeldung geht direkt an das konfigurierte Backend. Der Seitencode verarbeitet dein Passwort; deine Sitzung wird in diesem Browser gespeichert.</p>
-      <form id="loginForm"><label>E-Mail<input required autocomplete="email" id="email" type="email" placeholder="name@example.com"></label>
-        <label>Passwort<input required autocomplete="current-password" id="password" type="password"></label>
-        <button id="loginButton" type="submit">Anmelden</button></form>
+  <main class="app">
+    <p id="message" class="toast" role="status" aria-live="polite">Gib deinen Namen ein und klicke auf „Jetzt ansehen“.</p>
+
+    <!-- Einladung: sichtbar vor dem Beitritt (Anmeldung oder Name). -->
+    <section id="inviteView" class="invite">
+      <h1 id="inviteHeadline" class="invite-headline">Du bist zu einer Watch Party eingeladen.</h1>
+      <article class="invite-card" aria-labelledby="inviteTitle">
+        <div class="invite-media">
+          <img id="inviteBackdrop" class="invite-backdrop" alt="" hidden>
+          <div class="invite-fallback" aria-hidden="true"></div>
+          <div class="invite-shade" aria-hidden="true"></div>
+          <button id="invitePlay" class="play-orb" type="button" aria-label="Jetzt ansehen"><span aria-hidden="true"></span></button>
+          <div class="invite-titles">
+            <img id="inviteLogo" class="invite-logo" alt="" hidden>
+            <h2 id="inviteTitle" class="invite-title">Watch Party</h2>
+            <p id="inviteEpisode" class="invite-episode" hidden></p>
+          </div>
+        </div>
+        <div class="invite-body">
+          <p id="inviteDescription" class="invite-description" hidden></p>
+          <div class="invite-facts">
+            <div><span class="label">Host</span><span class="host"><span id="inviteHostAvatar" class="avatar" aria-hidden="true">?</span><span id="inviteHost">–</span></span></div>
+            <div><span class="label">Plätze</span><span class="seats"><span id="inviteSeatDots" class="seat-dots" aria-hidden="true"></span><span id="inviteSeats">–</span></span></div>
+          </div>
+          <p id="preview" class="muted small" role="status"></p>
+
+          <div id="authSection" class="step">
+            <p class="step-title">Einmal anmelden, danach nur noch Name und Play</p>
+            <p class="muted small">Die Party verlangt ein Nuvio-Konto. Die Anmeldung geht direkt an das Nuvio-Backend und bleibt in diesem Browser gespeichert.</p>
+            <form id="loginForm" class="stack"><label class="field"><span>E-Mail</span><input required autocomplete="email" id="email" type="email" placeholder="name@example.com"></label>
+              <label class="field"><span>Passwort</span><input required autocomplete="current-password" id="password" type="password"></label>
+              <button id="loginButton" class="btn primary" type="submit">Anmelden</button></form>
+          </div>
+
+          <div id="joinSection" class="step" hidden>
+            <form id="joinForm" class="stack">
+              <label class="field"><span>Dein Name</span><input required id="displayName" maxlength="36" autocomplete="nickname" enterkeyhint="go" placeholder="z. B. Sam"></label>
+              <button type="submit" id="joinButton" class="btn primary large">Jetzt ansehen</button>
+              <div class="code-row">
+                <label class="code-field"><span class="label">Party-Code</span><input required id="partyCode" maxlength="7" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="UXZ83H"></label>
+                <button type="button" id="copyLink" class="btn ghost">Link kopieren</button>
+              </div>
+              <details class="advanced"><summary>Erweitert</summary><label class="field"><span>Nuvio-Profilindex (optional)</span><input id="profileIndex" type="number" min="0" max="20" placeholder="z. B. 0"></label></details>
+            </form>
+            <p class="foot-links"><a id="openInNuvio" href="https://nuvio.tv" rel="noopener noreferrer" target="_blank">In Nuvio öffnen</a><button type="button" id="logoutButton" class="linklike">Abmelden</button></p>
+          </div>
+        </div>
+      </article>
     </section>
 
-    <section id="joinSection" class="panel" hidden>
-      <div class="row"><h2>Party beitreten</h2><button type="button" id="logoutButton" class="secondary small">Abmelden</button></div>
-      <form id="joinForm"><label>Party-Code<input required id="partyCode" maxlength="7" autocomplete="off" placeholder="UXZ83H"></label>
-        <label>Anzeigename<input required id="displayName" maxlength="36" value="Browser-Gast"></label>
-        <details><summary>Erweitert: Nuvio-Profilindex</summary><label>Profilindex (optional)<input id="profileIndex" type="number" min="0" max="20" placeholder="z. B. 0"></label><p class="muted">Falls dein Backend für die Party einen bestimmten Profilindex verlangt.</p></details>
-        <button type="submit" id="joinButton">Party beitreten</button></form>
-      <div id="preview" class="muted"></div>
-    </section>
+    <!-- Player: nach dem Beitritt. -->
+    <section id="watchSection" class="watch" hidden>
+      <div class="stage">
+        <div id="playerWrap" class="player-wrap" tabindex="-1">
+          <video id="player" controls playsinline preload="metadata" crossorigin="anonymous"></video>
+          <div class="player-top">
+            <span id="partyLabel" class="eyebrow">WATCH PARTY</span>
+            <h2 id="movieTitle" class="player-title">Film</h2>
+          </div>
+          <div id="noStream" class="player-state">Warte auf eine freigegebene Streamquelle des Hosts …</div>
+          <button id="loadStream" type="button" class="play-orb center" aria-label="Abspielen" hidden><span aria-hidden="true"></span></button>
+          <div id="controlsBar" class="controls-bar">
+            <input id="ctlSeek" class="seek" type="range" min="0" max="1000" step="1" value="0" aria-label="Wiedergabeposition">
+            <div class="controls-row">
+              <button id="ctlPlay" class="icon-btn" type="button" aria-label="Abspielen"><span class="i-play" aria-hidden="true"></span></button>
+              <button id="ctlMute" class="icon-btn" type="button" aria-label="Ton aus"><span class="i-volume" aria-hidden="true"></span></button>
+              <input id="ctlVolume" class="volume" type="range" min="0" max="1" step="0.05" value="1" aria-label="Lautstärke">
+              <span id="ctlTime" class="time">0:00 / 0:00</span>
+              <span class="spacer"></span>
+              <span id="syncChip" class="sync-chip" hidden>Synchron</span>
+              <button id="resync" type="button" class="btn chip" disabled>Wiedergabe synchronisieren</button>
+              <label id="qualityWrap" class="quality" hidden><span class="sr-only">Qualität</span><select id="quality" aria-label="Videoqualität"></select></label>
+              <button id="ctlPanel" class="icon-btn" type="button" aria-label="Party-Bereich ein- oder ausblenden" aria-expanded="true"><span class="i-panel" aria-hidden="true"></span></button>
+              <button id="ctlFullscreen" class="icon-btn" type="button" aria-label="Vollbild"><span class="i-fullscreen" aria-hidden="true"></span></button>
+            </div>
+          </div>
+        </div>
+      </div>
 
-    <section id="watchSection" class="panel" hidden>
-      <div class="row"><div><span class="eyebrow" id="partyLabel">WATCH PARTY</span><h2 id="movieTitle">Film</h2><p class="muted" id="movieInfo"></p></div><button id="leaveButton" type="button" class="secondary small">Verlassen</button></div>
-      <div class="playerWrap"><video id="player" controls playsinline preload="metadata" crossorigin="anonymous"></video><div id="noStream" class="waiting">Warte auf eine freigegebene Streamquelle des Hosts …</div></div>
-      <details id="personalHlsPanel">
-        <summary>Eigene HLS-URL (Beta)</summary>
-        <p class="muted">Verwende deinen eigenen zulässigen Zugang und dieselbe vollständige Filmfassung wie der Desktop-Host. Die URL bleibt nur vorübergehend in diesem Browser und wird nicht an die Party gesendet. Nur abgeschlossene VOD-Playlists werden synchronisiert.</p>
-        <form id="personalHlsForm" autocomplete="off">
-          <label>Persönliche HTTPS-HLS-Playlist<input id="personalHlsUrl" type="url" inputmode="url" autocomplete="off" spellcheck="false" maxlength="16384" placeholder="https://…" aria-describedby="personalHlsStatus" required></label>
-          <div class="row controls"><button id="loadPersonalHls" type="submit">Eigene HLS-Quelle laden</button><button id="useDesktopStream" type="button" class="secondary" hidden>Zur Desktop-Freigabe zurück</button></div>
-        </form>
-        <p id="personalHlsStatus" class="muted" role="status" aria-live="polite">Die Eingabe wird nach dem Laden geleert und nicht dauerhaft gespeichert. Erst „Wiedergabe synchronisieren“ folgt der Party-Zeit.</p>
-      </details>
-      <div class="row controls"><button id="loadStream" type="button" hidden>Freigegebenen Stream laden</button><button id="resync" type="button" class="secondary" disabled>Wiedergabe synchronisieren</button><label id="qualityWrap" hidden>Qualität <select id="quality" aria-label="Videoqualität"></select></label></div>
-      <p id="qualityNote" class="muted" hidden></p>
-      <div id="partyControls" class="row controls" hidden><button id="partyPause" type="button" class="secondary" disabled>Party pausieren</button><button id="partyResume" type="button" class="secondary" disabled>Party fortsetzen</button></div>
-      <p id="controlInfo" class="muted">Steuerung: nur der Host.</p>
-      <p id="streamInfo" class="muted">Nutze eine Desktop-Freigabe („Share my stream“) oder deine eigene zulässige HLS-Quelle (Beta). Die Quelle muss browserkompatibel sein.</p>
-      <details><summary>Chat</summary><div id="chatLog" class="chat" aria-live="polite"></div><form id="chatForm" class="row"><input id="chatText" maxlength="500" placeholder="Nachricht" aria-label="Chatnachricht" required><button type="submit">Senden</button></form></details>
+      <aside id="sidePanel" class="side" aria-label="Party">
+        <div class="side-head">
+          <div><p id="movieInfo" class="muted small"></p><p id="controlInfo" class="muted small">Steuerung: nur der Host.</p></div>
+          <button id="leaveButton" type="button" class="btn ghost small">Verlassen</button>
+        </div>
+        <p id="streamInfo" class="muted small">Nutze eine Desktop-Freigabe („Share my stream“) oder deine eigene zulässige HLS-Quelle (Beta). Die Quelle muss browserkompatibel sein.</p>
+        <p id="qualityNote" class="muted small" hidden></p>
+        <section class="side-block"><h3>Teilnehmer</h3><ul id="memberList" class="members"></ul></section>
+        <details class="side-block"><summary>Chat</summary><div id="chatLog" class="chat" aria-live="polite"></div><form id="chatForm" class="chat-form"><input id="chatText" maxlength="500" placeholder="Nachricht schreiben …" aria-label="Chatnachricht" required><button type="submit" class="btn primary small">Senden</button></form></details>
+        <details id="personalHlsPanel" class="side-block">
+          <summary>Eigene HLS-URL (Beta)</summary>
+          <p class="muted small">Verwende deinen eigenen zulässigen Zugang und dieselbe vollständige Filmfassung wie der Desktop-Host. Die URL bleibt nur vorübergehend in diesem Browser und wird nicht an die Party gesendet. Nur abgeschlossene VOD-Playlists werden synchronisiert.</p>
+          <form id="personalHlsForm" class="stack" autocomplete="off">
+            <label class="field"><span>Persönliche HTTPS-HLS-Playlist</span><input id="personalHlsUrl" type="url" inputmode="url" autocomplete="off" spellcheck="false" maxlength="16384" placeholder="https://…" aria-describedby="personalHlsStatus" required></label>
+            <div class="button-row"><button id="loadPersonalHls" class="btn primary small" type="submit">Eigene HLS-Quelle laden</button><button id="useDesktopStream" type="button" class="btn ghost small" hidden>Zur Desktop-Freigabe zurück</button></div>
+          </form>
+          <p id="personalHlsStatus" class="muted small" role="status" aria-live="polite">Die Eingabe wird nach dem Laden geleert und nicht dauerhaft gespeichert. Erst „Wiedergabe synchronisieren“ folgt der Party-Zeit.</p>
+        </details>
+      </aside>
     </section>
-    <footer>Nur für Inhalte, zu deren Wiedergabe und Freigabe du berechtigt bist. Keine Umgehung von DRM oder Streaming-Anbieter-Schutz. Debrid-Links und Tokens können beim Teilen offengelegt werden.</footer>
+    <footer class="legal">Nur für Inhalte, zu deren Wiedergabe und Freigabe du berechtigt bist. Keine Umgehung von DRM oder Streaming-Anbieter-Schutz. Debrid-Links und Tokens können beim Teilen offengelegt werden.</footer>
   </main>
   <script type="module" src="/src/main.js"></script>
 </body>

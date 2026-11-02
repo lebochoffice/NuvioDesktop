@@ -34,7 +34,7 @@ class FakeHls {
   destroy() { this.destroyed = true; this.source = null; }
   emit(event, data) { this.listeners.get(event)?.(event, data); }
 }
-async function harness({debug = false, guestControl = false} = {}) {
+async function harness({debug = false, guestControl = false, guestJoin = false, rpc = null} = {}) {
   const elements = new Map(), storageWrites = [], sent = [];
   let clock = 0, tick = () => {};
   const get = id => { if (!elements.has(id)) elements.set(id, new Element()); return elements.get(id); };
@@ -53,12 +53,14 @@ async function harness({debug = false, guestControl = false} = {}) {
     sendPresence(...args) { sent.push(args); return Promise.resolve(); }
     requestState() { return Promise.resolve(); }
   }
-  const client = {auth: {onAuthStateChange() {}, getSession: async () => ({data: {session: null}})}};
+  const anonymousSignIns = [];
+  const client = {auth: {onAuthStateChange() {}, getSession: async () => ({data: {session: null}}),
+    signInAnonymously: async () => { anonymousSignIns.push(1); return rpc?.anonymousError ? {error: {message: 'Anonymous sign-ins are disabled'}} : {data: {}}; }}};
   const windowEvents = new Map();
   const context = vm.createContext({
     ...protocol, ...syncPolicy, PersonalHlsSource, personalHlsUrlProblem, Hls: FakeHls, PartySession: FakeSession,
-    createClient: () => client, callRpc: () => {throw Error('Unexpected RPC');},
-    env: {VITE_SUPABASE_URL: 'https://backend.example.test', VITE_SUPABASE_ANON_KEY: 'sb_publishable_TEST', ...(guestControl ? {VITE_PARTY_GUEST_CONTROL: '1'} : {})},
+    createClient: () => client, callRpc: (_client, name, args) => { if (rpc?.[name]) return rpc[name](args); throw Error('Unexpected RPC'); }, URL,
+    env: {VITE_SUPABASE_URL: 'https://backend.example.test', VITE_SUPABASE_ANON_KEY: 'sb_publishable_TEST', ...(guestControl ? {VITE_PARTY_GUEST_CONTROL: '1'} : {}), ...(guestJoin ? {VITE_PARTY_GUEST_JOIN: '1'} : {})},
     document: {getElementById: get, createElement: () => new Element()}, location: {pathname: '/'},
     window: {addEventListener: (event, callback) => windowEvents.set(event, callback)},
     sessionStorage: {getItem: key => key === 'nuvio-party-debug' ? (debug ? '1' : null) : 'test-device', setItem: (...args) => storageWrites.push(args)},
@@ -74,7 +76,7 @@ async function harness({debug = false, guestControl = false} = {}) {
   const source = () => vm.runInContext('personalHls', context);
   const enter = () => { get('personalHlsUrl').value = privateUrl; get('personalHlsForm').fire('submit'); };
   const metadata = () => { player.readyState = 1; player.duration = 120; player.currentSrc = 'blob:local-test'; player.fire('loadedmetadata'); };
-  return {get, player, session, source, enter, metadata, sent, storageWrites, windowEvents,
+  return {get, player, session, source, enter, metadata, sent, storageWrites, windowEvents, anonymousSignIns,
     tick: () => tick(),
     advance: ms => { clock += ms; }, sync: () => vm.runInContext('syncEnabled', context),
     desktopHls: () => vm.runInContext('hls', context)};
@@ -610,10 +612,11 @@ test('TorBox single-variant HLS shows a fixed automatic-quality note instead of 
 test('production default: shared browser control is disabled even with host_only=false; Desktop control unaffected', async () => {
   const h = await playingGuest({debug: true}), c = controllable(h);
   h.session.handlers.room(h.session.room); h.tick();
-  assert.equal(h.get('partyControls').hidden, true);
   assert.match(h.get('controlInfo').textContent, /deaktiviert/);
-  h.player.fire('pointerdown'); h.player.paused = true; h.player.fire('pause'); await settlePlayback();
+  assert.equal(h.get('syncChip').textContent, 'Synchron');
+  h.get('ctlPlay').fire('click'); await settlePlayback(); // Player's own pause button.
   assert.equal(c.rpcs.length, 0); assert.equal(c.sends.length, 0); assert.equal(h.sync(), false); // Local only, as in PR #2.
+  assert.equal(h.get('syncChip').textContent, 'Nicht synchron');
   const data = JSON.parse(h.get('watchSection').children.at(-1).children.at(-1).textContent);
   assert.equal(data.guestControl, false); assert.equal(data.controlBlockedReason, 'disabled_in_build');
   // Host commands still apply.
@@ -621,18 +624,20 @@ test('production default: shared browser control is disabled even with host_only
   assert.equal(h.player.paused, true);
 });
 
-test('opt-in test build: dedicated pause/resume buttons send server-confirmed commands without video gestures', async () => {
+test('opt-in test build: the player controls (play, pause, seek bar) send server-confirmed commands; no separate party buttons', async () => {
   const h = await playingGuest({guestControl: true, debug: true}), c = controllable(h);
   h.tick();
-  assert.equal(h.get('partyControls').hidden, false);
-  assert.equal(h.get('partyPause').disabled, false); assert.equal(h.get('partyResume').disabled, true);
-  h.get('partyPause').fire('click'); await settlePlayback();
+  h.get('ctlPlay').fire('click'); await settlePlayback();
   assert.equal(c.rpcs[0][1].p_playback.paused, true); assert.equal(c.sends[0].payload.paused, true);
-  assert.equal(h.player.paused, true); assert.equal(h.get('partyResume').disabled, false);
-  h.get('partyResume').fire('click'); await settlePlayback();
+  assert.equal(h.player.paused, true); assert.equal(h.sync(), true);
+  h.player.play = function () { this.paused = false; this.fire('play'); return Promise.resolve(); };
+  h.get('ctlPlay').fire('click'); await settlePlayback();
   assert.equal(c.rpcs[1][1].p_playback.paused, false); assert.equal(h.player.paused, false);
+  h.get('ctlSeek').value = '500'; h.get('ctlSeek').fire('change');
+  assert.equal(h.player.currentTime, 60);
+  h.player.fire('seeking'); h.player.fire('seeked'); await settlePlayback();
+  assert.deepEqual([c.rpcs[2][1].p_playback.position_ms, c.rpcs[2][1].p_playback.paused], [60000, false]);
   delete h.session.room.info.host_only; h.tick(); // A snapshot without the field never grants control.
-  assert.equal(h.get('partyControls').hidden, true);
   assert.equal(JSON.parse(h.get('watchSection').children.at(-1).children.at(-1).textContent).controlBlockedReason, 'host_only_missing');
 });
 
@@ -649,4 +654,112 @@ test('diagnostics add resolution, bandwidth, buffer, segment timing and realtime
   assert.deepEqual([data.playbackMode, data.videoWidth, data.videoHeight, data.bandwidthKbps, data.qualityVariants], ['hls.js', 1920, 1080, 4200, 2]);
   assert.deepEqual([data.bufferAheadSeconds, data.lastSegmentLoadMs, data.lastSegmentDurationSeconds, data.realtimeLatencyMs, data.bufferingEvents], [12.5, 1200, 6, 250, 1]);
   assert.ok(!text.includes('https://') && !text.includes('INTEGRATION_PRIVATE_SENTINEL'));
+});
+
+// --- Premium invite, guest join and player UI (feature/party-premium-ui) ---
+
+const preview = (overrides = {}) => ({
+  media: {title: 'Snowfall', meta_type: 'series', season: 2, episode: 10, episode_title: 'Lehrgeld',
+    description: '<img src=x onerror=alert(1)>', background: 'javascript:alert(1)', logo: 'https://img.example.test/logo.png',
+    source: {filename: 'secret-release.mkv', info_hash: 'abcdef'}},
+  host: {display_name: 'Alan', avatar_color: '#123456'}, members: 2, max_members: 8, ...overrides});
+async function invite(reply) {
+  const h = await harness({rpc: {watch_party_preview: args => { if (reply instanceof Error) throw reply; return reply(args); }}});
+  h.get('partyCode').value = '8sz-4cm'; h.get('partyCode').fire('change'); await settlePlayback();
+  return h;
+}
+const allText = element => [element.textContent || '', ...(element.children || []).map(allText)].join(' ');
+
+test('invite renders party metadata safely, rejects unsafe images and never shows the stream source', async () => {
+  let asked;
+  const h = await invite(args => { asked = args; return preview(); });
+  assert.deepEqual(asked, {p_code: '8SZ4CM'});
+  assert.equal(h.get('inviteHeadline').textContent, 'Alan lädt dich zu Snowfall ein.');
+  assert.equal(h.get('inviteEpisode').textContent, 'S2 E10 · Lehrgeld'); assert.equal(h.get('inviteEpisode').hidden, false);
+  assert.equal(h.get('inviteDescription').textContent, '<img src=x onerror=alert(1)>'); // Plain text, never HTML.
+  assert.equal(h.get('inviteBackdrop').hidden, true); // javascript: URL rejected.
+  assert.equal(h.get('inviteLogo').hidden, false); assert.equal(h.get('inviteLogo').src, 'https://img.example.test/logo.png');
+  assert.equal(h.get('inviteHost').textContent, 'Alan'); assert.equal(h.get('inviteHostAvatar').textContent, 'A');
+  assert.equal(h.get('inviteSeats').textContent, '2 von 8 belegt');
+  assert.deepEqual(h.get('inviteSeatDots').children.map(dot => dot.className || ''), ['on', 'on', '', '', '', '', '', '']);
+  assert.equal(h.get('openInNuvio').href, 'https://nuvio.tv/party/8SZ4CM');
+  const visible = ['inviteHeadline', 'inviteTitle', 'inviteEpisode', 'inviteDescription', 'preview'].map(id => allText(h.get(id))).join(' ');
+  assert.ok(!visible.includes('secret-release') && !visible.includes('abcdef'));
+});
+
+test('invite fallbacks: missing metadata, full party, unknown or ended party and invalid codes', async () => {
+  const bare = await invite(() => ({media: {}, host: null, members: 0, max_members: 0}));
+  assert.equal(bare.get('inviteHeadline').textContent, 'Du bist zu einer Watch Party eingeladen.');
+  assert.equal(bare.get('inviteTitle').textContent, 'Watch Party');
+  assert.equal(bare.get('inviteEpisode').hidden, true); assert.equal(bare.get('inviteDescription').hidden, true);
+  assert.equal(bare.get('inviteBackdrop').hidden, true); assert.equal(bare.get('inviteSeats').textContent, '–');
+  const full = await invite(() => preview({members: 8, max_members: 8}));
+  assert.equal(full.get('preview').textContent, 'Diese Party ist voll.');
+  const missing = await invite(Object.assign(new Error('party_not_found'), {code: 'party_not_found'}));
+  assert.match(missing.get('preview').textContent, /gibt es nicht/);
+  const ended = await invite(Object.assign(new Error('party_ended'), {code: 'party_ended'}));
+  assert.match(ended.get('preview').textContent, /beendet/);
+  const h = await harness(); h.get('partyCode').value = 'ABC'; h.get('partyCode').fire('change'); await settlePlayback();
+  assert.match(h.get('preview').textContent, /Party-Code/); assert.equal(h.get('openInNuvio').hidden, true);
+});
+
+test('without guest-join approval, "Jetzt ansehen" asks for the one-time account login instead of faking a guest', async () => {
+  const h = await harness(); h.session.join = async () => assert.fail('must not join without a session');
+  h.get('partyCode').value = 'UXZ83H'; h.get('displayName').value = 'Sam';
+  h.get('joinForm').fire('submit'); await settlePlayback();
+  assert.equal(h.anonymousSignIns.length, 0);
+  assert.equal(h.get('authSection').hidden, false); assert.equal(h.get('joinSection').hidden, true);
+  assert.equal(h.get('inviteView').hidden, false);
+  assert.match(h.get('message').textContent, /einmalig mit deinem Nuvio-Konto/);
+});
+
+test('opt-in guest build: name-only join signs in anonymously and lets the server decide; refusal falls back to login', async () => {
+  const h = await harness({guestJoin: true}); const joins = [];
+  h.session.join = async (...args) => { joins.push(args); };
+  h.get('partyCode').value = 'UXZ83H'; h.get('displayName').value = '  <b>Sam</b>  ';
+  h.get('joinForm').fire('submit'); await settlePlayback();
+  assert.equal(h.anonymousSignIns.length, 1);
+  assert.deepEqual(joins[0].slice(0, 3), ['UXZ83H', '<b>Sam</b>', null]); // Name is data, rendered as text elsewhere.
+  assert.equal(joins[0][3].allowAnonymous, true);
+  const refused = await harness({guestJoin: true, rpc: {anonymousError: true}});
+  refused.session.join = async () => assert.fail('must not join after a refused anonymous sign-in');
+  refused.get('partyCode').value = 'UXZ83H'; refused.get('displayName').value = 'Sam';
+  refused.get('joinForm').fire('submit'); await settlePlayback();
+  assert.equal(refused.get('authSection').hidden, false);
+  assert.match(refused.get('message').textContent, /nicht freigegeben/);
+});
+
+test('participant list renders names as text with host and own badges', async () => {
+  const h = await harness();
+  h.session.room.memberId = 'guest';
+  h.session.room.members = [{id: 'host', display_name: 'Alan'}, {id: 'guest', display_name: '<img src=x onerror=alert(1)>'}];
+  h.session.handlers.room(h.session.room);
+  const items = h.get('memberList').children;
+  assert.equal(items.length, 2);
+  assert.deepEqual(items.map(item => item.children.map(child => child.textContent)), [['A', 'Alan', 'Host'], ['<', '<img src=x onerror=alert(1)>', 'Du']]);
+  assert.equal(h.get('watchSection').hidden, false); assert.equal(h.get('inviteView').hidden, true);
+});
+
+test('the big play button loads the shared stream and starts following the party once metadata arrives', async () => {
+  const h = await harness();
+  h.session.playback = {...playback, paused: false};
+  h.session.handlers.stream({media_key: 'movie|tt1||', url: 'https://cdn.example.test/film.mp4'});
+  assert.equal(h.get('loadStream').hidden, false);
+  assert.match(h.get('noStream').textContent, /Stream bereit/);
+  h.get('loadStream').fire('click');
+  assert.equal(h.player.src, 'https://cdn.example.test/film.mp4'); assert.equal(h.sync(), false);
+  h.metadata(); await settlePlayback();
+  assert.equal(h.sync(), true); assert.equal(h.player.paused, false); assert.equal(h.player.currentTime, 5);
+  assert.equal(h.get('syncChip').hidden, false);
+  assert.equal(h.get('ctlTime').textContent, '0:05 / 2:00');
+});
+
+test('time formatting and quality note cover hours, unknown durations and native HLS', async () => {
+  const h = await harness(); h.player.canPlayType = () => 'maybe';
+  h.session.handlers.stream({media_key: 'movie|tt1||', url: 'https://stream.example.test/ios.m3u8'});
+  h.get('loadStream').fire('click');
+  Object.assign(h.player, {duration: 7325, currentTime: 3725}); h.tick();
+  assert.equal(h.get('ctlTime').textContent, '1:02:05 / 2:02:05');
+  assert.equal(h.get('qualityNote').hidden, false);
+  h.player.duration = NaN; h.tick(); assert.equal(h.get('ctlSeek').disabled, true);
 });

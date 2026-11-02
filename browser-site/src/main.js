@@ -57,6 +57,7 @@ const session = client ? new PartySession(client, deviceId, {
     $('partyLabel').textContent = `PARTY ${room.info.code} · ${room.members.length} Mitglieder`;
     $('movieTitle').textContent = room.info.media?.episode_title || room.info.media?.title || 'Watch Party';
     $('movieInfo').textContent = `Host: ${room.members.find(m => m.id === room.info.host_member_id)?.display_name || 'Unbekannt'} · Bis zu ${room.info.max_members || 3} Personen`;
+    renderMembers(room);
     renderControlInfo();
     showPanel('watch');
   },
@@ -93,7 +94,7 @@ const session = client ? new PartySession(client, deviceId, {
     const problem = streamProblem(stream);
     $('loadStream').hidden = !!problem;
     if (problem) { $('noStream').textContent = 'Quelle empfangen, aber im Browser nicht unterstützt. Details stehen oben.'; status(problem, true); }
-    else status('Quelle empfangen. Klicke auf „Freigegebenen Stream laden“.');
+    else { $('noStream').textContent = 'Stream bereit. Tippe auf ▶, um gemeinsam zu schauen.'; status('Stream bereit. Tippe auf ▶ zum Abspielen.'); }
   },
   media: () => { resetVideo('Film gewechselt. Persönliche Quelle entfernt. Bitte eine neue eigene Quelle laden.'); $('streamInfo').textContent = 'Film gewechselt. Warte auf die neue Streamfreigabe oder lade eine eigene HLS-Quelle.'; },
   chat: message => {
@@ -115,6 +116,64 @@ function status(message, error = false) {
 }
 function showPanel(name) {
   for (const panel of ['auth', 'join', 'watch']) $(panel + 'Section').hidden = panel !== name;
+  // The invitation card frames both pre-join steps (sign-in and name).
+  $('inviteView').hidden = name === 'watch';
+}
+function setClass(element, name, on) {
+  const names = new Set(String(element.className || '').split(/\s+/).filter(Boolean));
+  if (on) names.add(name); else names.delete(name);
+  element.className = [...names].join(' ');
+}
+const initials = name => (String(name || '?').trim().match(/\S/gu) || ['?']).slice(0, 1).join('').toUpperCase();
+// Only https images from party metadata; everything else falls back.
+function safeImageUrl(value) {
+  try { const u = new URL(String(value)); return u.protocol === 'https:' && !u.username && !u.password ? u.href : ''; }
+  catch { return ''; }
+}
+function showImage(element, value) {
+  const src = safeImageUrl(value);
+  element.hidden = !src;
+  if (!src) { element.removeAttribute?.('src'); return; }
+  element.onerror = () => { element.hidden = true; };
+  element.src = src;
+}
+function renderAvatar(element, member) {
+  element.textContent = initials(member?.display_name);
+  const color = /^#[0-9a-f]{3,8}$/i.test(member?.avatar_color || '') ? member.avatar_color : '';
+  element.style.background = color;
+}
+function renderMembers(room) {
+  const list = $('memberList');
+  list.replaceChildren(...room.members.map(member => {
+    const item = document.createElement('li'), avatar = document.createElement('span'), name = document.createElement('span');
+    avatar.className = 'avatar'; renderAvatar(avatar, member);
+    name.className = 'name'; name.textContent = member.display_name || 'Gast';
+    item.append(avatar, name);
+    if (member.id === room.info.host_member_id) { const badge = document.createElement('span'); badge.className = 'badge'; badge.textContent = 'Host'; item.append(badge); }
+    if (member.id === room.memberId) { const badge = document.createElement('span'); badge.className = 'badge'; badge.textContent = 'Du'; item.append(badge); }
+    return item;
+  }));
+}
+// Invitation from watch_party_preview: rendered with textContent only; no
+// stream source or private data is shown.
+function renderInvite(p) {
+  const media = p?.media || {}, host = p?.host;
+  const series = media.meta_type === 'series' || Number.isInteger(media.season);
+  const title = media.title || 'Watch Party';
+  $('inviteHeadline').textContent = host?.display_name ? `${host.display_name} lädt dich zu ${title} ein.` : 'Du bist zu einer Watch Party eingeladen.';
+  $('inviteTitle').textContent = title;
+  const episode = series && Number.isInteger(media.season) ? `S${media.season} E${media.episode ?? '?'}${media.episode_title ? ' · ' + media.episode_title : ''}` : '';
+  $('inviteEpisode').textContent = episode; $('inviteEpisode').hidden = !episode;
+  $('inviteDescription').textContent = media.description || ''; $('inviteDescription').hidden = !media.description;
+  showImage($('inviteBackdrop'), media.background || media.poster);
+  showImage($('inviteLogo'), media.logo);
+  $('inviteHost').textContent = host?.display_name || '–';
+  renderAvatar($('inviteHostAvatar'), host);
+  const max = Number(p?.max_members) || 0, taken = Math.min(Number(p?.members) || 0, max || 99);
+  $('inviteSeats').textContent = max ? `${taken} von ${max} belegt` : '–';
+  $('inviteSeatDots').replaceChildren(...Array.from({length: Math.min(max, 12)}, (_, i) => {
+    const dot = document.createElement('i'); if (i < taken) dot.className = 'on'; return dot;
+  }));
 }
 function friendlyError(e) {
   const messages = {party_full: 'Die Party ist voll.', party_not_found: 'Party nicht gefunden.', party_ended: 'Die Party wurde beendet.', removed: 'Du wurdest aus der Party entfernt.', not_member: 'Du bist kein Mitglied mehr.', rate_limited: 'Zu viele Anfragen. Bitte kurz warten.', unavailable: 'Watch Party ist für dieses Backend nicht verfügbar.', PGRST202: 'Das Backend bietet diese Nuvio-RPC-Version nicht an. Backend und Desktop-Konfiguration prüfen.'};
@@ -304,6 +363,7 @@ function resetSyncState() {
   nudging = false; lastCorrectiveSeekAt = -Infinity; seekSettled = true; leadSeekStartedAt = null;
   bufferingEvents = 0; segmentStats = {loadMs: null, durationS: null};
   pendingCommand = queuedCommand = null; userSeekPending = false;
+  startAfterLoad = false;
 }
 // Playback resumed after a corrective seek: learn the real recovery delay.
 function mediaResumed() {
@@ -368,17 +428,101 @@ function renderControlInfo() {
   const info = session?.room?.info, allowed = guestControl();
   $('controlInfo').textContent = !info ? 'Steuerung: nur der Host.'
     : !guestControlEnabled ? 'Steuerung: Play/Pause und Springen steuert der Desktop-Host. Gemeinsame Browsersteuerung ist in dieser Version deaktiviert (Backend-Berechtigung nicht bestätigt). Lokale Bedienung trennt dich von der Party-Zeit.'
-    : allowed ? 'Steuerung (Test): Gäste dürfen die Party pausieren und fortsetzen. Jeder Befehl wird zuerst vom Backend bestätigt.'
+    : allowed ? 'Steuerung (Test): Play, Pause und Springen im Player gelten für alle. Jeder Befehl wird zuerst vom Backend bestätigt.'
     : info.host_only === false ? 'Steuerung: Gaststeuerung erlaubt, Realtime-Kanal aber noch nicht verbunden.'
     : 'Steuerung: nur der Host. Lokale Bedienung trennt dich von der Party-Zeit.';
-  const p = effectivePlayback(), ready = allowed && !!loadedStream && syncEnabled && !!p;
-  $('partyControls').hidden = !allowed;
-  $('partyPause').disabled = !ready || p.paused || !!pendingCommand;
-  $('partyResume').disabled = !ready || !p.paused || !!pendingCommand;
+  renderPlayerUi();
 }
-// Dedicated buttons: no dependency on native (mobile) video control gestures.
-$('partyPause').addEventListener('click', () => { if (sendControl(true, player.currentTime)) renderControlInfo(); });
-$('partyResume').addEventListener('click', () => { if (sendControl(false, player.currentTime)) renderControlInfo(); });
+
+// --- Player controls -------------------------------------------------------
+// Own controls instead of native ones (reliable on mobile). They only mark a
+// user gesture and call the media element: the existing pause/seeking/play
+// listeners then decide between a shared command (guest control allowed) and
+// local-only operation. No separate party buttons.
+let seekDragging = false, controlsTimer = null, lastPointerType = 'mouse', startAfterLoad = false;
+function formatTime(value) {
+  if (!Number.isFinite(value) || value < 0) return '0:00';
+  const s = Math.floor(value), h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), sec = String(s % 60).padStart(2, '0');
+  return h ? `${h}:${String(m).padStart(2, '0')}:${sec}` : `${m}:${sec}`;
+}
+function markGesture() { mediaGestureUntil = performance.now() + 1500; }
+function renderPlayerUi() {
+  const wrap = $('playerWrap'), playing = !player.paused, duration = player.duration;
+  setClass(wrap, 'is-playing', playing); setClass(wrap, 'is-paused', !playing); setClass(wrap, 'is-muted', player.muted === true);
+  $('ctlPlay').setAttribute?.('aria-label', playing ? 'Pause' : 'Abspielen');
+  $('ctlMute').setAttribute?.('aria-label', player.muted ? 'Ton an' : 'Ton aus');
+  const seekable = !!loadedStream && Number.isFinite(duration) && duration > 0;
+  if (!seekDragging) {
+    const value = seekable ? Math.round(player.currentTime / duration * 1000) : 0;
+    $('ctlSeek').value = String(value); $('ctlSeek').style.setProperty?.('--fill', `${value / 10}%`);
+  }
+  $('ctlSeek').disabled = !seekable;
+  $('ctlTime').textContent = `${formatTime(player.currentTime)} / ${formatTime(duration)}`;
+  const [label, tone] = !syncEnabled ? ['Nicht synchron', 'off'] : buffering || waitingForTarget ? ['Puffert …', 'warn'] : ['Synchron', ''];
+  $('syncChip').hidden = !loadedStream;
+  $('syncChip').textContent = label; $('syncChip').className = tone ? `sync-chip ${tone}` : 'sync-chip';
+}
+function revealControls() {
+  const wrap = $('playerWrap');
+  setClass(wrap, 'show-controls', true);
+  globalThis.clearTimeout?.(controlsTimer);
+  controlsTimer = setTimeout(() => setClass(wrap, 'show-controls', false), 2800);
+}
+// Big centre button: loading the shared stream is the explicit consent step
+// (IP disclosure to the media host); playback then starts automatically.
+function startStream() { startAfterLoad = true; loadStream(); }
+function togglePlay() {
+  if (!loadedStream) { if (selectedStream && !$('loadStream').hidden) startStream(); return; }
+  if (!syncEnabled) {
+    if ($('resync').disabled) { status('Die Quelle lädt noch. Gleich geht es los.'); return; }
+    resyncNow(); return;
+  }
+  markGesture();
+  if (player.paused) Promise.resolve(player.play()).catch(() => {}); else player.pause();
+}
+function toggleFullscreen() {
+  const wrap = $('playerWrap');
+  if (document.fullscreenElement) { document.exitFullscreen?.(); return; }
+  if (wrap.requestFullscreen) Promise.resolve(wrap.requestFullscreen()).catch(() => {});
+  else player.webkitEnterFullscreen?.(); // iOS Safari: native fullscreen player.
+}
+player.controls = false;
+setClass($('playerWrap'), 'custom-controls', true);
+$('ctlPlay').addEventListener('click', togglePlay);
+$('ctlFullscreen').addEventListener('click', toggleFullscreen);
+$('ctlMute').addEventListener('click', () => { player.muted = !player.muted; renderPlayerUi(); });
+$('ctlVolume').addEventListener('input', () => { player.volume = Number($('ctlVolume').value); player.muted = player.volume === 0; renderPlayerUi(); });
+$('ctlSeek').addEventListener('input', () => {
+  seekDragging = true;
+  const duration = player.duration, value = Number($('ctlSeek').value);
+  $('ctlSeek').style.setProperty?.('--fill', `${value / 10}%`);
+  $('ctlTime').textContent = `${formatTime(duration * value / 1000)} / ${formatTime(duration)}`;
+});
+$('ctlSeek').addEventListener('change', () => {
+  seekDragging = false;
+  const duration = player.duration;
+  if (!loadedStream || !Number.isFinite(duration)) return;
+  markGesture();
+  player.currentTime = duration * Number($('ctlSeek').value) / 1000;
+  renderPlayerUi();
+});
+$('ctlPanel').addEventListener('click', () => {
+  const closed = !String($('watchSection').className || '').includes('panel-closed');
+  setClass($('watchSection'), 'panel-closed', closed);
+  $('ctlPanel').setAttribute?.('aria-expanded', String(!closed));
+});
+$('playerWrap').addEventListener('pointerdown', e => { lastPointerType = e.pointerType || 'mouse'; revealControls(); });
+$('playerWrap').addEventListener('pointermove', revealControls);
+$('playerWrap').addEventListener('keydown', e => {
+  if (['INPUT', 'SELECT', 'BUTTON'].includes(e.target?.tagName)) return;
+  revealControls();
+  if (e.key === ' ' || e.key === 'k' || e.key === 'K') { e.preventDefault(); togglePlay(); }
+  else if (e.key === 'f' || e.key === 'F') toggleFullscreen();
+  else if (e.key === 'm' || e.key === 'M') { player.muted = !player.muted; renderPlayerUi(); }
+});
+// Mouse click on the picture toggles playback; a tap only reveals controls.
+player.addEventListener('click', () => { if (lastPointerType === 'mouse') togglePlay(); });
+for (const event of ['timeupdate', 'play', 'pause', 'durationchange', 'volumechange', 'emptied']) player.addEventListener(event, () => renderPlayerUi());
 // Local user gesture → shared command. Coalesced: one RPC in flight, the
 // latest gesture queued. Confirmed states arrive via acceptPlayback.
 function sendControl(paused, seconds) {
@@ -486,32 +630,83 @@ $('loginForm').addEventListener('submit', async e => {
     const {data, error} = await client.auth.signInWithPassword({email: $('email').value.trim(), password: $('password').value});
     if (error) throw error;
     if (!data.user || data.user.is_anonymous) throw new Error('Ein nicht anonymes Konto ist erforderlich.');
-    showPanel('join'); status('Angemeldet. Du kannst der Party jetzt beitreten.'); await preview();
+    showPanel('join'); preview();
+    // Signed in from the invitation: continue straight into the party.
+    if (pendingJoin) { pendingJoin = false; status('Angemeldet. Party wird betreten …'); await joinParty(); }
+    else status('Angemeldet. Gib deinen Namen ein und klicke auf „Jetzt ansehen“.');
   } catch (err) { status('Anmeldung fehlgeschlagen: ' + friendlyError(err), true); }
   finally { $('password').value = ''; $('loginButton').disabled = false; }
 });
+function updateInviteLinks() {
+  const code = normalizeCode($('partyCode').value), valid = validCode(code);
+  $('openInNuvio').hidden = !valid;
+  if (valid) $('openInNuvio').href = `https://nuvio.tv/party/${code}`;
+}
 async function preview() {
-  if (!client || !validCode($('partyCode').value)) return;
+  updateInviteLinks();
+  if (!client) return;
+  if (!validCode($('partyCode').value)) { $('preview').textContent = 'Gib den Party-Code aus deiner Einladung ein.'; return; }
   try {
     const p = await callRpc(client, 'watch_party_preview', {p_code: normalizeCode($('partyCode').value)});
-    $('preview').textContent = `${p.media?.title || 'Watch Party'} · Host: ${p.host?.display_name || '–'} · ${p.members}/${p.max_members} Plätze`;
-  } catch (e) { $('preview').textContent = 'Vorschau: ' + friendlyError(e); }
+    renderInvite(p);
+    const max = Number(p?.max_members) || 0;
+    $('preview').textContent = max && Number(p?.members) >= max ? 'Diese Party ist voll.' : '';
+  } catch (e) {
+    // Without access to the preview the invitation stays neutral; never invented.
+    $('preview').textContent = e?.code === 'party_not_found' ? 'Diese Party gibt es nicht (mehr). Prüfe den Code.'
+      : e?.code === 'party_ended' ? 'Diese Party wurde beendet.'
+      : 'Details zur Party werden nach dem Beitritt angezeigt.';
+  }
 }
 $('partyCode').addEventListener('change', preview);
-$('joinForm').addEventListener('submit', async e => {
-  e.preventDefault(); if (!session) return status(configProblem, true);
+// Name-only join with an anonymous Supabase identity is OFF unless a build
+// opts in (VITE_PARTY_GUEST_JOIN=1) after the backend has confirmed that its
+// party RPCs/RLS authorize anonymous members. Nuvio Desktop itself requires a
+// real account for parties; without confirmation the account login remains.
+const guestJoinEnabled = import.meta.env.VITE_PARTY_GUEST_JOIN === '1';
+let pendingJoin = false;
+async function joinParty() {
+  if (!session) return status(configProblem, true);
   const code = normalizeCode($('partyCode').value);
-  if (!validCode(code)) return status('Bitte genau sechs gültige Zeichen eingeben.', true);
+  if (!validCode(code)) return status('Bitte den sechsstelligen Party-Code aus der Einladung eingeben.', true);
   const rawIndex = $('profileIndex').value.trim();
   const profileIndex = rawIndex === '' ? null : Number(rawIndex);
   if (profileIndex != null && (!Number.isInteger(profileIndex) || profileIndex < 0 || profileIndex > 20)) return status('Ungültiger Profilindex.', true);
+  const name = $('displayName').value.trim().slice(0, 36) || 'Browser-Gast';
+  try { localStorage.setItem('nuvio-party-name', name); } catch { /* Optional convenience only. */ }
   $('joinButton').disabled = true;
-  try { await session.join(code, $('displayName').value.trim() || 'Browser-Gast', profileIndex); status('Beigetreten. Warte auf die Streamfreigabe durch den Desktop-Host.'); }
-  catch (err) { showPanel('join'); status('Beitritt fehlgeschlagen: ' + friendlyError(err), true); }
+  try {
+    const {data: {session: auth} = {}} = await client.auth.getSession();
+    if (!auth?.user || (auth.user.is_anonymous && !guestJoinEnabled)) {
+      if (!guestJoinEnabled) {
+        pendingJoin = true; showPanel('auth');
+        status('Bitte einmalig mit deinem Nuvio-Konto anmelden. Danach geht es direkt weiter.');
+        return;
+      }
+      status('Gastzugang wird eingerichtet …');
+      const {error} = await client.auth.signInAnonymously();
+      if (error) { pendingJoin = true; showPanel('auth'); status('Gastzugang ist nicht freigegeben. Bitte mit einem Nuvio-Konto anmelden.', true); return; }
+    }
+    status('Party wird betreten …');
+    await session.join(code, name, profileIndex, {allowAnonymous: guestJoinEnabled});
+    status('Beigetreten. Warte auf die Streamfreigabe durch den Desktop-Host.');
+  } catch (err) { showPanel('join'); status('Beitritt fehlgeschlagen: ' + friendlyError(err), true); }
   finally { $('joinButton').disabled = false; }
+}
+$('joinForm').addEventListener('submit', e => { e.preventDefault(); joinParty(); });
+$('invitePlay').addEventListener('click', () => {
+  if (!$('authSection').hidden) { pendingJoin = true; $('email').focus?.(); return; }
+  if (!$('displayName').value.trim()) { $('displayName').focus?.(); status('Gib deinen Namen ein, dann geht es los.'); return; }
+  joinParty();
 });
-$('loadStream').addEventListener('click', loadStream);
-$('resync').addEventListener('click', () => {
+$('copyLink').addEventListener('click', () => {
+  const code = normalizeCode($('partyCode').value);
+  if (!validCode(code)) return status('Kein gültiger Party-Code.', true);
+  Promise.resolve(navigator.clipboard?.writeText(`${location.origin}/party/${code}`))
+    .then(() => status('Einladungslink kopiert.'), () => status('Kopieren nicht möglich. Bitte den Link aus der Adresszeile teilen.', true));
+});
+$('loadStream').addEventListener('click', startStream);
+function resyncNow() {
   if (!session?.playback) {
     status('Noch kein Playback-Zustand vorhanden. Prüfe den Desktop-Host.');
     session?.requestState().catch(() => status('Host-Zustand konnte nicht angefragt werden. Realtime-Verbindung prüfen.', true));
@@ -521,14 +716,18 @@ $('resync').addEventListener('click', () => {
   syncEnabled = true;
   session.requestState().catch(() => status('Aktueller Host-Zustand konnte nicht angefragt werden. Realtime-Verbindung prüfen.', true));
   $('resync').textContent = personalHls.active ? 'Party-Zeit folgen (erneut ausrichten)' : 'Synchronisiert (erneut ausrichten)';
-  applySync(true); presence();
-  if (syncEnabled && !waitingForTarget && session.playback.paused) status('Der empfangene Host-Zustand ist pausiert. Warte auf Host-Play; der aktuelle Zustand wurde erneut angefragt.');
-});
+  applySync(true); presence(); renderPlayerUi();
+  if (syncEnabled && !waitingForTarget && session.playback.paused) status('Der Host hat pausiert. Die Wiedergabe startet, sobald er fortsetzt.');
+}
+$('resync').addEventListener('click', resyncNow);
 player.addEventListener('loadedmetadata', () => {
   if (!loadedStream) return;
   if (personalHls.active) { updatePersonalHlsReadiness(true); return; }
   loading = false; $('noStream').hidden = true; $('resync').disabled = false;
   status('Metadaten geladen. Klicke auf „Wiedergabe synchronisieren“. Codecfehler können erst beim Start sichtbar werden.'); presence();
+  // Started via the big play button: follow the party at once. If the
+  // browser blocks autoplay, the play button retries within a user gesture.
+  if (startAfterLoad) { startAfterLoad = false; resyncNow(); }
 });
 // Native controls do not identify the origin of a seeking event. Track actual
 // control gestures rather than assuming every hls.js currentTime write is a user seek.
@@ -564,7 +763,7 @@ for (const event of ['pause', 'seeking', 'ratechange']) player.addEventListener(
   pendingPlay = null;
   pendingSeek = internalHlsSeek = null;
   mediaPointerDown = false; mediaGestureUntil = -1;
-  status('Lokal pausiert oder gespult. Zum Anschluss an die Party erneut synchronisieren.'); presence();
+  status('Lokal pausiert oder gespult. Zum Anschluss an die Party erneut synchronisieren.'); presence(); renderPlayerUi();
 });
 player.addEventListener('seeked', () => {
   pendingSeek = internalHlsSeek = null;
@@ -656,9 +855,13 @@ client?.auth.onAuthStateChange((event, authSession) => {
 (async () => {
   if (!client) { showPanel('auth'); $('loginButton').disabled = true; status(configProblem, true); return; }
   try {
+    try { $('displayName').value = localStorage.getItem('nuvio-party-name') || ''; } catch { /* Optional. */ }
     const {data: {session: auth}, error} = await client.auth.getSession();
     if (error) throw error;
-    showPanel(auth?.user && !auth.user.is_anonymous ? 'join' : 'auth');
-    if (auth?.user) await preview();
+    // Returning visitors (stored session) and opted-in guest builds go straight
+    // to "Name → Jetzt ansehen"; otherwise the one-time account step is shown.
+    const ready = auth?.user && (!auth.user.is_anonymous || guestJoinEnabled);
+    showPanel(ready || guestJoinEnabled ? 'join' : 'auth');
+    await preview();
   } catch (e) { showPanel('auth'); status(friendlyError(e), true); }
 })();

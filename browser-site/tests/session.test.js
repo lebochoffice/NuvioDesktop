@@ -317,3 +317,18 @@ test('realtime latency is measured in server time and bounded', async t => {
   f.emit('state', {...playback, seq: 3, at: 10000}); assert.equal(f.session.diagnostics.realtimeLatencyMs, 400);
   f.emit('state', {...playback, seq: 4, at: -1e9}); assert.equal(f.session.diagnostics.realtimeLatencyMs, null);
 });
+
+test('anonymous Supabase identities may join only when the build explicitly allows it; the server still decides', async t => {
+  const f = fixture(); t.after(() => f.session.close());
+  f.client.auth.getSession = async () => ({data: {session: {access_token: 'anon-jwt', user: {id: 'anon', is_anonymous: true}}}});
+  await assert.rejects(f.session.join('UXZ83H', 'Gast'), /nicht anonymes/);
+  assert.ok(!f.calls.some(c => c[0] === 'watch_party_join'));
+  await f.session.join('UXZ83H', 'Gast', null, {allowAnonymous: true});
+  const join = f.calls.find(c => c[0] === 'watch_party_join');
+  assert.equal(join[1].p_display_name, 'Gast'); assert.ok(!('p_member_id' in join[1])); // Identity comes from the JWT.
+  const rejecting = fixture(); t.after(() => rejecting.session.close());
+  rejecting.client.auth.getSession = f.client.auth.getSession;
+  rejecting.client.rpc = async name => name === 'watch_party_join' ? {error: {code: '42501', message: 'permission denied'}} : {data: {}};
+  await assert.rejects(rejecting.session.join('UXZ83H', 'Gast', null, {allowAnonymous: true}), e => e.code === '42501');
+  assert.equal(rejecting.session.room, null);
+});

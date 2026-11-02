@@ -68,12 +68,14 @@ export class PartySession {
   rpc(name, args) { return callRpc(this.client, name, args); }
   emit(name, value) { this.handlers[name]?.(value); }
   now() { return Date.now() + this.clockOffset; }
-  async join(code, displayName, profileIndex) {
+  // allowAnonymous is only passed by builds whose backend authorizes anonymous
+  // Supabase members server-side; the server remains the authority.
+  async join(code, displayName, profileIndex, {allowAnonymous = false} = {}) {
     await this.close();
     const gen = ++this.generation;
     const {data: {session}, error} = await this.client.auth.getSession();
     if (error) throw error;
-    if (!session?.user || session.user.is_anonymous) throw new Error('Ein angemeldetes, nicht anonymes Nuvio-Konto ist erforderlich.');
+    if (!session?.user || (session.user.is_anonymous && !allowAnonymous)) throw new Error('Ein angemeldetes, nicht anonymes Nuvio-Konto ist erforderlich.');
     if (gen !== this.generation) return;
     const args = {p_code: code, p_device_id: this.deviceId, p_display_name: displayName.slice(0, 40), p_avatar_url: null, p_avatar_color: null};
     let snapshot;
