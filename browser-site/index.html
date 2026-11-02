@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta name="referrer" content="no-referrer">
+  <title>Nuvio Watch Party – Browser Bridge (Prototyp)</title>
+</head>
+<body>
+  <main class="shell">
+    <header class="top"><div><div class="eyebrow">INOFFIZIELLER PROTOTYP</div><h1>Nuvio <em>Watch Party</em></h1></div><span id="connection" class="state">Nicht verbunden</span></header>
+    <p id="message" class="message" role="status" aria-live="polite">Öffne eine Party-Einladung und melde dich mit deinem Nuvio-Konto an.</p>
+
+    <section id="authSection" class="panel">
+      <h2>Bei Nuvio anmelden</h2>
+      <p class="muted">Melde dich nur auf einer Browser-Seite an, deren Betreiber du vertraust. Die Anmeldung geht direkt an das konfigurierte Backend. Der Seitencode verarbeitet dein Passwort; deine Sitzung wird in diesem Browser gespeichert.</p>
+      <form id="loginForm"><label>E-Mail<input required autocomplete="email" id="email" type="email" placeholder="name@example.com"></label>
+        <label>Passwort<input required autocomplete="current-password" id="password" type="password"></label>
+        <button id="loginButton" type="submit">Anmelden</button></form>
+    </section>
+
+    <section id="joinSection" class="panel" hidden>
+      <div class="row"><h2>Party beitreten</h2><button type="button" id="logoutButton" class="secondary small">Abmelden</button></div>
+      <form id="joinForm"><label>Party-Code<input required id="partyCode" maxlength="7" autocomplete="off" placeholder="UXZ83H"></label>
+        <label>Anzeigename<input required id="displayName" maxlength="36" value="Browser-Gast"></label>
+        <details><summary>Erweitert: Nuvio-Profilindex</summary><label>Profilindex (optional)<input id="profileIndex" type="number" min="0" max="20" placeholder="z. B. 0"></label><p class="muted">Falls dein Backend für die Party einen bestimmten Profilindex verlangt.</p></details>
+        <button type="submit" id="joinButton">Party beitreten</button></form>
+      <div id="preview" class="muted"></div>
+    </section>
+
+    <section id="watchSection" class="panel" hidden>
+      <div class="row"><div><span class="eyebrow" id="partyLabel">WATCH PARTY</span><h2 id="movieTitle">Film</h2><p class="muted" id="movieInfo"></p></div><button id="leaveButton" type="button" class="secondary small">Verlassen</button></div>
+      <div class="playerWrap"><video id="player" controls playsinline preload="metadata" crossorigin="anonymous"></video><div id="noStream" class="waiting">Warte auf eine freigegebene Streamquelle des Hosts …</div></div>
+      <div class="row controls"><button id="loadStream" type="button" hidden>Freigegebenen Stream laden</button><button id="resync" type="button" class="secondary" disabled>Wiedergabe synchronisieren</button></div>
+      <p id="streamInfo" class="muted">Der Host muss „Share my stream“ aktivieren. Direkte Stream-URLs müssen browserkompatibel sein.</p>
+      <details><summary>Chat</summary><div id="chatLog" class="chat" aria-live="polite"></div><form id="chatForm" class="row"><input id="chatText" maxlength="500" placeholder="Nachricht" aria-label="Chatnachricht" required><button type="submit">Senden</button></form></details>
+    </section>
+    <footer>Nur für Inhalte, zu deren Wiedergabe und Freigabe du berechtigt bist. Keine Umgehung von DRM oder Streaming-Anbieter-Schutz. Debrid-Links und Tokens können beim Teilen offengelegt werden.</footer>
+  </main>
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>

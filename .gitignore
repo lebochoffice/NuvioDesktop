@@ -29,6 +29,10 @@ scripts/build-distribution.sh
 asset
 scripts/scrape_android_compose_animation_docs.py
 tools
+.gradle-home/
+*.pre-browser-bridge.bak
+fork-maintenance/local/
+__pycache__/
 AGENTS.md
 
 PERFORMANCE_FINDINGS.md
