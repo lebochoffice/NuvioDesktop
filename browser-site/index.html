@@ -74,8 +74,8 @@
 
         <div class="player-top">
           <button id="ctlBack" class="icon-btn" type="button" aria-label="Zurück zur Einladung"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 12H6m6-6-6 6 6 6"/></svg></button>
-          <span id="partyLabel" class="eyebrow">WATCH PARTY</span>
-          <button id="ctlInfo" class="icon-btn" type="button" aria-label="Party-Info" aria-controls="infoDrawer" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v6m0-9.5v.5"/></svg></button>
+          <!-- Compact participants badge (top right): inside the player, never shrinks it. -->
+          <button id="membersButton" class="members-badge" type="button" aria-controls="infoDrawer" aria-expanded="false"><span id="memberAvatars" class="avatar-stack" aria-hidden="true"></span><span id="memberCount">Teilnehmer</span></button>
         </div>
 
         <div id="controlsBar" class="controls-bar">
@@ -97,18 +97,17 @@
             <div class="group right">
               <span id="syncChip" class="sync-chip" hidden>Synchron</span>
               <button id="resync" type="button" class="btn chip" disabled>Party-Zeit aktualisieren</button>
+              <div class="cc-group">
+                <button id="ctlSubtitles" class="icon-btn" type="button" aria-label="Untertitel" aria-haspopup="menu" aria-expanded="false" aria-controls="subtitleMenu"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="5.5" width="17" height="13" rx="2.5"/><path d="M10.5 10.2a2.2 2.2 0 1 0 0 3.6M16.5 10.2a2.2 2.2 0 1 0 0 3.6"/></svg></button>
+                <div id="subtitleMenu" class="menu" role="menu" aria-label="Untertitel" hidden></div>
+                <input id="subtitleFile" type="file" accept=".vtt,.srt,text/vtt" hidden>
+              </div>
               <label id="qualityWrap" class="quality" hidden><span class="sr-only">Qualität</span><select id="quality" aria-label="Videoqualität"></select></label>
               <button id="ctlChat" class="icon-btn" type="button" aria-label="Chat öffnen" aria-controls="infoDrawer"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5.5h16v10.5H9l-5 4z"/><path d="M8 9.5h8M8 12.5h5"/></svg></button>
               <button id="ctlFullscreen" class="icon-btn" type="button" aria-label="Vollbild"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/></svg></button>
             </div>
           </div>
         </div>
-      </div>
-
-      <!-- Compact participants under the player; never narrows it. -->
-      <div class="below">
-        <button id="membersButton" class="members-strip" type="button" aria-controls="infoDrawer"><span id="memberAvatars" class="avatar-stack" aria-hidden="true"></span><span id="memberCount">Teilnehmer</span></button>
-        <p id="controlInfo" class="muted small control-mode">Steuerung: nur der Host.</p>
       </div>
     </section>
   </main>
@@ -122,6 +121,7 @@
       <div><dt>Party-Code</dt><dd id="drawerCode">–</dd></div>
       <div><dt>Qualität</dt><dd id="qualityNote">Automatisch</dd></div>
     </dl>
+    <p id="controlInfo" class="muted small">Steuerung: nur der Host.</p>
     <section class="drawer-block"><h4>Teilnehmer</h4><ul id="memberList" class="members"></ul></section>
     <details id="chatPanel" class="drawer-block"><summary>Chat</summary><div id="chatLog" class="chat" aria-live="polite"></div><form id="chatForm" class="chat-form"><input id="chatText" maxlength="500" placeholder="Nachricht schreiben …" aria-label="Chatnachricht" required><button type="submit" class="btn primary small">Senden</button></form></details>
     <details class="drawer-block"><summary>Technik</summary>

@@ -25,7 +25,7 @@ class Element {
   replaceChildren(...children) { this.children = children; }
 }
 class FakeHls {
-  static Events = {LEVEL_LOADED: 'level', ERROR: 'error', MANIFEST_PARSED: 'manifest', FRAG_LOADED: 'frag', LEVEL_SWITCHED: 'switched'};
+  static Events = {LEVEL_LOADED: 'level', ERROR: 'error', MANIFEST_PARSED: 'manifest', FRAG_LOADED: 'frag', LEVEL_SWITCHED: 'switched', SUBTITLE_TRACKS_UPDATED: 'subtitles'};
   static isSupported() { return true; }
   constructor(config) { this.config = config; this.listeners = new Map(); }
   on(event, callback) { this.listeners.set(event, callback); }
@@ -40,6 +40,7 @@ async function harness({debug = false, guestControl = false, guestJoin = false, 
   const get = id => { if (!elements.has(id)) elements.set(id, new Element()); return elements.get(id); };
   const player = get('player');
   get('resync').disabled = true; // Mirrors the initial HTML attribute.
+  get('subtitleMenu').hidden = true; get('infoDrawer').hidden = true; // Initially hidden in the HTML.
   Object.assign(player, {paused: true, currentTime: 0, readyState: 0, duration: NaN, currentSrc: '', loadCount: 0,
     seekable: {length: 1, start: () => 0, end: () => 120},
     pause() { const changed = !this.paused; this.paused = true; if (changed) this.fire('pause'); }, play() { this.paused = false; return Promise.resolve(); },
@@ -59,8 +60,8 @@ async function harness({debug = false, guestControl = false, guestJoin = false, 
   const windowEvents = new Map();
   const context = vm.createContext({
     ...protocol, ...syncPolicy, PersonalHlsSource, personalHlsUrlProblem, Hls: FakeHls, PartySession: FakeSession,
-    createClient: () => client, callRpc: (_client, name, args) => { if (rpc?.[name]) return rpc[name](args); throw Error('Unexpected RPC'); }, URL,
-    env: {VITE_SUPABASE_URL: 'https://backend.example.test', VITE_SUPABASE_ANON_KEY: 'sb_publishable_TEST', ...(guestControl ? {VITE_PARTY_GUEST_CONTROL: '1'} : {}), ...(guestJoin ? {VITE_PARTY_GUEST_JOIN: '1'} : {})},
+    createClient: () => client, callRpc: (_client, name, args) => { if (rpc?.[name]) return rpc[name](args); throw Error('Unexpected RPC'); }, URL, Blob,
+    env: {VITE_SUPABASE_URL: 'https://backend.example.test', VITE_SUPABASE_ANON_KEY: 'sb_publishable_TEST', ...(guestControl === true ? {VITE_PARTY_GUEST_CONTROL: '1'} : typeof guestControl === 'string' ? {VITE_PARTY_GUEST_CONTROL: guestControl} : {}), ...(guestJoin ? {VITE_PARTY_GUEST_JOIN: '1'} : {})},
     document: {getElementById: get, createElement: () => new Element()}, location: {pathname: path, origin: 'https://watch.example.test'},
     window: {addEventListener: (event, callback) => windowEvents.set(event, callback)},
     sessionStorage: {getItem: key => key === 'nuvio-party-debug' ? (debug ? '1' : null) : 'test-device', setItem: (...args) => storageWrites.push(args)},
@@ -79,7 +80,7 @@ async function harness({debug = false, guestControl = false, guestJoin = false, 
   return {get, player, session, source, enter, metadata, sent, storageWrites, windowEvents, anonymousSignIns,
     tick: () => tick(),
     advance: ms => { clock += ms; }, sync: () => vm.runInContext('syncEnabled', context),
-    desktopHls: () => vm.runInContext('hls', context)};
+    desktopHls: () => vm.runInContext('hls', context), run: code => vm.runInContext(code, context)};
 }
 
 test('manual source survives incompatible, compatible and revoked Desktop stream broadcasts', async () => {
@@ -609,10 +610,10 @@ test('TorBox single-variant HLS shows a fixed automatic-quality note instead of 
   assert.equal(h.get('qualityNote').hidden, true); // Cleared with the source.
 });
 
-test('production default: shared browser control is disabled even with host_only=false; Desktop control unaffected', async () => {
-  const h = await playingGuest({debug: true}), c = controllable(h);
+test('VITE_PARTY_GUEST_CONTROL=off: shared browser control is disabled even with host_only=false; Desktop control unaffected', async () => {
+  const h = await playingGuest({debug: true, guestControl: 'off'}), c = controllable(h);
   h.session.handlers.room(h.session.room); h.tick();
-  assert.match(h.get('controlInfo').textContent, /deaktiviert/);
+  assert.match(h.get('controlInfo').textContent, /ausgeschaltet/);
   assert.equal(h.get('syncChip').textContent, 'Synchron');
   h.get('ctlPlay').fire('click'); await settlePlayback(); // Player's own pause button.
   assert.equal(c.rpcs.length, 0); assert.equal(c.sends.length, 0); assert.equal(h.sync(), false); // Local only, as in PR #2.
@@ -774,7 +775,7 @@ test('page markup: no banner headline, no hint bar, no permanent side column; co
   assert.match(html, /<label id="codeFallback"[^>]*hidden/);
   assert.match(html, /<p id="message"[^>]*hidden/);
   assert.match(html, /<aside id="infoDrawer"[^>]*hidden/);
-  for (const id of ['ctlPlay', 'ctlBack10', 'ctlFwd10', 'ctlMute', 'ctlSeek', 'ctlFullscreen', 'ctlInfo', 'ctlChat', 'ctlBack', 'syncChip', 'resync', 'membersButton']) assert.match(html, new RegExp(`id="${id}"`));
+  for (const id of ['ctlPlay', 'ctlBack10', 'ctlFwd10', 'ctlMute', 'ctlSeek', 'ctlFullscreen', 'ctlSubtitles', 'ctlChat', 'ctlBack', 'syncChip', 'resync', 'membersButton']) assert.match(html, new RegExp(`id="${id}"`));
   assert.match(html, /id="resync"[^>]*>Party-Zeit aktualisieren</);
   assert.ok(html.indexOf('id="displayName"') < html.indexOf('id="email"')); // Name first, account only on demand.
 });
@@ -807,14 +808,14 @@ test('own controls: ±10 s, fullscreen, drawer, participants strip and connectio
   h.session.room.memberId = 'guest'; h.session.room.info.max_members = 8;
   h.session.room.members = [{id: 'host', display_name: 'Alan'}, {id: 'guest', display_name: 'Sam'}];
   h.session.handlers.room(h.session.room);
-  assert.equal(h.get('memberCount').textContent, 'Teilnehmer · 2/8');
+  assert.equal(h.get('memberCount').textContent, '2/8 Teilnehmer');
   assert.deepEqual(h.get('memberAvatars').children.map(a => [a.textContent, a.className]), [['A', 'avatar host'], ['S', 'avatar']]);
   assert.equal(h.get('drawerCode').textContent, 'UXZ83H');
   h.get('ctlFwd10').fire('click'); assert.equal(h.player.currentTime, 15);
   h.get('ctlBack10').fire('click'); h.get('ctlBack10').fire('click'); assert.equal(h.player.currentTime, 0);
   let fullscreen = 0; h.get('playerWrap').requestFullscreen = () => { fullscreen++; return Promise.resolve(); };
   h.get('ctlFullscreen').fire('click'); assert.equal(fullscreen, 1);
-  h.get('ctlInfo').fire('click'); assert.equal(h.get('infoDrawer').hidden, false); assert.equal(h.get('drawerScrim').hidden, false);
+  h.get('membersButton').fire('click'); assert.equal(h.get('infoDrawer').hidden, false); assert.equal(h.get('drawerScrim').hidden, false);
   h.get('drawerScrim').fire('click'); assert.equal(h.get('infoDrawer').hidden, true);
   h.get('ctlChat').fire('click'); assert.equal(h.get('chatPanel').open, true); h.get('drawerClose').fire('click');
   h.session.handlers.connection('CHANNEL_ERROR'); assert.equal(h.get('syncChip').textContent, 'Verbindung unterbrochen');
@@ -856,4 +857,111 @@ test('back arrow returns to the invitation without leaving; "Zurück zur Party" 
   assert.equal(h.get('joinButton').textContent, 'Zurück zur Party');
   h.get('joinForm').fire('submit'); await settlePlayback();
   assert.equal(h.get('watchSection').hidden, false); assert.equal(h.sync(), true); assert.equal(h.player.paused, false);
+});
+
+// --- One-screen cleanup, title and subtitles ---
+
+test('one-screen watch view: no strip under the player, no PARTY code label, no info icon; participants badge sits top right in the player', () => {
+  const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
+  const watch = html.slice(html.indexOf('id="watchSection"'), html.indexOf('</section>', html.indexOf('id="watchSection"')));
+  assert.ok(!watch.includes('class="below"') && !watch.includes('id="partyLabel"') && !watch.includes('id="ctlInfo"'));
+  assert.ok(!/PARTY\s/.test(watch)); assert.ok(!watch.includes('id="legal"') && !watch.includes('id="controlInfo"'));
+  const top = watch.slice(watch.indexOf('class="player-top"'), watch.indexOf('id="controlsBar"'));
+  assert.ok(top.includes('id="membersButton"') && top.includes('id="memberCount"'));
+  const css = readFileSync(new URL('../src/style.css', import.meta.url), 'utf8');
+  assert.match(css, /\.watch \{ height: 100vh; height: 100svh; overflow: hidden;/);
+});
+
+test('player title: series name · season/episode · episode title; films and gaps fall back sensibly', async () => {
+  const h = await harness();
+  const title = media => { h.session.room.info.media = {meta_type: 'movie', meta_id: 'tt1', ...media}; h.session.handlers.room(h.session.room); return h.get('movieTitle').textContent; };
+  assert.equal(title({meta_type: 'series', title: 'Snowfall', season: 2, episode: 10, episode_title: 'Lehrgeld'}), 'Snowfall · S2 E10 · Lehrgeld');
+  assert.equal(title({title: 'Inception'}), 'Inception');
+  assert.equal(title({title: 'Snowfall', season: 2, episode: 10}), 'Snowfall · S2 E10');
+  assert.equal(title({episode_title: 'Lehrgeld'}), 'Lehrgeld');
+  assert.equal(title({title: '<b>X</b>'}), '<b>X</b>'); // textContent only.
+  assert.equal(title({}), 'Watch Party');
+});
+
+test('subtitles: no invented tracks; real hls.js renditions are selectable and "Aus" switches them off', async () => {
+  const h = await harness();
+  h.get('ctlSubtitles').fire('click');
+  assert.equal(h.get('subtitleMenu').hidden, false);
+  assert.deepEqual(h.get('subtitleMenu').children.map(c => c.textContent), ['Diese Quelle liefert keine Untertitel.', 'Aus', 'Untertiteldatei laden (.vtt/.srt) …']);
+  h.get('ctlSubtitles').fire('click'); assert.equal(h.get('subtitleMenu').hidden, true);
+  h.session.handlers.stream({media_key: 'movie|tt1||', url: 'https://stream.example.test/subs.m3u8'});
+  h.get('loadStream').fire('click'); const instance = h.desktopHls();
+  instance.subtitleTracks = [{name: 'Deutsch', lang: 'de'}, {lang: 'en'}]; instance.subtitleTrack = -1;
+  instance.emit(FakeHls.Events.SUBTITLE_TRACKS_UPDATED);
+  const labels = () => h.get('subtitleMenu').children.map(c => c.textContent);
+  assert.deepEqual(labels(), ['Untertitel', 'Aus', 'Deutsch', 'en', 'Untertiteldatei laden (.vtt/.srt) …']);
+  h.get('subtitleMenu').children[2].fire('click');
+  assert.equal(instance.subtitleTrack, 0); assert.equal(instance.subtitleDisplay, true); assert.equal(h.get('subtitleMenu').hidden, true);
+  h.get('subtitleMenu').children[1].fire('click');
+  assert.equal(instance.subtitleTrack, -1); assert.equal(instance.subtitleDisplay, false);
+});
+
+test('local subtitle files: .srt converts to WebVTT, stays local, and invalid or oversized files are refused', async () => {
+  const h = await harness();
+  assert.equal(h.run(`srtToVtt('1\\r\\n00:00:01,500 --> 00:00:02,250\\r\\nHallo <i>du</i>')`), 'WEBVTT\n\n1\n00:00:01.500 --> 00:00:02.250\nHallo <i>du</i>');
+  const pick = async file => { h.get('subtitleFile').files = [file]; h.get('subtitleFile').fire('change'); await settlePlayback(); };
+  await pick({name: 'film.exe', size: 10, text: async () => 'x'}); assert.match(h.get('message').textContent, /\.vtt- oder \.srt/);
+  await pick({name: 'film.vtt', size: 3 * 1024 * 1024, text: async () => 'WEBVTT'}); assert.match(h.get('message').textContent, /zu groß/);
+  await pick({name: 'film.vtt', size: 10, text: async () => 'not vtt'}); assert.match(h.get('message').textContent, /keine gültige WebVTT/);
+  await pick({name: 'Deutsch.srt', size: 60, text: async () => '1\n00:00:01,000 --> 00:00:02,000\nHallo'});
+  const track = h.player.children.at(-1);
+  assert.equal(track.kind, 'subtitles'); assert.equal(track.label, 'Deutsch'); assert.match(track.src, /^blob:/);
+  assert.equal(h.get('subtitleFile').value, '');
+  h.get('ctlSubtitles').fire('click');
+  const items = h.get('subtitleMenu').children;
+  assert.equal(items.find(c => c.textContent === 'Deutsch') !== undefined, true);
+  h.session.handlers.media(); // A film change removes local subtitle files.
+  h.get('ctlSubtitles').fire('click'); h.get('ctlSubtitles').fire('click');
+  assert.ok(!h.get('subtitleMenu').children.some(c => c.textContent === 'Deutsch'));
+});
+
+// --- Desktop parity (default): same order and trust model as Nuvio Desktop guests ---
+
+test('default build, host_only=false: Pause, Play and seeking in the player steer the party at once (broadcast first, then persist)', async () => {
+  const h = await playingGuest({debug: true}), c = controllable(h, {confirm: false}); // Server echo is not required.
+  h.session.handlers.room(h.session.room);
+  assert.match(h.get('controlInfo').textContent, /wie bei Desktop-Gästen/);
+  h.get('ctlPlay').fire('click'); await settlePlayback();
+  assert.equal(c.sends.length, 1); assert.equal(c.sends[0].event, 'state');
+  assert.deepEqual([c.sends[0].payload.seq, c.sends[0].payload.member_id, c.sends[0].payload.paused, c.sends[0].payload.media_key], [2, 'guest', true, 'movie|tt1||']);
+  assert.equal(c.rpcs[0][0], 'watch_party_update'); assert.equal(c.rpcs[0][1].p_playback, c.sends[0].payload); // Persisted afterwards.
+  assert.equal(h.session.playback.seq, 2); // The stale server echo (seq 1) cannot roll it back.
+  assert.equal(h.player.paused, true); assert.equal(h.sync(), true); assert.equal(h.get('syncChip').textContent, 'Synchron');
+  assert.equal(h.session.diagnostics.lastCommandResult, 'persisted');
+  h.player.play = function () { this.paused = false; this.fire('play'); return Promise.resolve(); };
+  h.get('ctlPlay').fire('click'); await settlePlayback();
+  assert.equal(c.sends[1].payload.paused, false); assert.equal(h.player.paused, false);
+  h.get('ctlFwd10').fire('click'); h.player.fire('seeking'); h.player.fire('seeked'); await settlePlayback();
+  assert.equal(c.sends[2].payload.position_ms, h.player.currentTime * 1000);
+  h.tick(); h.tick(); await settlePlayback();
+  assert.equal(c.sends.length, 3); // Applying our own states never echoes a command.
+});
+
+test('desktop parity: a failed persist keeps the distributed state; a failed broadcast reverts to the party time', async () => {
+  const h = await playingGuest(), c = controllable(h);
+  h.session.rpc = async () => { throw Object.assign(new Error('permission denied'), {code: '42501'}); };
+  h.get('ctlPlay').fire('click'); await settlePlayback();
+  assert.equal(c.sends.length, 1); assert.equal(h.session.playback.seq, 2); assert.equal(h.player.paused, true);
+  assert.equal(h.session.diagnostics.lastCommandResult, 'persist_failed');
+  const b = await playingGuest(); controllable(b);
+  b.session.channel = {send: async () => 'error'};
+  b.get('ctlPlay').fire('click'); await settlePlayback();
+  assert.equal(b.session.playback.seq, 1); assert.equal(b.player.paused, false); // Party keeps playing.
+  assert.match(b.get('message').textContent, /nicht an die Party gesendet/);
+});
+
+test('desktop parity respects host_only: snapshot true blocks, and a persist reply with host_only=true revokes control', async () => {
+  const h = await playingGuest(), c = controllable(h); h.session.room.info.host_only = true;
+  h.get('ctlPlay').fire('click'); await settlePlayback();
+  assert.equal(c.sends.length, 0); assert.equal(c.rpcs.length, 0); assert.equal(h.sync(), false);
+  const r = await playingGuest(), rc = controllable(r, {hostOnlyAfter: true});
+  r.get('ctlPlay').fire('click'); await settlePlayback();
+  assert.equal(rc.sends.length, 1); // Like Desktop: already distributed before the reply.
+  assert.equal(r.session.room.info.host_only, true); assert.equal(r.session.canControl(), false);
+  assert.match(r.get('controlInfo').textContent, /nur der Host/);
 });

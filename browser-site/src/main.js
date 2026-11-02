@@ -10,10 +10,14 @@ const $ = id => document.getElementById(id);
 const player = $('player');
 const url = import.meta.env.VITE_SUPABASE_URL?.trim();
 const key = import.meta.env.VITE_SUPABASE_ANON_KEY?.trim();
-// Shared browser control stays OFF unless a build explicitly opts in (e.g. a
-// Cloudflare *Preview* for diagnosis). Server-side authorization of
-// watch_party_update for guests is unverified; Production must not set this.
-const guestControlEnabled = import.meta.env.VITE_PARTY_GUEST_CONTROL === '1';
+// Shared browser control when the host allows it (host_only=false):
+//   unset/'desktop' → same as Nuvio Desktop guests: broadcast, then persist
+//                     (owner decision; same trust model as Desktop guests)
+//   '1'/'confirmed' → only after watch_party_update returned this command
+//   'off'           → local controls only
+const guestControlSetting = String(import.meta.env.VITE_PARTY_GUEST_CONTROL ?? '').trim().toLowerCase();
+const guestControlMode = guestControlSetting === 'off' ? 'off' : ['1', 'confirmed'].includes(guestControlSetting) ? 'confirmed' : 'desktop';
+const guestControlEnabled = guestControlMode !== 'off';
 const configProblem = publicConfigProblem(url, key);
 const client = configProblem ? null : createClient(url, key, {
   auth: {autoRefreshToken: true, persistSession: true, detectSessionInUrl: false},
@@ -54,8 +58,7 @@ const personalHls = new PersonalHlsSource(Hls, player, {
 const session = client ? new PartySession(client, deviceId, {
   room: room => {
     if (personalHls.active && personalHls.mediaKey !== mediaKey(room.info.media)) resetVideo('Filmkennung geändert. Bitte eine eigene Quelle für den neuen Film laden.');
-    $('partyLabel').textContent = `PARTY ${room.info.code} · ${room.members.length} Mitglieder`;
-    $('movieTitle').textContent = room.info.media?.episode_title || room.info.media?.title || 'Watch Party';
+    $('movieTitle').textContent = playerTitle(room.info.media);
     $('movieInfo').textContent = `Host: ${room.members.find(m => m.id === room.info.host_member_id)?.display_name || 'Unbekannt'} · Bis zu ${room.info.max_members || 3} Personen`;
     renderMembers(room);
     renderControlInfo();
@@ -135,6 +138,12 @@ function setClass(element, name, on) {
   if (on) names.add(name); else names.delete(name);
   element.className = [...names].join(' ');
 }
+// "Snowfall · S2 E10 · Lehrgeld" for episodes, the plain title for films.
+function playerTitle(media) {
+  const title = String(media?.title || '').trim(), episodeTitle = String(media?.episode_title || '').trim();
+  const code = Number.isInteger(media?.season) ? `S${media.season}${Number.isInteger(media?.episode) ? ` E${media.episode}` : ''}` : '';
+  return [title, code, episodeTitle && episodeTitle !== title ? episodeTitle : ''].filter(Boolean).join(' · ') || 'Watch Party';
+}
 const initials = name => (String(name || '?').trim().match(/\S/gu) || ['?']).slice(0, 1).join('').toUpperCase();
 // Only https images from party metadata; everything else falls back.
 function safeImageUrl(value) {
@@ -170,7 +179,7 @@ function renderMembers(room) {
     avatar.className = member.id === room.info.host_member_id ? 'avatar host' : 'avatar'; renderAvatar(avatar, member);
     return avatar;
   }));
-  $('memberCount').textContent = `Teilnehmer · ${room.members.length}/${room.info.max_members || 3}`;
+  $('memberCount').textContent = `${room.members.length}/${room.info.max_members || 3} Teilnehmer`;
   $('drawerCode').textContent = room.info.code || '–';
 }
 // Invitation from watch_party_preview: rendered with textContent only; no
@@ -208,7 +217,7 @@ function resetVideo(reason = 'Persönliche Quelle entfernt. Für diesen Film kan
   pendingSeek = internalHlsSeek = pendingPlay = null;
   waitingForTarget = false;
   lastAlignedPlayback = null; lastPresence = null;
-  resetSyncState(); renderQuality(null);
+  resetSyncState(); renderQuality(null); clearSubtitles();
   mediaPointerDown = false; mediaGestureUntil = -1; lastPlaybackError = 'none';
   personalHls.clear();
   personalReadinessMessage = '';
@@ -393,6 +402,7 @@ const currentHls = () => hls || personalHls.instance;
 // Listens only for level lists and fragment timing; never reads URLs.
 function watchHlsInstance(instance) {
   instance.on(Hls.Events.MANIFEST_PARSED, () => { if (currentHls() === instance) renderQuality(instance); });
+  instance.on(Hls.Events.SUBTITLE_TRACKS_UPDATED, () => { if (currentHls() === instance) renderSubtitles(); });
   // Shows the variant actually playing, so a manual choice is verifiable.
   instance.on(Hls.Events.LEVEL_SWITCHED, (_event, data) => {
     if (currentHls() !== instance || qualityOptions(instance.levels).length === 0) return;
@@ -431,6 +441,90 @@ $('quality').addEventListener('change', () => {
   // visible within seconds (loadLevel could take a full 30 s buffer).
   if (instance && qualityOptions(instance.levels).some(option => option.value === level)) instance.nextLevel = level;
 });
+// --- Subtitles ----------------------------------------------------------------
+// Only real sources: hls.js subtitle renditions (EXT-X-MEDIA TYPE=SUBTITLES),
+// native text tracks (Safari HLS) and a local .vtt/.srt file chosen by the
+// viewer. Files stay in this browser (blob: URL), nothing is uploaded or shared.
+let subtitleFiles = [], activeSubtitle = 'off';
+const SUBTITLE_MAX_BYTES = 2 * 1024 * 1024;
+function sourceSubtitles() {
+  const instance = currentHls();
+  if (instance) return (instance.subtitleTracks || []).map((track, index) => ({id: `hls:${index}`, label: track.name || track.lang || `Untertitel ${index + 1}`}));
+  const options = [], tracks = player.textTracks || [], ownTracks = subtitleFiles.map(file => file.element.track);
+  for (let i = 0; i < tracks.length; i++) {
+    const track = tracks[i];
+    if (['subtitles', 'captions'].includes(track.kind) && !ownTracks.includes(track)) options.push({id: `native:${i}`, label: track.label || track.language || `Untertitel ${i + 1}`});
+  }
+  return options;
+}
+function renderSubtitles() {
+  const menu = $('subtitleMenu'), sources = sourceSubtitles();
+  const item = (id, label) => {
+    const button = document.createElement('button');
+    button.type = 'button'; button.textContent = label;
+    button.setAttribute?.('role', 'menuitemradio'); button.setAttribute?.('aria-checked', String(activeSubtitle === id));
+    button.addEventListener('click', () => { selectSubtitle(id); closeSubtitleMenu(); });
+    return button;
+  };
+  const note = document.createElement('p'); note.className = 'menu-note';
+  note.textContent = sources.length || subtitleFiles.length ? 'Untertitel' : 'Diese Quelle liefert keine Untertitel.';
+  const load = document.createElement('button'); load.type = 'button'; load.textContent = 'Untertiteldatei laden (.vtt/.srt) …';
+  load.addEventListener('click', () => { closeSubtitleMenu(); $('subtitleFile').click?.(); });
+  menu.replaceChildren(note, item('off', 'Aus'), ...sources.map(s => item(s.id, s.label)),
+    ...subtitleFiles.map((file, index) => item(`file:${index}`, file.label)), load);
+}
+function selectSubtitle(id) {
+  activeSubtitle = id;
+  const instance = currentHls();
+  if (instance && 'subtitleTrack' in instance) {
+    instance.subtitleTrack = id.startsWith('hls:') ? Number(id.slice(4)) : -1;
+    instance.subtitleDisplay = id.startsWith('hls:');
+  }
+  const tracks = player.textTracks || [];
+  for (let i = 0; i < tracks.length; i++) {
+    const own = subtitleFiles.findIndex(file => file.element.track === tracks[i]);
+    if (own >= 0) tracks[i].mode = id === `file:${own}` ? 'showing' : 'disabled';
+    else if (!instance && ['subtitles', 'captions'].includes(tracks[i].kind)) tracks[i].mode = id === `native:${i}` ? 'showing' : 'disabled';
+  }
+  renderSubtitles();
+}
+// SRT → WebVTT: header plus "," → "." in timestamps; cue text stays text.
+function srtToVtt(text) {
+  return 'WEBVTT\n\n' + String(text).replace(/^﻿/, '').replace(/\r\n?/g, '\n').replace(/(\d{1,2}:\d{2}:\d{2}),(\d{3})/g, '$1.$2');
+}
+async function addSubtitleFile(file) {
+  if (!file) return;
+  if (file.size > SUBTITLE_MAX_BYTES) return status('Die Untertiteldatei ist zu groß (max. 2 MB).', true);
+  const name = String(file.name || 'Untertitel');
+  if (!/\.(vtt|srt)$/i.test(name)) return status('Bitte eine .vtt- oder .srt-Datei wählen.', true);
+  let text;
+  try { text = await file.text(); } catch { return status('Die Untertiteldatei konnte nicht gelesen werden.', true); }
+  const vtt = /\.srt$/i.test(name) ? srtToVtt(text) : text;
+  if (!/^﻿?WEBVTT/.test(vtt)) return status('Die Datei ist keine gültige WebVTT-Datei.', true);
+  const url = URL.createObjectURL(new Blob([vtt], {type: 'text/vtt'}));
+  const element = document.createElement('track');
+  element.kind = 'subtitles'; element.label = name.replace(/\.(vtt|srt)$/i, '').slice(0, 60); element.src = url;
+  player.append(element);
+  subtitleFiles.push({label: element.label, element, url});
+  selectSubtitle(`file:${subtitleFiles.length - 1}`);
+  status('Untertitel geladen. Sie gelten nur in diesem Browser.');
+}
+function clearSubtitles() {
+  for (const file of subtitleFiles) { file.element.remove?.(); try { URL.revokeObjectURL(file.url); } catch { /* Already released. */ } }
+  subtitleFiles = []; activeSubtitle = 'off';
+  renderSubtitles();
+}
+function closeSubtitleMenu() { $('subtitleMenu').hidden = true; $('ctlSubtitles').setAttribute?.('aria-expanded', 'false'); }
+$('ctlSubtitles').addEventListener('click', () => {
+  const open = $('subtitleMenu').hidden;
+  if (open) renderSubtitles();
+  $('subtitleMenu').hidden = !open; $('ctlSubtitles').setAttribute?.('aria-expanded', String(open));
+});
+$('subtitleFile').addEventListener('change', () => {
+  const file = $('subtitleFile').files?.[0];
+  $('subtitleFile').value = '';
+  addSubtitleFile(file);
+});
 const guestControl = () => guestControlEnabled && session?.canControl() === true;
 // Fixed labels for local diagnosis of why shared control is unavailable.
 function controlBlockedReason() {
@@ -446,8 +540,10 @@ function controlBlockedReason() {
 function renderControlInfo() {
   const info = session?.room?.info, allowed = guestControl();
   $('controlInfo').textContent = !info ? 'Steuerung: nur der Host.'
-    : !guestControlEnabled ? 'Steuerung: Play/Pause und Springen steuert der Desktop-Host. Gemeinsame Browsersteuerung ist in dieser Version deaktiviert (Backend-Berechtigung nicht bestätigt). Lokale Bedienung trennt dich von der Party-Zeit.'
-    : allowed ? 'Steuerung (Test): Play, Pause und Springen im Player gelten für alle. Jeder Befehl wird zuerst vom Backend bestätigt.'
+    : !guestControlEnabled ? 'Steuerung: Play/Pause und Springen steuert der Desktop-Host. Gemeinsame Browsersteuerung ist in dieser Version ausgeschaltet. Lokale Bedienung trennt dich von der Party-Zeit.'
+    : allowed ? (guestControlMode === 'confirmed'
+      ? 'Steuerung: Play, Pause und Springen im Player gelten für alle (vom Host erlaubt). Jeder Befehl wird zuerst vom Backend bestätigt.'
+      : 'Steuerung: Play, Pause und Springen im Player gelten für alle (vom Host erlaubt), wie bei Desktop-Gästen.')
     : info.host_only === false ? 'Steuerung: Gaststeuerung erlaubt, Realtime-Kanal aber noch nicht verbunden.'
     : 'Steuerung: nur der Host. Lokale Bedienung trennt dich von der Party-Zeit.';
   renderPlayerUi();
@@ -533,13 +629,13 @@ function toggleFullscreen() {
 function openDrawer(section = 'info') {
   if (document.fullscreenElement) document.exitFullscreen?.(); // The drawer lives outside the player.
   $('infoDrawer').hidden = false; $('drawerScrim').hidden = false;
-  $('ctlInfo').setAttribute?.('aria-expanded', 'true');
+  $('membersButton').setAttribute?.('aria-expanded', 'true');
   if (section === 'chat') { $('chatPanel').open = true; $('chatText').focus?.(); }
   else $('drawerClose').focus?.();
 }
 function closeDrawer() {
   $('infoDrawer').hidden = true; $('drawerScrim').hidden = true;
-  $('ctlInfo').setAttribute?.('aria-expanded', 'false');
+  $('membersButton').setAttribute?.('aria-expanded', 'false');
 }
 // Back arrow: to the invitation without leaving the party. Local playback
 // pauses; "Zurück zur Party" re-joins the party time.
@@ -556,7 +652,6 @@ $('ctlBack10').addEventListener('click', () => skip(-10));
 $('ctlFwd10').addEventListener('click', () => skip(10));
 $('ctlFullscreen').addEventListener('click', toggleFullscreen);
 $('ctlBack').addEventListener('click', backToInvite);
-$('ctlInfo').addEventListener('click', () => openDrawer('info'));
 $('ctlChat').addEventListener('click', () => openDrawer('chat'));
 $('membersButton').addEventListener('click', () => openDrawer('info'));
 $('drawerClose').addEventListener('click', closeDrawer);
@@ -612,16 +707,17 @@ function sendControl(paused, seconds) {
   catch { return false; }
   pendingCommand = command;
   applySync();
-  session.commitControl(command).then(() => {
+  session.commitControl(command, {mode: guestControlMode}).then(() => {
     if (pendingCommand !== command) return;
     pendingCommand = null;
-    status(paused ? 'Pause für alle bestätigt.' : 'Wiedergabe für alle bestätigt.');
+    status(paused ? 'Pause für alle.' : 'Wiedergabe für alle.');
   }, error => {
     if (pendingCommand !== command) return;
     pendingCommand = null; queuedCommand = null;
     status(error?.code === 'host_only' ? 'Der Host hat die Gaststeuerung deaktiviert. Party-Zeit wird wieder übernommen.'
       : error?.code === 'not_confirmed' ? 'Das Backend hat den Steuerbefehl nicht bestätigt. Party-Zeit wird beibehalten.'
       : error?.code === 'closed' ? 'Party-Verbindung geschlossen.'
+      : error?.code === 'broadcast_failed' ? 'Steuerbefehl konnte nicht an die Party gesendet werden. Verbindung prüfen.'
       : 'Steuerbefehl nicht gesendet: ' + friendlyError(error), true);
     renderControlInfo();
   }).finally(() => {
@@ -923,7 +1019,7 @@ function renderSyncDebug() {
     playbackRate: number(player.playbackRate),
     guestControl: guestControl(), controlBlockedReason: controlBlockedReason(), commandPending: !!pendingCommand,
     commandsSent: number(d.commands),
-    lastCommandResult: choice(d.lastCommandResult, ['confirmed', 'stored_not_broadcast', 'host_only', 'not_confirmed', 'closed', 'rpc_failed']),
+    lastCommandResult: choice(d.lastCommandResult, ['confirmed', 'stored_not_broadcast', 'broadcast', 'persisted', 'persist_failed', 'broadcast_failed', 'host_only', 'not_confirmed', 'closed', 'rpc_failed']),
   }, null, 2);
 }
 setInterval(() => { applySync(); presence(); renderControlInfo(); renderSyncDebug(); }, 1000);

@@ -98,7 +98,7 @@ try {
     relativeSegments.push(route.request().url());
     return route.fulfill({status:410,headers:{'Access-Control-Allow-Origin':'*'},body:'Fixture segment expired'});
   });
-  await page.locator('#ctlInfo').click();
+  await page.locator('#membersButton').click(); // Participants badge opens the drawer.
   await page.locator('summary').filter({hasText:'Technik'}).click();
   await page.getByText('Eigene HLS-URL (Beta)',{exact:true}).click();
   await page.locator('#personalHlsUrl').fill(`https://hls.invalid/owned/master?token=${personalSentinel}`);
@@ -155,7 +155,7 @@ try {
   assert.ok(broadcasts.some(b => b.event === 'status' && b.payload.status === 'browsing'));
   assert.ok(!broadcasts.some(b => b.event === 'state'));
   await page.screenshot({path: new URL('../browser-smoke.png', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/,'$1'), fullPage:true});
-  await page.locator('#ctlInfo').click();
+  await page.locator('#membersButton').click(); // Participants badge opens the drawer.
   await page.locator('#leaveButton').click(); await page.locator('#joinSection').waitFor({state:'visible'});
   assert.ok(requests.some(r => r.name === 'watch_party_leave'));
   assert.deepEqual(errors, []);

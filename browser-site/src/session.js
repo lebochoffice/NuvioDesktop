@@ -10,8 +10,8 @@ export async function callRpc(client, name, args = {}) {
 
 // Uses only RPCs and channel events present in Nuvio Dev PartyApi/PartyChannel.
 // Guests never become coordinators. With host_only=false they may issue the
-// same playback command as a Desktop guest, but only after watch_party_update
-// has stored it under the server's own authentication/membership checks.
+// same playback command as a Desktop guest: either exactly like Nuvio Desktop
+// (broadcast, then persist) or only after watch_party_update confirmed it.
 export class PartySession {
   constructor(client, deviceId, handlers = {}) {
     this.client = client; this.deviceId = deviceId; this.handlers = handlers;
@@ -41,14 +41,17 @@ export class PartySession {
     if (!validPlayback(next) || !next.media_key) throw Object.assign(new Error('invalid_command'), {code: 'invalid_command'});
     return {room, gen: this.generation, playback: next};
   }
-  // Persist first; distribute only the state the server returned for exactly
-  // this member and sequence. No server confirmation means no broadcast.
-  async commitControl(command) {
+  // mode 'desktop': same order and trust model as Nuvio Desktop guests
+  // (PartyRepository.publish → state broadcast, then watch_party_update).
+  // mode 'confirmed': persist first; distribute only the state the server
+  // returned for exactly this member and sequence.
+  async commitControl(command, {mode = 'confirmed'} = {}) {
     const {room, gen, playback} = command;
     const d = this.diagnostics;
     d.commands++;
     try {
       if (gen !== this.generation || room !== this.room) throw Object.assign(new Error('closed'), {code: 'closed'});
+      if (mode === 'desktop') return await this.publishLikeDesktop(room, gen, playback);
       const result = await this.rpc('watch_party_update', {p_party_id: room.info.id, p_device_id: this.deviceId, p_playback: playback});
       if (gen !== this.generation || room !== this.room) throw Object.assign(new Error('closed'), {code: 'closed'});
       const party = result?.party, stored = party?.playback;
@@ -61,9 +64,28 @@ export class PartySession {
       d.lastCommandResult = sent && sent !== 'ok' ? 'stored_not_broadcast' : 'confirmed';
       return stored;
     } catch (e) {
-      d.lastCommandResult = ['host_only', 'not_confirmed', 'closed'].includes(e?.code) ? e.code : 'rpc_failed';
+      d.lastCommandResult = ['host_only', 'not_confirmed', 'closed', 'broadcast_failed'].includes(e?.code) ? e.code : 'rpc_failed';
       throw e;
     }
+  }
+  async publishLikeDesktop(room, gen, playback) {
+    const d = this.diagnostics;
+    const sent = await this.channel?.send({type: 'broadcast', event: 'state', payload: playback});
+    if (!this.channel || (sent && sent !== 'ok')) throw Object.assign(new Error('broadcast_failed'), {code: 'broadcast_failed'});
+    if (gen !== this.generation || room !== this.room) throw Object.assign(new Error('closed'), {code: 'closed'});
+    this.acceptPlayback(playback, 'command');
+    d.lastCommandResult = 'broadcast';
+    // Persist like Desktop's schedulePersist; a failure does not revert the
+    // already distributed state, the snapshot is applied with normal ordering.
+    try {
+      const result = await this.rpc('watch_party_update', {p_party_id: room.info.id, p_device_id: this.deviceId, p_playback: playback});
+      if (gen !== this.generation || room !== this.room) return playback;
+      const party = result?.party;
+      if (party && typeof party.host_only === 'boolean' && party.host_only !== room.info.host_only) { room.info.host_only = party.host_only; this.emit('room', room); }
+      if (party?.playback) this.acceptPlayback(party.playback, 'snapshot');
+      d.lastCommandResult = 'persisted';
+    } catch { d.lastCommandResult = 'persist_failed'; }
+    return playback;
   }
   rpc(name, args) { return callRpc(this.client, name, args); }
   emit(name, value) { this.handlers[name]?.(value); }

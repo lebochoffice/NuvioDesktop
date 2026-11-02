@@ -332,3 +332,23 @@ test('anonymous Supabase identities may join only when the build explicitly allo
   await assert.rejects(rejecting.session.join('UXZ83H', 'Gast', null, {allowAnonymous: true}), e => e.code === '42501');
   assert.equal(rejecting.session.room, null);
 });
+
+test('desktop-parity mode broadcasts the command first (like Nuvio Desktop guests), then persists it with normal ordering', async t => {
+  const f = fixture(); t.after(() => f.session.close());
+  await f.session.join('UXZ83H', 'Guest'); await f.connect();
+  f.session.room.info.host_only = false;
+  const order = [], send = f.ch.send, rpc = f.client.rpc;
+  f.ch.send = async message => { order.push(['send', message.event]); return send(message); };
+  f.client.rpc = async (name, args) => { order.push(['rpc', name]); return name === 'watch_party_update'
+    ? {data: {party: {...snapshot().party, host_only: false, playback: {...playback, seq: 1}}}} : rpc(name, args); };
+  const stored = await f.session.commitControl(f.session.prepareControl({paused: true, positionMs: 7000}), {mode: 'desktop'});
+  assert.deepEqual(order, [['send', 'state'], ['rpc', 'watch_party_update']]);
+  assert.equal(f.session.playback, stored); assert.equal(stored.seq, 3); assert.equal(stored.member_id, 'guest');
+  assert.equal(f.session.diagnostics.lastCommandResult, 'persisted');
+  f.ch.send = async () => 'rate limited';
+  await assert.rejects(f.session.commitControl(f.session.prepareControl({paused: false, positionMs: 0}), {mode: 'desktop'}), e => e.code === 'broadcast_failed');
+  assert.equal(f.session.playback, stored); // Nothing applied without a broadcast.
+  f.session.room.info.host_only = true;
+  assert.throws(() => f.session.prepareControl({paused: true, positionMs: 0}), e => e.code === 'host_only');
+});
+

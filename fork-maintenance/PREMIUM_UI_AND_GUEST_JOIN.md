@@ -23,6 +23,25 @@ Die Teilnehmerleiste liegt unter dem Player und verkleinert ihn nicht. Bei volle
 
 **Lokale Bedienung repariert:** Play zeigte bei pausierter Party und Host-only bisher scheinbar keine Wirkung, weil der Player sofort wieder pausierte. Jetzt spielt Play lokal weiter und markiert das ehrlich als „Nicht synchron“ mit Hinweis; „Party-Zeit aktualisieren“ holt zurück. Ein vom Browser blockierter Start (`NotAllowedError`) erzeugt eine Meldung. Ohne Stream erklärt Play, dass der Host freigeben muss. Gemeinsame Steuerung über dieselben Controls nur mit `VITE_PARTY_GUEST_CONTROL=1`.
 
+## One-Screen-Cleanup und Untertitel (nach `bcbc6382`, uncommittet)
+
+- **Scrollfrei:** `.watch` hat genau die Viewport-Höhe mit `overflow: hidden`. Unter dem Player gibt es nichts mehr (Teilnehmerleiste und Steuerungstext entfernt). Der Player misst `min(98vw, 1920px, (100svh − 8px) · 16/9)`, berechnet ca. 1683 px bei 1920 × 955 und durch 96–98vw begrenzt bei 1440 px.
+- **Entfernt aus dem Player:** Info-Icon oben rechts, „PARTY <CODE>“, die Leiste unter dem Player. Der Steuerungsmodus steht jetzt im Drawer; der Rechtshinweis gibt es nur noch auf der Einladung.
+- **Teilnehmer:** kompakte Badge oben rechts im Player („2/8 Teilnehmer“ mit Avataren); sie öffnet den Drawer und verkleinert den Player nicht.
+- **Titel:** „Serie · S2 E10 · Folgentitel“ bzw. Filmtitel; fehlende Teile werden weggelassen.
+- **Untertitel:**
+  - (A) hls.js-Untertitel-Renditions (`EXT-X-MEDIA TYPE=SUBTITLES`) bzw. native Text-Tracks (Safari) sind auswählbar, sofern die Quelle sie liefert. Ob TorBox-HLS solche Tracks enthält, ist **nicht bestätigt**. Ohne Tracks zeigt das Menü „Diese Quelle liefert keine Untertitel.“
+  - (B) Lokale `.vtt`/`.srt`-Datei (max. 2 MB). SRT wird im Browser zu WebVTT konvertiert und als `blob:`-Track eingebunden (CSP `media-src blob:`). Sie gilt nur lokal und wird bei Filmwechsel entfernt.
+  - Externe Untertitel-URLs sind bewusst nicht eingebaut: CORS-abhängig und ein weiterer Fremdabruf.
+- **Gemeinsame Steuerung:** Die Kette (Geste → `pause`/`play`/`seeking` → `sendControl` → `prepareControl`/`commitControl` → `watch_party_update` → nur bestätigt `state`-Broadcast → Desktop `accept`) ist im Frontend vollständig verdrahtet, hat Loop-Schutz und ist getestet. In Production ist sie **bewusst aus** (`VITE_PARTY_GUEST_CONTROL` nicht gesetzt); deshalb wirkt Browser-Pause dort nur lokal. Der Blocker ist der nicht verifizierte Backend-Vertrag (siehe oben), kein Frontend-Fehler.
+- **Desktop-Parität (umgesetzt, Entscheidung des Inhabers, Standard):** Wie Nuvio Desktop-Gäste (`PartyRepository.publish`): Wenn der Host Gaststeuerung erlaubt (`host_only=false` im DB-Snapshot), sendet der Browser bei Play, Pause oder Spulen sofort den `state`-Broadcast (`seq + 1`, eigene `member_id`, `media_key`, `waiting=false`) und speichert danach per `watch_party_update`. Der Desktop übernimmt ihn über `accept()` (Host-only, Medienkennung, `isNewer`).
+  - Ein Speicherfehler macht den verteilten Zustand nicht rückgängig, genau wie am Desktop.
+  - Ein fehlgeschlagener Broadcast wendet nichts an.
+  - Meldet die Speicherantwort `host_only=true`, endet die Steuerung sofort.
+  - Vertrauensbasis wie bei Desktop-Gästen: Die Absender-ID in Realtime-Nachrichten ist fälschbar, und der Server prüft den Befehl nicht nachweislich. Für einen echten Schutz bleibt die Backend-Erweiterung (serverseitiger Broadcast, Policies) nötig.
+  - `VITE_PARTY_GUEST_CONTROL`: leer/`desktop` = Parität, `confirmed`/`1` = nur nach Server-Bestätigung, `off` = nur lokal.
+  - Voraussetzung im Betrieb: Am Desktop muss „Host only“ ausgeschaltet sein.
+
 ## Sicherheitsbefund: Streamfreigabe
 
 - **Bestätigt (Code):** Der Desktop sendet ein einziges `stream`-Broadcast an **alle** Kanalmitglieder: Original-URL, Original-Header, Dateiname und zusätzlich `browser_hls`. Browser-Gäste erhalten damit auch die Desktop-Originalquelle (z. B. Debrid-/CDN-Link mit Token) und deren Header, obwohl sie nur HLS nutzen. Der vollständige TorBox-Account-Key wird ausgeschlossen (`containsAccountKey`), zeitlich begrenzte Stream-Tokens aber nicht.
