@@ -54,19 +54,23 @@ try {
     });
   });
   await page.goto(`http://127.0.0.1:${port}/party/UXZ83H`);
-  await page.locator('#email').fill('test@example.invalid'); await page.locator('#password').fill('synthetic-password');
-  await page.locator('#loginButton').click();
-  await page.locator('#joinSection').waitFor({state:'visible'});
+  // Invite first: name + "Jetzt ansehen"; the account step opens only without a session.
   assert.equal(await page.locator('#partyCode').inputValue(),'UXZ83H');
+  assert.equal(await page.locator('#partyCode').isVisible(), false); // Code comes from the link.
+  await page.locator('#displayName').fill('Smoke-Gast');
   await page.locator('#joinButton').click();
+  await page.locator('#authSection').waitFor({state:'visible'});
+  await page.locator('#email').fill('test@example.invalid'); await page.locator('#password').fill('synthetic-password');
+  await page.locator('#loginButton').click(); // Continues straight into the party.
   await page.locator('#watchSection').waitFor({state:'visible'});
-  await page.getByText('Verbunden', {exact:true}).waitFor();
+  await page.waitForFunction(() => document.getElementById('connection').textContent === 'Verbunden');
   assert.ok(requests.some(r => r.name === 'watch_party_join' && r.body.p_code === 'UXZ83H'));
-  await page.locator('summary').filter({hasText:'Chat'}).click();
+  await page.locator('#ctlChat').click(); // Chat lives in the info drawer.
   await page.getByText('<img src=x onerror=alert(1)>', {exact:false}).waitFor();
   assert.equal(await page.locator('#chatLog img').count(), 0);
   await page.locator('#chatText').fill('Hallo'); await page.locator('#chatForm button').click();
   await page.waitForFunction(() => document.getElementById('chatText').value === '');
+  await page.locator('#drawerClose').click();
   const emit = (event, payload) => socket.send(JSON.stringify({topic,event:'broadcast',payload:{event,payload}}));
   emit('stream', {member_id:'host',stream:{media_key:'movie|tt1||',url:'https://cdn.invalid/film.mkv'}});
   await page.getByText(/MKV, AVI/).waitFor();
@@ -94,6 +98,8 @@ try {
     relativeSegments.push(route.request().url());
     return route.fulfill({status:410,headers:{'Access-Control-Allow-Origin':'*'},body:'Fixture segment expired'});
   });
+  await page.locator('#ctlInfo').click();
+  await page.locator('summary').filter({hasText:'Technik'}).click();
   await page.getByText('Eigene HLS-URL (Beta)',{exact:true}).click();
   await page.locator('#personalHlsUrl').fill(`https://hls.invalid/owned/master?token=${personalSentinel}`);
   await page.locator('#loadPersonalHls').click();
@@ -112,6 +118,7 @@ try {
   assert.ok(broadcasts.every(b => !JSON.stringify(b).includes(personalSentinel)));
   assert.equal(await page.evaluate(sentinel => Object.values(localStorage).some(value => value.includes(sentinel)), personalSentinel),false);
   await page.locator('#useDesktopStream').click();
+  await page.locator('#drawerClose').click();
   snapshot.party.media.title = 'Synthetischer Integrationstest';
   // Generate our own short VP8/WebM fixture inside Chrome. No external media.
   const videoBytes = Buffer.from(await page.evaluate(async () => {
@@ -148,6 +155,7 @@ try {
   assert.ok(broadcasts.some(b => b.event === 'status' && b.payload.status === 'browsing'));
   assert.ok(!broadcasts.some(b => b.event === 'state'));
   await page.screenshot({path: new URL('../browser-smoke.png', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/,'$1'), fullPage:true});
+  await page.locator('#ctlInfo').click();
   await page.locator('#leaveButton').click(); await page.locator('#joinSection').waitFor({state:'visible'});
   assert.ok(requests.some(r => r.name === 'watch_party_leave'));
   assert.deepEqual(errors, []);

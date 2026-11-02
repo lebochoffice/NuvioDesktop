@@ -34,7 +34,7 @@ class FakeHls {
   destroy() { this.destroyed = true; this.source = null; }
   emit(event, data) { this.listeners.get(event)?.(event, data); }
 }
-async function harness({debug = false, guestControl = false, guestJoin = false, rpc = null} = {}) {
+async function harness({debug = false, guestControl = false, guestJoin = false, rpc = null, path = '/'} = {}) {
   const elements = new Map(), storageWrites = [], sent = [];
   let clock = 0, tick = () => {};
   const get = id => { if (!elements.has(id)) elements.set(id, new Element()); return elements.get(id); };
@@ -61,7 +61,7 @@ async function harness({debug = false, guestControl = false, guestJoin = false, 
     ...protocol, ...syncPolicy, PersonalHlsSource, personalHlsUrlProblem, Hls: FakeHls, PartySession: FakeSession,
     createClient: () => client, callRpc: (_client, name, args) => { if (rpc?.[name]) return rpc[name](args); throw Error('Unexpected RPC'); }, URL,
     env: {VITE_SUPABASE_URL: 'https://backend.example.test', VITE_SUPABASE_ANON_KEY: 'sb_publishable_TEST', ...(guestControl ? {VITE_PARTY_GUEST_CONTROL: '1'} : {}), ...(guestJoin ? {VITE_PARTY_GUEST_JOIN: '1'} : {})},
-    document: {getElementById: get, createElement: () => new Element()}, location: {pathname: '/'},
+    document: {getElementById: get, createElement: () => new Element()}, location: {pathname: path, origin: 'https://watch.example.test'},
     window: {addEventListener: (event, callback) => windowEvents.set(event, callback)},
     sessionStorage: {getItem: key => key === 'nuvio-party-debug' ? (debug ? '1' : null) : 'test-device', setItem: (...args) => storageWrites.push(args)},
     crypto: {randomUUID: () => 'test-id'}, performance: {now: () => clock},
@@ -585,7 +585,7 @@ test('iOS-style native HLS skips hls.js and quality UI; Android-style hls.js get
   assert.equal(instance.config.backBufferLength, 30); assert.equal(instance.config.startFragPrefetch, true); assert.equal(instance.config.debug, false);
   instance.levels = [{height: 1080, bitrate: 6e6}]; instance.emit(FakeHls.Events.MANIFEST_PARSED);
   assert.equal(android.get('qualityWrap').hidden, true); // Single-variant playlists: no invented choices.
-  assert.match(android.get('qualityNote').textContent, /Automatisch – die Quelle liefert eine Qualität/);
+  assert.match(android.get('qualityNote').textContent, /Automatisch · eine Qualität verfügbar/);
   instance.levels = [{height: 720, bitrate: 3e6}, {height: 1080, bitrate: 6e6}, {height: 2160, bitrate: 15e6}];
   instance.emit(FakeHls.Events.MANIFEST_PARSED);
   assert.equal(android.get('qualityWrap').hidden, false); assert.equal(android.get('qualityNote').hidden, true);
@@ -604,7 +604,7 @@ test('TorBox single-variant HLS shows a fixed automatic-quality note instead of 
   h.get('loadStream').fire('click'); const instance = h.desktopHls();
   instance.levels = [{height: 1080, bitrate: 6e6}, {height: 1080, bitrate: 5e6}]; instance.emit(FakeHls.Events.MANIFEST_PARSED);
   assert.equal(h.get('qualityWrap').hidden, true);
-  assert.equal(h.get('qualityNote').textContent, 'Qualität: Automatisch – TorBox liefert eine Qualität.');
+  assert.equal(h.get('qualityNote').textContent, 'Automatisch · TorBox liefert eine Qualität');
   h.session.handlers.stream(null);
   assert.equal(h.get('qualityNote').hidden, true); // Cleared with the source.
 });
@@ -674,7 +674,7 @@ test('invite renders party metadata safely, rejects unsafe images and never show
   let asked;
   const h = await invite(args => { asked = args; return preview(); });
   assert.deepEqual(asked, {p_code: '8SZ4CM'});
-  assert.equal(h.get('inviteHeadline').textContent, 'Alan lädt dich zu Snowfall ein.');
+  assert.equal(h.get('inviteHostLine').textContent, 'Alan lädt dich ein'); assert.equal(h.get('inviteTitle').textContent, 'Snowfall');
   assert.equal(h.get('inviteEpisode').textContent, 'S2 E10 · Lehrgeld'); assert.equal(h.get('inviteEpisode').hidden, false);
   assert.equal(h.get('inviteDescription').textContent, '<img src=x onerror=alert(1)>'); // Plain text, never HTML.
   assert.equal(h.get('inviteBackdrop').hidden, true); // javascript: URL rejected.
@@ -683,13 +683,13 @@ test('invite renders party metadata safely, rejects unsafe images and never show
   assert.equal(h.get('inviteSeats').textContent, '2 von 8 belegt');
   assert.deepEqual(h.get('inviteSeatDots').children.map(dot => dot.className || ''), ['on', 'on', '', '', '', '', '', '']);
   assert.equal(h.get('openInNuvio').href, 'https://nuvio.tv/party/8SZ4CM');
-  const visible = ['inviteHeadline', 'inviteTitle', 'inviteEpisode', 'inviteDescription', 'preview'].map(id => allText(h.get(id))).join(' ');
+  const visible = ['inviteHostLine', 'inviteTitle', 'inviteEpisode', 'inviteDescription', 'preview'].map(id => allText(h.get(id))).join(' ');
   assert.ok(!visible.includes('secret-release') && !visible.includes('abcdef'));
 });
 
 test('invite fallbacks: missing metadata, full party, unknown or ended party and invalid codes', async () => {
   const bare = await invite(() => ({media: {}, host: null, members: 0, max_members: 0}));
-  assert.equal(bare.get('inviteHeadline').textContent, 'Du bist zu einer Watch Party eingeladen.');
+  assert.equal(bare.get('inviteHostLine').hidden, true);
   assert.equal(bare.get('inviteTitle').textContent, 'Watch Party');
   assert.equal(bare.get('inviteEpisode').hidden, true); assert.equal(bare.get('inviteDescription').hidden, true);
   assert.equal(bare.get('inviteBackdrop').hidden, true); assert.equal(bare.get('inviteSeats').textContent, '–');
@@ -704,7 +704,7 @@ test('invite fallbacks: missing metadata, full party, unknown or ended party and
 });
 
 test('without guest-join approval, "Jetzt ansehen" asks for the one-time account login instead of faking a guest', async () => {
-  const h = await harness(); h.session.join = async () => assert.fail('must not join without a session');
+  const h = await harness(); h.session.room = null; h.session.join = async () => assert.fail('must not join without a session');
   h.get('partyCode').value = 'UXZ83H'; h.get('displayName').value = 'Sam';
   h.get('joinForm').fire('submit'); await settlePlayback();
   assert.equal(h.anonymousSignIns.length, 0);
@@ -714,7 +714,7 @@ test('without guest-join approval, "Jetzt ansehen" asks for the one-time account
 });
 
 test('opt-in guest build: name-only join signs in anonymously and lets the server decide; refusal falls back to login', async () => {
-  const h = await harness({guestJoin: true}); const joins = [];
+  const h = await harness({guestJoin: true}); const joins = []; h.session.room = null;
   h.session.join = async (...args) => { joins.push(args); };
   h.get('partyCode').value = 'UXZ83H'; h.get('displayName').value = '  <b>Sam</b>  ';
   h.get('joinForm').fire('submit'); await settlePlayback();
@@ -722,7 +722,7 @@ test('opt-in guest build: name-only join signs in anonymously and lets the serve
   assert.deepEqual(joins[0].slice(0, 3), ['UXZ83H', '<b>Sam</b>', null]); // Name is data, rendered as text elsewhere.
   assert.equal(joins[0][3].allowAnonymous, true);
   const refused = await harness({guestJoin: true, rpc: {anonymousError: true}});
-  refused.session.join = async () => assert.fail('must not join after a refused anonymous sign-in');
+  refused.session.room = null; refused.session.join = async () => assert.fail('must not join after a refused anonymous sign-in');
   refused.get('partyCode').value = 'UXZ83H'; refused.get('displayName').value = 'Sam';
   refused.get('joinForm').fire('submit'); await settlePlayback();
   assert.equal(refused.get('authSection').hidden, false);
@@ -751,7 +751,7 @@ test('the big play button loads the shared stream and starts following the party
   h.metadata(); await settlePlayback();
   assert.equal(h.sync(), true); assert.equal(h.player.paused, false); assert.equal(h.player.currentTime, 5);
   assert.equal(h.get('syncChip').hidden, false);
-  assert.equal(h.get('ctlTime').textContent, '0:05 / 2:00');
+  assert.equal(h.get('ctlRemaining').textContent, '1:55'); // Remaining time, as in the reference player.
 });
 
 test('time formatting and quality note cover hours, unknown durations and native HLS', async () => {
@@ -759,7 +759,101 @@ test('time formatting and quality note cover hours, unknown durations and native
   h.session.handlers.stream({media_key: 'movie|tt1||', url: 'https://stream.example.test/ios.m3u8'});
   h.get('loadStream').fire('click');
   Object.assign(h.player, {duration: 7325, currentTime: 3725}); h.tick();
-  assert.equal(h.get('ctlTime').textContent, '1:02:05 / 2:02:05');
+  assert.equal(h.get('ctlRemaining').textContent, '1:00:00');
   assert.equal(h.get('qualityNote').hidden, false);
   h.player.duration = NaN; h.tick(); assert.equal(h.get('ctlSeek').disabled, true);
+});
+
+// --- XL player, drawer and simplified invite (final master) ---
+
+test('page markup: no banner headline, no hint bar, no permanent side column; code input only as fallback', () => {
+  const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
+  assert.ok(!html.includes('Du bist zu einer Watch Party eingeladen'));
+  assert.ok(!html.includes('Gib deinen Namen ein und klicke'));
+  assert.ok(!html.includes('id="sidePanel"') && !html.includes('id="partyControls"'));
+  assert.match(html, /<label id="codeFallback"[^>]*hidden/);
+  assert.match(html, /<p id="message"[^>]*hidden/);
+  assert.match(html, /<aside id="infoDrawer"[^>]*hidden/);
+  for (const id of ['ctlPlay', 'ctlBack10', 'ctlFwd10', 'ctlMute', 'ctlSeek', 'ctlFullscreen', 'ctlInfo', 'ctlChat', 'ctlBack', 'syncChip', 'resync', 'membersButton']) assert.match(html, new RegExp(`id="${id}"`));
+  assert.match(html, /id="resync"[^>]*>Party-Zeit aktualisieren</);
+  assert.ok(html.indexOf('id="displayName"') < html.indexOf('id="email"')); // Name first, account only on demand.
+});
+
+test('the party code is read from the link; without one the fallback field and a clear notice appear', async () => {
+  const linked = await harness({path: '/party/uxz-83h'});
+  assert.equal(linked.get('partyCode').value, 'UXZ83H'); assert.equal(linked.get('codeFallback').hidden, true);
+  const bare = await harness(); await settlePlayback();
+  assert.equal(bare.get('codeFallback').hidden, false);
+  assert.match(bare.get('preview').textContent, /keinen gültigen Party-Code/);
+  bare.session.room = null; bare.session.join = async () => assert.fail('no join without a valid code');
+  bare.get('displayName').value = 'Sam'; bare.get('joinForm').fire('submit'); await settlePlayback();
+  assert.match(bare.get('message').textContent, /Party-Code/);
+});
+
+test('start page shows name + "Jetzt ansehen"; the login opens only after clicking without a session and can be dismissed', async () => {
+  const h = await harness({path: '/party/UXZ83H'}); await settlePlayback();
+  h.session.room = null; h.session.handlers.closed();
+  // Re-run the start logic outcome: name step visible, account step hidden.
+  assert.equal(h.get('joinSection').hidden, false); assert.equal(h.get('authSection').hidden, true);
+  h.get('invitePlay').fire('click'); // Empty name: focus/notice, no join.
+  assert.match(h.get('message').textContent, /Namen/);
+  h.get('displayName').value = 'Sam'; h.get('invitePlay').fire('click'); await settlePlayback();
+  assert.equal(h.get('authSection').hidden, false);
+  h.get('authBack').fire('click'); assert.equal(h.get('joinSection').hidden, false); assert.equal(h.get('authSection').hidden, true);
+});
+
+test('own controls: ±10 s, fullscreen, drawer, participants strip and connection badge', async () => {
+  const h = await playingGuest();
+  h.session.room.memberId = 'guest'; h.session.room.info.max_members = 8;
+  h.session.room.members = [{id: 'host', display_name: 'Alan'}, {id: 'guest', display_name: 'Sam'}];
+  h.session.handlers.room(h.session.room);
+  assert.equal(h.get('memberCount').textContent, 'Teilnehmer · 2/8');
+  assert.deepEqual(h.get('memberAvatars').children.map(a => [a.textContent, a.className]), [['A', 'avatar host'], ['S', 'avatar']]);
+  assert.equal(h.get('drawerCode').textContent, 'UXZ83H');
+  h.get('ctlFwd10').fire('click'); assert.equal(h.player.currentTime, 15);
+  h.get('ctlBack10').fire('click'); h.get('ctlBack10').fire('click'); assert.equal(h.player.currentTime, 0);
+  let fullscreen = 0; h.get('playerWrap').requestFullscreen = () => { fullscreen++; return Promise.resolve(); };
+  h.get('ctlFullscreen').fire('click'); assert.equal(fullscreen, 1);
+  h.get('ctlInfo').fire('click'); assert.equal(h.get('infoDrawer').hidden, false); assert.equal(h.get('drawerScrim').hidden, false);
+  h.get('drawerScrim').fire('click'); assert.equal(h.get('infoDrawer').hidden, true);
+  h.get('ctlChat').fire('click'); assert.equal(h.get('chatPanel').open, true); h.get('drawerClose').fire('click');
+  h.session.handlers.connection('CHANNEL_ERROR'); assert.equal(h.get('syncChip').textContent, 'Verbindung unterbrochen');
+  h.session.handlers.connection('SUBSCRIBED'); h.get('resync').fire('click'); h.tick();
+  assert.equal(h.get('syncChip').textContent, 'Synchron');
+});
+
+test('iOS without element fullscreen falls back to the native video fullscreen', async () => {
+  const h = await playingGuest(); let native = 0;
+  h.player.webkitEnterFullscreen = () => { native++; };
+  h.get('ctlFullscreen').fire('click'); assert.equal(native, 1);
+});
+
+test('host-only party paused: Play still plays locally, honestly marked "Nicht synchron"; Party-Zeit aktualisieren returns', async () => {
+  const h = await readyGuest(); h.get('resync').fire('click'); h.player.fire('seeked'); // Party is paused.
+  h.player.play = function () { this.paused = false; this.fire('play'); return Promise.resolve(); };
+  h.get('ctlPlay').fire('click'); await settlePlayback();
+  assert.equal(h.player.paused, false); assert.equal(h.sync(), false);
+  assert.match(h.get('message').textContent, /lokal weiter/); assert.equal(h.get('syncChip').textContent, 'Nicht synchron');
+  h.tick(); assert.equal(h.player.paused, false); // Not silently re-paused.
+  h.get('resync').fire('click'); assert.equal(h.sync(), true); assert.equal(h.player.paused, true);
+});
+
+test('a blocked play() is reported instead of a button that seemingly does nothing', async () => {
+  const h = await readyGuest(); h.get('resync').fire('click'); h.player.fire('seeked');
+  h.player.play = () => Promise.reject({name: 'NotAllowedError', message: privateUrl});
+  h.get('ctlPlay').fire('click'); await settlePlayback();
+  assert.match(h.get('message').textContent, /blockiert/);
+  assert.ok(!h.get('message').textContent.includes('INTEGRATION_PRIVATE_SENTINEL'));
+  const idle = await harness(); idle.get('ctlPlay').fire('click');
+  assert.match(idle.get('message').textContent, /Share my stream/);
+});
+
+test('back arrow returns to the invitation without leaving; "Zurück zur Party" resumes the party time', async () => {
+  const h = await playingGuest(); let left = 0; h.session.close = async () => { left++; };
+  h.get('ctlBack').fire('click');
+  assert.equal(h.get('inviteView').hidden, false); assert.equal(h.get('watchSection').hidden, true);
+  assert.equal(h.sync(), false); assert.equal(h.player.paused, true); assert.equal(left, 0);
+  assert.equal(h.get('joinButton').textContent, 'Zurück zur Party');
+  h.get('joinForm').fire('submit'); await settlePlayback();
+  assert.equal(h.get('watchSection').hidden, false); assert.equal(h.sync(), true); assert.equal(h.player.paused, false);
 });

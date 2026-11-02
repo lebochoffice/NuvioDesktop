@@ -62,11 +62,13 @@ const session = client ? new PartySession(client, deviceId, {
     showPanel('watch');
   },
   connection: state => {
+    connectionLost = state !== 'SUBSCRIBED';
     $('connection').textContent = state === 'SUBSCRIBED' ? 'Verbunden' : 'Verbindung unterbrochen';
+    renderPlayerUi();
     if (['CHANNEL_ERROR', 'TIMED_OUT', 'CLOSED'].includes(state)) {
       syncEnabled = false;
       pauseLocally();
-      $('resync').textContent = 'Wiedergabe synchronisieren';
+      $('resync').textContent = 'Party-Zeit aktualisieren';
       status('Privater Realtime-Kanal nicht verbunden. Anmeldung, Backend-Freigabe und Netzwerk prüfen. Nach Wiederverbindung erneut synchronisieren.', true);
     }
   },
@@ -93,7 +95,7 @@ const session = client ? new PartySession(client, deviceId, {
     $('streamInfo').textContent = `Freigegebene Quelle: ${stream.name || stream.filename || 'Video'}. Laden überträgt deine IP-Adresse an den Medienanbieter. Die Quelladresse kann private Tokens enthalten.`;
     const problem = streamProblem(stream);
     $('loadStream').hidden = !!problem;
-    if (problem) { $('noStream').textContent = 'Quelle empfangen, aber im Browser nicht unterstützt. Details stehen oben.'; status(problem, true); }
+    if (problem) { $('noStream').textContent = 'Diese Quelle kann der Browser nicht abspielen. Der Host kann eine andere Quelle teilen.'; status(problem, true); }
     else { $('noStream').textContent = 'Stream bereit. Tippe auf ▶, um gemeinsam zu schauen.'; status('Stream bereit. Tippe auf ▶ zum Abspielen.'); }
   },
   media: () => { resetVideo('Film gewechselt. Persönliche Quelle entfernt. Bitte eine neue eigene Quelle laden.'); $('streamInfo').textContent = 'Film gewechselt. Warte auf die neue Streamfreigabe oder lade eine eigene HLS-Quelle.'; },
@@ -110,14 +112,23 @@ const session = client ? new PartySession(client, deviceId, {
   ended: message => { resetVideo('Party beendet oder Mitgliedschaft verloren. Persönliche Quelle entfernt.'); showPanel('join'); status(message); },
 }) : null;
 
+// Transient toast instead of a permanent banner; errors stay a little longer.
+let toastTimer = null, connectionLost = false;
 function status(message, error = false) {
   $('message').textContent = message;
-  $('message').style.borderColor = error ? '#ff6969' : '#ec896c';
+  $('message').style.borderColor = error ? '#ff6969' : '';
+  $('message').hidden = !message;
+  globalThis.clearTimeout?.(toastTimer);
+  toastTimer = setTimeout(() => { $('message').hidden = true; }, error ? 9000 : 4500);
 }
 function showPanel(name) {
   for (const panel of ['auth', 'join', 'watch']) $(panel + 'Section').hidden = panel !== name;
-  // The invitation card frames both pre-join steps (sign-in and name).
+  // The invitation card frames both pre-join steps (sign-in and name);
+  // the cinema view hides the brand bar.
   $('inviteView').hidden = name === 'watch';
+  $('brandbar').hidden = name === 'watch';
+  $('joinButton').textContent = session?.room ? 'Zurück zur Party' : 'Jetzt ansehen';
+  if (name !== 'watch') closeDrawer();
 }
 function setClass(element, name, on) {
   const names = new Set(String(element.className || '').split(/\s+/).filter(Boolean));
@@ -153,6 +164,14 @@ function renderMembers(room) {
     if (member.id === room.memberId) { const badge = document.createElement('span'); badge.className = 'badge'; badge.textContent = 'Du'; item.append(badge); }
     return item;
   }));
+  // Compact strip under the player: up to five avatars plus the count.
+  $('memberAvatars').replaceChildren(...room.members.slice(0, 5).map(member => {
+    const avatar = document.createElement('span');
+    avatar.className = member.id === room.info.host_member_id ? 'avatar host' : 'avatar'; renderAvatar(avatar, member);
+    return avatar;
+  }));
+  $('memberCount').textContent = `Teilnehmer · ${room.members.length}/${room.info.max_members || 3}`;
+  $('drawerCode').textContent = room.info.code || '–';
 }
 // Invitation from watch_party_preview: rendered with textContent only; no
 // stream source or private data is shown.
@@ -160,7 +179,7 @@ function renderInvite(p) {
   const media = p?.media || {}, host = p?.host;
   const series = media.meta_type === 'series' || Number.isInteger(media.season);
   const title = media.title || 'Watch Party';
-  $('inviteHeadline').textContent = host?.display_name ? `${host.display_name} lädt dich zu ${title} ein.` : 'Du bist zu einer Watch Party eingeladen.';
+  $('inviteHostLine').textContent = host?.display_name ? `${host.display_name} lädt dich ein` : ''; $('inviteHostLine').hidden = !host?.display_name;
   $('inviteTitle').textContent = title;
   const episode = series && Number.isInteger(media.season) ? `S${media.season} E${media.episode ?? '?'}${media.episode_title ? ' · ' + media.episode_title : ''}` : '';
   $('inviteEpisode').textContent = episode; $('inviteEpisode').hidden = !episode;
@@ -203,7 +222,7 @@ function resetVideo(reason = 'Persönliche Quelle entfernt. Für diesen Film kan
   $('noStream').hidden = false; $('loadStream').hidden = true;
   $('noStream').textContent = 'Warte auf eine freigegebene Streamquelle des Hosts …';
   $('streamInfo').textContent = 'Warte auf eine Desktop-Freigabe oder lade eine eigene zulässige HLS-Quelle (Beta).';
-  $('resync').disabled = true; $('resync').textContent = 'Wiedergabe synchronisieren';
+  $('resync').disabled = true; $('resync').textContent = 'Party-Zeit aktualisieren';
 }
 function updatePersonalHlsReadiness(announce = false) {
   if (!personalHls.active || !loadedStream) return;
@@ -264,7 +283,7 @@ function applySync(forcePlay = false) {
       if (!target.retryable) syncEnabled = false;
       waitingForTarget = !!target.retryable;
       pauseLocally(); presence();
-      $('resync').disabled = true; $('resync').textContent = 'Wiedergabe synchronisieren';
+      $('resync').disabled = true; $('resync').textContent = 'Party-Zeit aktualisieren';
       $('personalHlsStatus').textContent = target.message; status(target.message, true);
       return;
     }
@@ -300,7 +319,7 @@ function applySync(forcePlay = false) {
       pendingSeek = null;
       lastPlaybackError = 'seek_failed';
       syncEnabled = false; pauseLocally(); presence();
-      $('resync').textContent = 'Wiedergabe synchronisieren';
+      $('resync').textContent = 'Party-Zeit aktualisieren';
       const message = 'Der Browser konnte den Party-Zeitpunkt nicht anspringen. Bitte einen suchbaren VOD-Stream verwenden und erneut synchronisieren.';
       if (personalHls.active) $('personalHlsStatus').textContent = message;
       status(message, true); return;
@@ -328,9 +347,9 @@ function applySync(forcePlay = false) {
         failVideo('Der Browser unterstützt diese Videoquelle oder ihre Codecs nicht. Bitte eine andere kompatible eigene Quelle laden.', 'NotSupportedError'); return;
       }
       syncEnabled = false; presence();
-      $('resync').textContent = 'Wiedergabe synchronisieren';
+      $('resync').textContent = 'Party-Zeit aktualisieren';
       const message = error?.name === 'NotAllowedError'
-        ? 'Der Browser hat den Wiedergabestart blockiert. Bitte „Wiedergabe synchronisieren“ erneut selbst anklicken.'
+        ? 'Der Browser hat den Wiedergabestart blockiert. Bitte „Party-Zeit aktualisieren“ erneut selbst anklicken.'
         : 'Wiedergabestart fehlgeschlagen. Bitte erneut synchronisieren; bei wiederholtem Fehler eine andere kompatible Quelle laden.';
       if (personalHls.active) $('personalHlsStatus').textContent = message;
       status(message, true);
@@ -402,8 +421,8 @@ function renderQuality(instance, nativeHls = false) {
   $('qualityWrap').hidden = options.length === 0;
   const torbox = loadedStream?.name === 'TorBox HLS';
   $('qualityNote').textContent = options.length ? ''
-    : instance ? (torbox ? 'Qualität: Automatisch – TorBox liefert eine Qualität.' : 'Qualität: Automatisch – die Quelle liefert eine Qualität.')
-    : nativeHls ? 'Qualität: Automatisch – vom Browser gewählt (natives HLS).' : '';
+    : instance ? (torbox ? 'Automatisch · TorBox liefert eine Qualität' : 'Automatisch · eine Qualität verfügbar')
+    : nativeHls ? 'Automatisch · vom Browser gewählt' : '';
   $('qualityNote').hidden = !$('qualityNote').textContent;
 }
 $('quality').addEventListener('change', () => {
@@ -455,10 +474,13 @@ function renderPlayerUi() {
   if (!seekDragging) {
     const value = seekable ? Math.round(player.currentTime / duration * 1000) : 0;
     $('ctlSeek').value = String(value); $('ctlSeek').style.setProperty?.('--fill', `${value / 10}%`);
+    $('ctlRemaining').textContent = seekable ? formatTime(duration - player.currentTime) : '0:00';
   }
   $('ctlSeek').disabled = !seekable;
-  $('ctlTime').textContent = `${formatTime(player.currentTime)} / ${formatTime(duration)}`;
-  const [label, tone] = !syncEnabled ? ['Nicht synchron', 'off'] : buffering || waitingForTarget ? ['Puffert …', 'warn'] : ['Synchron', ''];
+  for (const id of ['ctlBack10', 'ctlFwd10']) $(id).disabled = !seekable;
+  // Badge states come only from the real sync/connection state.
+  const [label, tone] = connectionLost && session?.room ? ['Verbindung unterbrochen', 'lost']
+    : !syncEnabled ? ['Nicht synchron', 'off'] : buffering || waitingForTarget ? ['Puffert …', 'warn'] : ['Synchron', ''];
   $('syncChip').hidden = !loadedStream;
   $('syncChip').textContent = label; $('syncChip').className = tone ? `sync-chip ${tone}` : 'sync-chip';
 }
@@ -468,17 +490,39 @@ function revealControls() {
   globalThis.clearTimeout?.(controlsTimer);
   controlsTimer = setTimeout(() => setClass(wrap, 'show-controls', false), 2800);
 }
+function hideControls() { globalThis.clearTimeout?.(controlsTimer); setClass($('playerWrap'), 'show-controls', false); }
 // Big centre button: loading the shared stream is the explicit consent step
 // (IP disclosure to the media host); playback then starts automatically.
 function startStream() { startAfterLoad = true; loadStream(); }
-function togglePlay() {
-  if (!loadedStream) { if (selectedStream && !$('loadStream').hidden) startStream(); return; }
-  if (!syncEnabled) {
-    if ($('resync').disabled) { status('Die Quelle lädt noch. Gleich geht es los.'); return; }
-    resyncNow(); return;
-  }
+// play() inside the click gesture; a blocked or failed start is reported,
+// never silently ignored.
+function playLocally() {
   markGesture();
-  if (player.paused) Promise.resolve(player.play()).catch(() => {}); else player.pause();
+  Promise.resolve(player.play()).catch(error => {
+    if (error?.name === 'AbortError') return;
+    lastPlaybackError = error?.name === 'NotAllowedError' ? 'NotAllowedError' : 'play_failed';
+    status(error?.name === 'NotAllowedError' ? 'Der Browser hat den Start blockiert. Bitte noch einmal auf Play tippen.' : 'Die Wiedergabe konnte nicht starten. Bitte erneut versuchen.', true);
+  });
+}
+function togglePlay() {
+  if (!loadedStream) {
+    if (selectedStream && !$('loadStream').hidden) startStream();
+    else status('Noch kein Stream freigegeben. Der Host muss „Share my stream“ aktivieren.');
+    return;
+  }
+  if (!player.paused) { markGesture(); player.pause(); return; }
+  const party = effectivePlayback();
+  // Back into a running party: start in sync instead of at the old position.
+  if (!syncEnabled && party && !party.paused && !$('resync').disabled) { resyncNow(); return; }
+  if (player.readyState < 1) { status('Die Quelle lädt noch. Gleich geht es los.'); return; }
+  playLocally();
+}
+function skip(seconds) {
+  const duration = player.duration;
+  if (!loadedStream || !Number.isFinite(duration)) return;
+  markGesture();
+  player.currentTime = Math.max(0, Math.min(duration - .1, player.currentTime + seconds));
+  renderPlayerUi(); revealControls();
 }
 function toggleFullscreen() {
   const wrap = $('playerWrap');
@@ -486,17 +530,44 @@ function toggleFullscreen() {
   if (wrap.requestFullscreen) Promise.resolve(wrap.requestFullscreen()).catch(() => {});
   else player.webkitEnterFullscreen?.(); // iOS Safari: native fullscreen player.
 }
+function openDrawer(section = 'info') {
+  if (document.fullscreenElement) document.exitFullscreen?.(); // The drawer lives outside the player.
+  $('infoDrawer').hidden = false; $('drawerScrim').hidden = false;
+  $('ctlInfo').setAttribute?.('aria-expanded', 'true');
+  if (section === 'chat') { $('chatPanel').open = true; $('chatText').focus?.(); }
+  else $('drawerClose').focus?.();
+}
+function closeDrawer() {
+  $('infoDrawer').hidden = true; $('drawerScrim').hidden = true;
+  $('ctlInfo').setAttribute?.('aria-expanded', 'false');
+}
+// Back arrow: to the invitation without leaving the party. Local playback
+// pauses; "Zurück zur Party" re-joins the party time.
+function backToInvite() {
+  if (document.fullscreenElement) { document.exitFullscreen?.(); return; }
+  if (syncEnabled) { syncEnabled = false; pauseLocally(); presence(); }
+  else if (!player.paused) pauseLocally();
+  showPanel('join');
+}
 player.controls = false;
 setClass($('playerWrap'), 'custom-controls', true);
 $('ctlPlay').addEventListener('click', togglePlay);
+$('ctlBack10').addEventListener('click', () => skip(-10));
+$('ctlFwd10').addEventListener('click', () => skip(10));
 $('ctlFullscreen').addEventListener('click', toggleFullscreen);
+$('ctlBack').addEventListener('click', backToInvite);
+$('ctlInfo').addEventListener('click', () => openDrawer('info'));
+$('ctlChat').addEventListener('click', () => openDrawer('chat'));
+$('membersButton').addEventListener('click', () => openDrawer('info'));
+$('drawerClose').addEventListener('click', closeDrawer);
+$('drawerScrim').addEventListener('click', closeDrawer);
 $('ctlMute').addEventListener('click', () => { player.muted = !player.muted; renderPlayerUi(); });
 $('ctlVolume').addEventListener('input', () => { player.volume = Number($('ctlVolume').value); player.muted = player.volume === 0; renderPlayerUi(); });
 $('ctlSeek').addEventListener('input', () => {
   seekDragging = true;
   const duration = player.duration, value = Number($('ctlSeek').value);
   $('ctlSeek').style.setProperty?.('--fill', `${value / 10}%`);
-  $('ctlTime').textContent = `${formatTime(duration * value / 1000)} / ${formatTime(duration)}`;
+  $('ctlRemaining').textContent = formatTime(duration - duration * value / 1000);
 });
 $('ctlSeek').addEventListener('change', () => {
   seekDragging = false;
@@ -506,22 +577,29 @@ $('ctlSeek').addEventListener('change', () => {
   player.currentTime = duration * Number($('ctlSeek').value) / 1000;
   renderPlayerUi();
 });
-$('ctlPanel').addEventListener('click', () => {
-  const closed = !String($('watchSection').className || '').includes('panel-closed');
-  setClass($('watchSection'), 'panel-closed', closed);
-  $('ctlPanel').setAttribute?.('aria-expanded', String(!closed));
+// Mouse: movement reveals, click on the picture toggles playback.
+// Touch: a tap on the picture shows or hides the controls (no double-tap logic).
+let controlsShownAtPointer = false;
+$('playerWrap').addEventListener('pointerdown', e => {
+  lastPointerType = e.pointerType || 'mouse';
+  controlsShownAtPointer = String($('playerWrap').className || '').includes('show-controls');
+  if (lastPointerType === 'mouse' || e.target?.closest?.('.controls-bar, .player-top')) revealControls();
 });
-$('playerWrap').addEventListener('pointerdown', e => { lastPointerType = e.pointerType || 'mouse'; revealControls(); });
-$('playerWrap').addEventListener('pointermove', revealControls);
+$('playerWrap').addEventListener('pointermove', e => { if ((e.pointerType || 'mouse') === 'mouse') revealControls(); });
 $('playerWrap').addEventListener('keydown', e => {
   if (['INPUT', 'SELECT', 'BUTTON'].includes(e.target?.tagName)) return;
   revealControls();
   if (e.key === ' ' || e.key === 'k' || e.key === 'K') { e.preventDefault(); togglePlay(); }
+  else if (e.key === 'ArrowLeft') skip(-10);
+  else if (e.key === 'ArrowRight') skip(10);
   else if (e.key === 'f' || e.key === 'F') toggleFullscreen();
   else if (e.key === 'm' || e.key === 'M') { player.muted = !player.muted; renderPlayerUi(); }
 });
-// Mouse click on the picture toggles playback; a tap only reveals controls.
-player.addEventListener('click', () => { if (lastPointerType === 'mouse') togglePlay(); });
+window.addEventListener('keydown', e => { if (e.key === 'Escape' && !$('infoDrawer').hidden) closeDrawer(); });
+player.addEventListener('click', () => {
+  if (lastPointerType === 'mouse') togglePlay();
+  else if (controlsShownAtPointer) hideControls(); else revealControls();
+});
 for (const event of ['timeupdate', 'play', 'pause', 'durationchange', 'volumechange', 'emptied']) player.addEventListener(event, () => renderPlayerUi());
 // Local user gesture → shared command. Coalesced: one RPC in flight, the
 // latest gesture queued. Confirmed states arrive via acceptPlayback.
@@ -622,7 +700,11 @@ window.addEventListener('pagehide', () => {
   if (personalHls.active) resetVideo();
 });
 
+// The code comes only from the invitation link (/party/<CODE>). Manual entry is
+// a visible fallback solely when the link carries no valid code.
 $('partyCode').value = partyCodeFromPath(location.pathname);
+$('codeFallback').hidden = validCode($('partyCode').value);
+$('authBack').addEventListener('click', () => { pendingJoin = false; showPanel('join'); });
 $('loginForm').addEventListener('submit', async e => {
   e.preventDefault(); if (!client) return status(configProblem, true);
   $('loginButton').disabled = true;
@@ -645,7 +727,7 @@ function updateInviteLinks() {
 async function preview() {
   updateInviteLinks();
   if (!client) return;
-  if (!validCode($('partyCode').value)) { $('preview').textContent = 'Gib den Party-Code aus deiner Einladung ein.'; return; }
+  if (!validCode($('partyCode').value)) { $('preview').textContent = 'Dieser Link enthält keinen gültigen Party-Code. Bitte den Einladungslink erneut öffnen oder den Party-Code eingeben.'; return; }
   try {
     const p = await callRpc(client, 'watch_party_preview', {p_code: normalizeCode($('partyCode').value)});
     renderInvite(p);
@@ -667,6 +749,12 @@ const guestJoinEnabled = import.meta.env.VITE_PARTY_GUEST_JOIN === '1';
 let pendingJoin = false;
 async function joinParty() {
   if (!session) return status(configProblem, true);
+  // Already a member (came back via the back arrow): return without re-joining.
+  if (session.room) {
+    showPanel('watch');
+    if (loadedStream && !$('resync').disabled) resyncNow();
+    return;
+  }
   const code = normalizeCode($('partyCode').value);
   if (!validCode(code)) return status('Bitte den sechsstelligen Party-Code aus der Einladung eingeben.', true);
   const rawIndex = $('profileIndex').value.trim();
@@ -715,7 +803,7 @@ function resyncNow() {
   pendingPlay = null; // An explicit retry owns a new start attempt.
   syncEnabled = true;
   session.requestState().catch(() => status('Aktueller Host-Zustand konnte nicht angefragt werden. Realtime-Verbindung prüfen.', true));
-  $('resync').textContent = personalHls.active ? 'Party-Zeit folgen (erneut ausrichten)' : 'Synchronisiert (erneut ausrichten)';
+  $('resync').textContent = 'Party-Zeit aktualisieren';
   applySync(true); presence(); renderPlayerUi();
   if (syncEnabled && !waitingForTarget && session.playback.paused) status('Der Host hat pausiert. Die Wiedergabe startet, sobald er fortsetzt.');
 }
@@ -724,7 +812,7 @@ player.addEventListener('loadedmetadata', () => {
   if (!loadedStream) return;
   if (personalHls.active) { updatePersonalHlsReadiness(true); return; }
   loading = false; $('noStream').hidden = true; $('resync').disabled = false;
-  status('Metadaten geladen. Klicke auf „Wiedergabe synchronisieren“. Codecfehler können erst beim Start sichtbar werden.'); presence();
+  status('Metadaten geladen. Klicke auf „Party-Zeit aktualisieren“. Codecfehler können erst beim Start sichtbar werden.'); presence();
   // Started via the big play button: follow the party at once. If the
   // browser blocks autoplay, the play button retries within a user gesture.
   if (startAfterLoad) { startAfterLoad = false; resyncNow(); }
@@ -759,7 +847,7 @@ for (const event of ['pause', 'seeking', 'ratechange']) player.addEventListener(
     if (event === 'pause') { sendControl(true, player.currentTime); return; }
     if (event === 'seeking') { userSeekPending = true; return; }
   }
-  syncEnabled = false; $('resync').textContent = 'Wiedergabe synchronisieren';
+  syncEnabled = false; $('resync').textContent = 'Party-Zeit aktualisieren';
   pendingPlay = null;
   pendingSeek = internalHlsSeek = null;
   mediaPointerDown = false; mediaGestureUntil = -1;
@@ -782,7 +870,12 @@ player.addEventListener('play', () => {
   if (!syncEnabled || pendingPlay) return;
   const userControl = mediaPointerDown || performance.now() <= mediaGestureUntil;
   if (!userControl || !effectivePlayback()?.paused) return;
-  if (!sendControl(false, player.currentTime)) status('Die Party startet der Desktop-Host. Die Party-Pause wird beibehalten.');
+  if (sendControl(false, player.currentTime)) return;
+  // Shared control not available: playing locally is allowed, but honestly
+  // marked as "Nicht synchron" instead of pretending the party started.
+  syncEnabled = false; pendingPlay = null;
+  status('Die Party ist pausiert – du schaust lokal weiter. „Party-Zeit aktualisieren“ holt dich zurück.');
+  presence(); renderPlayerUi();
 });
 // load() cancels old media tasks; their pause events may never be delivered.
 player.addEventListener('emptied', () => { expectedPauses = 0; });
@@ -856,12 +949,11 @@ client?.auth.onAuthStateChange((event, authSession) => {
   if (!client) { showPanel('auth'); $('loginButton').disabled = true; status(configProblem, true); return; }
   try {
     try { $('displayName').value = localStorage.getItem('nuvio-party-name') || ''; } catch { /* Optional. */ }
-    const {data: {session: auth}, error} = await client.auth.getSession();
+    const {error} = await client.auth.getSession();
     if (error) throw error;
-    // Returning visitors (stored session) and opted-in guest builds go straight
-    // to "Name → Jetzt ansehen"; otherwise the one-time account step is shown.
-    const ready = auth?.user && (!auth.user.is_anonymous || guestJoinEnabled);
-    showPanel(ready || guestJoinEnabled ? 'join' : 'auth');
+    // Name + "Jetzt ansehen" first; joinParty() opens the one-time account
+    // step only when no usable session exists.
+    showPanel('join');
     await preview();
   } catch (e) { showPanel('auth'); status(friendlyError(e), true); }
 })();
