@@ -1,0 +1,34 @@
+name: Fork - Review upstream updates
+
+on:
+  schedule:
+    - cron: '23 7 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-upstream-review
+  cancel-in-progress: false
+
+jobs:
+  propose:
+    if: github.repository == 'lebochoffice/NuvioDesktop' && github.event.repository.default_branch == 'Dev' && github.ref == 'refs/heads/Dev'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      GH_TOKEN: ${{ secrets.FORK_SYNC_TOKEN || github.token }}
+      GIT_LFS_SKIP_SMUDGE: '1'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: Dev
+          fetch-depth: 0
+          token: ${{ secrets.FORK_SYNC_TOKEN || github.token }}
+      - name: Propose upstream changes without merging or approving
+        shell: bash
+        run: bash fork-maintenance/upstream-pr.sh

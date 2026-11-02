@@ -22,6 +22,8 @@ concurrency:
 
 jobs:
   update:
+    # Forks review all code changes; never commit generated release data to Dev.
+    if: github.repository == 'NuvioMedia/NuvioDesktop'
     name: Update store.json
     runs-on: ubuntu-latest
     env:

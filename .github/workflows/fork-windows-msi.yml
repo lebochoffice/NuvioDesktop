@@ -1,0 +1,94 @@
+name: Fork - Windows MSI
+
+on:
+  pull_request:
+    branches: [Dev]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-windows-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  browser:
+    if: github.repository == 'lebochoffice/NuvioDesktop'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Check browser bridge is present
+        shell: bash
+        run: test -f browser-site/package-lock.json
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: browser-site/package-lock.json
+      - run: npm ci --ignore-scripts
+        working-directory: browser-site
+      - run: npm test
+        working-directory: browser-site
+      - run: npm run build
+        working-directory: browser-site
+        env:
+          VITE_SUPABASE_URL: ${{ vars.NUVIO_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ vars.NUVIO_SUPABASE_ANON_KEY }}
+
+  windows:
+    if: github.repository == 'lebochoffice/NuvioDesktop'
+    runs-on: windows-2022
+    timeout-minutes: 60
+    env:
+      GIT_LFS_SKIP_SMUDGE: '1'
+      NUVIO_SUPABASE_URL: ${{ vars.NUVIO_SUPABASE_URL }}
+      NUVIO_SUPABASE_ANON_KEY: ${{ vars.NUVIO_SUPABASE_ANON_KEY }}
+      WEBVIEW2_VERSION: 1.0.4078.44
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Fetch official Windows runtime without user credentials
+        shell: pwsh
+        run: |
+          git lfs fetch https://github.com/NuvioMedia/NuvioDesktop.git HEAD --include='composeApp/src/desktopMain/native/windows/runtime/**' --exclude=''
+          if ($LASTEXITCODE -ne 0) { throw 'Windows runtime LFS download failed' }
+          git lfs checkout 'composeApp/src/desktopMain/native/windows/runtime/*'
+          if ($LASTEXITCODE -ne 0) { throw 'Windows runtime LFS checkout failed' }
+          if ((Get-Item 'composeApp/src/desktopMain/native/windows/runtime/libmpv-2.dll').Length -lt 1000000) { throw 'libmpv is still an LFS pointer' }
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: gradle/actions/setup-gradle@v6
+      - name: Install WebView2 build SDK locally
+        shell: pwsh
+        run: |
+          $sdk = Join-Path $env:RUNNER_TEMP "Microsoft.Web.WebView2.$env:WEBVIEW2_VERSION"
+          nuget install Microsoft.Web.WebView2 -Version $env:WEBVIEW2_VERSION -OutputDirectory $env:RUNNER_TEMP -DirectDownload -NonInteractive -NoCache
+          if ($LASTEXITCODE -ne 0) { throw 'WebView2 SDK download failed' }
+          if (-not (Test-Path -LiteralPath (Join-Path $sdk 'build/native/x64/WebView2Loader.dll.lib'))) { throw 'WebView2 x64 library missing' }
+          "NUVIO_WEBVIEW2_DIR=$sdk" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Test party logic
+        shell: pwsh
+        run: |
+          .\gradlew.bat :composeApp:desktopTest --tests '*Party*Test' "-Pnuvio.webview2.dir=$env:NUVIO_WEBVIEW2_DIR" '-Dorg.gradle.jvmargs=-Xmx4g' '-Pkotlin.daemon.jvmargs=-Xmx3g' --max-workers=2 --no-configuration-cache --console=plain --stacktrace
+          if ($LASTEXITCODE -ne 0) { throw 'Party tests failed' }
+      - name: Build MSI only when manually requested on reviewed Dev
+        if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/Dev'
+        shell: pwsh
+        run: ./fork-maintenance/build-ci.ps1
+      - name: Upload MSI and verification manifest - no release
+        if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/Dev'
+        uses: actions/upload-artifact@v7
+        with:
+          name: Nuvio-Browser-Bridge-Windows-${{ github.sha }}
+          path: |
+            composeApp/build/compose/release-msis/*.msi
+            composeApp/build/compose/release-msis/*verification.json
+          if-no-files-found: error
+          retention-days: 14
