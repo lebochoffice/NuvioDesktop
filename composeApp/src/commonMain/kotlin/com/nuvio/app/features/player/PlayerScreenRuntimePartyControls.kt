@@ -198,7 +198,7 @@ internal fun PlayerScreenRuntime.rememberPartyControlsState(): PlayerControlPart
         isHost = party.isHost,
         hostOnly = party.hostOnly,
         sharing = party.sharing,
-        shareNote = if (party.sharing && currentPartyStream() == null) stringResource(Res.string.party_share_unavailable) else "",
+        shareNote = if (party.sharing && currentPartyStream() == null) stringResource(Res.string.party_share_unavailable) else torboxPartyStatus,
         canEnd = party.isHost && party.members.size > 1,
         seatsLabel = stringResource(Res.string.party_seats, party.members.size, party.maxMembers),
         maxMembers = party.maxMembers,
@@ -226,8 +226,8 @@ internal fun PlayerScreenRuntime.handlePartyControlsEvent(type: String, value: D
         if (party?.isHost == true && url != null &&
             url.length <= 2048 &&
             Regex("^https://[A-Za-z0-9.-]+(?::[0-9]{1,5})?/party/${Regex.escape(party.code)}$").matches(url)) {
-            // A value of 1 is sent only by the explicit confirmation action.
-            if (value >= 0.5) PartyRepository.setSharing(true)
+            // Invite events are copy-only, including events from older overlays.
+            // Only the existing partySharing switch may change consent.
             copyBrowserInvite(url)
         } else {
             showPartyMessage("Invalid browser invite")

@@ -32,8 +32,17 @@
     <section id="watchSection" class="panel" hidden>
       <div class="row"><div><span class="eyebrow" id="partyLabel">WATCH PARTY</span><h2 id="movieTitle">Film</h2><p class="muted" id="movieInfo"></p></div><button id="leaveButton" type="button" class="secondary small">Verlassen</button></div>
       <div class="playerWrap"><video id="player" controls playsinline preload="metadata" crossorigin="anonymous"></video><div id="noStream" class="waiting">Warte auf eine freigegebene Streamquelle des Hosts …</div></div>
+      <details id="personalHlsPanel">
+        <summary>Eigene HLS-URL (Beta)</summary>
+        <p class="muted">Verwende deinen eigenen zulässigen Zugang und dieselbe vollständige Filmfassung wie der Desktop-Host. Die URL bleibt nur vorübergehend in diesem Browser und wird nicht an die Party gesendet. Nur abgeschlossene VOD-Playlists werden synchronisiert.</p>
+        <form id="personalHlsForm" autocomplete="off">
+          <label>Persönliche HTTPS-HLS-Playlist<input id="personalHlsUrl" type="url" inputmode="url" autocomplete="off" spellcheck="false" maxlength="16384" placeholder="https://…" aria-describedby="personalHlsStatus" required></label>
+          <div class="row controls"><button id="loadPersonalHls" type="submit">Eigene HLS-Quelle laden</button><button id="useDesktopStream" type="button" class="secondary" hidden>Zur Desktop-Freigabe zurück</button></div>
+        </form>
+        <p id="personalHlsStatus" class="muted" role="status" aria-live="polite">Die Eingabe wird nach dem Laden geleert und nicht dauerhaft gespeichert. Erst „Wiedergabe synchronisieren“ folgt der Party-Zeit.</p>
+      </details>
       <div class="row controls"><button id="loadStream" type="button" hidden>Freigegebenen Stream laden</button><button id="resync" type="button" class="secondary" disabled>Wiedergabe synchronisieren</button></div>
-      <p id="streamInfo" class="muted">Der Host muss „Share my stream“ aktivieren. Direkte Stream-URLs müssen browserkompatibel sein.</p>
+      <p id="streamInfo" class="muted">Nutze eine Desktop-Freigabe („Share my stream“) oder deine eigene zulässige HLS-Quelle (Beta). Die Quelle muss browserkompatibel sein.</p>
       <details><summary>Chat</summary><div id="chatLog" class="chat" aria-live="polite"></div><form id="chatForm" class="row"><input id="chatText" maxlength="500" placeholder="Nachricht" aria-label="Chatnachricht" required><button type="submit">Senden</button></form></details>
     </section>
     <footer>Nur für Inhalte, zu deren Wiedergabe und Freigabe du berechtigt bist. Keine Umgehung von DRM oder Streaming-Anbieter-Schutz. Debrid-Links und Tokens können beim Teilen offengelegt werden.</footer>

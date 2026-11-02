@@ -935,6 +935,10 @@ internal fun MainAppContent(
                         profileId = activePlaybackProfileId,
                         title = playbackTitle,
                         sourceUrl = resolved.url,
+                        stream = resolved.torboxPartyFile?.let { identity ->
+                            com.nuvio.app.features.streams.StreamItem(url = resolved.url, addonName = item.providerName,
+                                addonId = "cloud:${item.providerId}", name = playbackTitle, torboxPartyFile = identity)
+                        },
                         streamTitle = playbackTitle,
                         streamSubtitle = item.name.takeIf { it != playbackTitle },
                         providerName = item.providerName,

@@ -84,6 +84,35 @@ try {
   await page.locator('#loadStream').click();
   await page.getByText(/Video nicht abspielbar/).waitFor();
   assert.ok(mediaRequests > 0); assert.equal(await page.locator('#resync').isDisabled(),true);
+  // Personal HLS regression: real hls.js must request the relative segment.
+  // The segment deliberately returns 410; this is NOT a playback success test.
+  const personalSentinel = 'PERSONAL_HLS_TEST_ONLY';
+  const relativeSegments = [];
+  await page.route('https://hls.invalid/**', async route => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === '/owned/master') return route.fulfill({status:200,contentType:'application/vnd.apple.mpegurl',headers:{'Access-Control-Allow-Origin':'*'},body:'#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:10\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:10,\nsegments/000.ts\n#EXT-X-ENDLIST\n'});
+    relativeSegments.push(route.request().url());
+    return route.fulfill({status:410,headers:{'Access-Control-Allow-Origin':'*'},body:'Fixture segment expired'});
+  });
+  await page.getByText('Eigene HLS-URL (Beta)',{exact:true}).click();
+  await page.locator('#personalHlsUrl').fill(`https://hls.invalid/owned/master?token=${personalSentinel}`);
+  await page.locator('#loadPersonalHls').click();
+  await page.getByText(/HLS-Playlist oder Segment nicht mehr verfügbar/).first().waitFor();
+  assert.ok(relativeSegments.includes('https://hls.invalid/owned/segments/000.ts'));
+  assert.equal(await page.locator('#personalHlsUrl').inputValue(),'');
+  assert.equal(await page.locator('#resync').isDisabled(),true);
+  snapshot.party.media.title = 'Private HLS retained';
+  emit('stream', {member_id:'host',stream:{media_key:'movie|tt1||',url:'https://cdn.invalid/ignored.mkv'}});
+  // The following frame triggers a heartbeat/title update; observing it proves
+  // the earlier stream frame has been handled (no timing-only sleep/assertion).
+  emit('control', {host_only:true});
+  await page.getByRole('heading',{name:'Private HLS retained',exact:true}).waitFor();
+  assert.match(await page.locator('#message').textContent(), /HLS-Playlist oder Segment nicht mehr verfügbar/);
+  assert.ok(requests.every(r => !String(JSON.stringify(r.body)).includes(personalSentinel)));
+  assert.ok(broadcasts.every(b => !JSON.stringify(b).includes(personalSentinel)));
+  assert.equal(await page.evaluate(sentinel => Object.values(localStorage).some(value => value.includes(sentinel)), personalSentinel),false);
+  await page.locator('#useDesktopStream').click();
+  snapshot.party.media.title = 'Synthetischer Integrationstest';
   // Generate our own short VP8/WebM fixture inside Chrome. No external media.
   const videoBytes = Buffer.from(await page.evaluate(async () => {
     const canvas = document.createElement('canvas'); canvas.width = 320; canvas.height = 180;
@@ -122,5 +151,5 @@ try {
   await page.locator('#leaveButton').click(); await page.locator('#joinSection').waitFor({state:'visible'});
   assert.ok(requests.some(r => r.name === 'watch_party_leave'));
   assert.deepEqual(errors, []);
-  console.log('PASS: Chrome UI, invite route, login, private channel handshake, RPC join/chat/leave, escaped chat, stream consent, format/header/HTTPS rejection, network failure, generated WebM playback, host play/pause/seek sync and stream revocation. Synthetic backend only.');
+  console.log('PASS: synthetic Chrome checks, personal HLS relative-segment request/privacy/error protection, and generated WebM host sync. No real TorBox HLS playback is confirmed by this fixture.');
 } finally { await browser?.close(); child.kill(); }

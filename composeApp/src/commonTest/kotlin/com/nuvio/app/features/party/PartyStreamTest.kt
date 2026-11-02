@@ -5,6 +5,10 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.SerialName
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.jsonPrimitive
 
 class PartyStreamTest {
     private val stream = PartyStream(
@@ -59,4 +63,51 @@ class PartyStreamTest {
         val encoded = PartyApi.json.encodeToString(PartyStream.serializer(), stream)
         assertEquals(stream, PartyApi.json.decodeFromString(PartyStream.serializer(), encoded))
     }
+
+    @Test
+    fun browserHlsCannotChangeDesktopQualityHeadersOrMetadata() {
+        val shared = stream.copy(browserHls = PartyBrowserHls("https://stream.example.test/master.m3u8"))
+        assertEquals(stream, shared.forDesktop())
+        assertEquals(stream.toStreamItem(), shared.toStreamItem())
+        val renewed = shared.copy(browserHls = PartyBrowserHls("https://stream.example.test/renewed.m3u8"))
+        assertEquals(shared.forDesktop(), renewed.forDesktop())
+        val pending = shared.copy(browserHls = PartyBrowserHls())
+        assertEquals(stream, pending.forDesktop())
+        val json = PartyApi.json.encodeToJsonElement(PartyStream.serializer(), shared) as JsonObject
+        assertEquals(stream.url, json.getValue("url").jsonPrimitive.content)
+        assertEquals(shared, PartyApi.json.decodeFromString(PartyStream.serializer(), json.toString()))
+    }
+
+    @Test
+    fun previousDesktopWireModelIgnoresTheOptionalBrowserSource() {
+        val shared = stream.copy(browserHls = PartyBrowserHls("https://stream.example.test/master.m3u8"))
+        val encoded = PartyApi.json.encodeToString(PartyStream.serializer(), shared)
+        val legacy = PartyApi.json.decodeFromString(LegacyDesktopStream.serializer(), encoded)
+        assertEquals(stream.mediaKey, legacy.mediaKey)
+        assertEquals(stream.url, legacy.url)
+        assertEquals(stream.headers, legacy.headers)
+        assertEquals(stream.filename, legacy.filename)
+        assertEquals(stream.videoSize, legacy.videoSize)
+        // Conversely a pre-extension message still decodes to the same original.
+        val oldWire = PartyApi.json.encodeToString(PartyStream.serializer(), stream)
+        assertEquals(stream, PartyApi.json.decodeFromString(PartyStream.serializer(), oldWire))
+    }
+
+    @Test
+    fun completeAccountKeysAreForbiddenInBothSourcesAndHeaders() {
+        val accountKey = "synthetic-account-secret"
+        assertFalse(stream.containsAccountKey(accountKey))
+        assertTrue(stream.copy(headers = mapOf("Authorization" to "Bearer $accountKey")).containsAccountKey(accountKey))
+        assertTrue(stream.copy(browserHls = PartyBrowserHls("https://stream.example.test/a?token=synthetic%2Daccount%2Dsecret")).containsAccountKey(accountKey))
+        assertFalse(stream.copy(browserHls = PartyBrowserHls("https://stream.example.test/a?token=scoped")).containsAccountKey(accountKey))
+    }
 }
+
+@Serializable
+private data class LegacyDesktopStream(
+    @SerialName("media_key") val mediaKey: String,
+    val url: String,
+    val headers: Map<String, String> = emptyMap(),
+    val filename: String? = null,
+    @SerialName("video_size") val videoSize: Long? = null,
+)

@@ -33,13 +33,29 @@ export const isDashUrl = url => /\.mpd(?:[?#]|$)/i.test(url);
 export const isUnsupportedFile = url => /\.(?:mkv|avi|torrent)(?:[?#]|$)/i.test(url) || /^(?:magnet|ipfs):/i.test(url);
 export function streamProblem(stream) {
   if (!safeStreamUrl(stream?.url)) return 'Die Quelle muss eine öffentliche HTTPS-Adresse ohne Benutzername/Passwort sein. Lokale, Torrent- und HTTP-Quellen funktionieren hier nicht.';
-  if (Object.keys(stream.headers || {}).length) return 'Die Quelle benötigt eigene HTTP-Header (z. B. Authorization, Referer oder User-Agent). Dieser Browser-Player unterstützt solche Quellen nicht.';
+  if (Object.keys(stream.headers || {}).length) {
+    if (!streamIsHls(stream) || Object.entries(stream.headers).some(([name, value]) =>
+      !['accept', 'accept-language'].includes(name.toLowerCase()) ||
+      typeof value !== 'string' || value.length > 4096 || /[\r\n\u0000]/.test(value))) {
+      return 'Diese HTTP-Header können nicht sicher gesetzt werden. HLS unterstützt Accept und Accept-Language mit serverseitiger CORS-Freigabe; Range verwaltet hls.js selbst. Keine Account-Authorization, Referer- oder User-Agent-Umschreibung.';
+    }
+  }
   if (Object.keys(stream.response_headers || {}).length) return 'Die Quelle benötigt Änderungen an den Antwort-Headern. Statisches Hosting kann das nicht leisten; CORS muss vom Medienserver selbst erlaubt werden.';
   const names = [stream.url, stream.filename || ''];
   if (names.some(x => isUnsupportedFile(x) || isDashUrl(x))) return 'MKV, AVI, Torrent und DASH werden hier nicht unterstützt. Verwende eine browserkompatible MP4/WebM- oder HLS-Quelle.';
   return '';
 }
 export const streamIsHls = s => isHlsUrl(s.url) || /\.m3u8$/i.test(s.filename || '') || /hls|mpegurl/i.test(s.stream_type || '');
+
+// Optional extension of the existing stream event. Desktop fields retain the
+// original source; browser metadata never changes media_key or playback state.
+export function browserPartyStream(stream) {
+  if (!stream || !Object.hasOwn(stream, 'browser_hls')) return stream;
+  const browser = stream.browser_hls;
+  if (!browser || typeof browser !== 'object' || Array.isArray(browser) || typeof browser.url !== 'string' || !browser.url) return null;
+  return {media_key: stream.media_key, url: browser.url, headers: browser.headers || {},
+    response_headers: {}, name: 'TorBox HLS', stream_type: 'hls'};
+}
 
 export function publicConfigProblem(url, key) {
   if (!url || !key) return 'Backend-Konfiguration fehlt: VITE_SUPABASE_URL und VITE_SUPABASE_ANON_KEY müssen beim Build gesetzt werden.';

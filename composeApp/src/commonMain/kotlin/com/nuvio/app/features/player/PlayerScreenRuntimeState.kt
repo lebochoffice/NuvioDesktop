@@ -288,6 +288,9 @@ internal class PlayerScreenRuntime(
         get() = showAudioModal || showSubtitleModal || showVideoSettingsModal || showStreamInfo ||
             showPartyPanel || showSourcesPanel || showEpisodesPanel || showSubmitIntroModal
     var partyBehind by mutableStateOf(false)
+    var torboxPartyStream by mutableStateOf<com.nuvio.app.features.party.PartyStream?>(null)
+    var torboxPartyStatus by mutableStateOf("")
+    var torboxPreparedFile by mutableStateOf<com.nuvio.app.features.debrid.TorboxPartyFile?>(null)
     var partyBehindMs by mutableStateOf<Long?>(null)
     var partyRateNudge: Float? = null
     var partyPreviousKey: String? = null

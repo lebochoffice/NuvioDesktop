@@ -17,6 +17,11 @@ export class PartySession {
     this.chatCursor = null; this.chatBusy = null; this.refreshBusy = null;
     this.seenMessages = new Set(); this.timers = []; this.clockOffset = 0;
     this.presence = {status: 'browsing'};
+    this.closing = null;
+    // Local, allowlisted telemetry only: never retain payloads, identities or URLs.
+    this.diagnostics = {connection: 'CLOSED', realtimeStates: 0, snapshotStates: 0,
+      lastRealtimeAt: null, lastAcceptedAt: null, acceptedSource: null,
+      lastSource: null, lastDecision: null, candidateSeq: null};
   }
   rpc(name, args) { return callRpc(this.client, name, args); }
   emit(name, value) { this.handlers[name]?.(value); }
@@ -43,7 +48,7 @@ export class PartySession {
     this.room = {info: snapshot.party, memberId: snapshot.member_id, members: snapshot.members || []};
     if (Number.isFinite(snapshot.server_time_ms)) this.clockOffset = snapshot.server_time_ms - (sent + Date.now()) / 2;
     this.emit('room', this.room);
-    this.acceptPlayback(snapshot.party.playback);
+    this.acceptPlayback(snapshot.party.playback, 'snapshot');
     try {
       await this.client.realtime.setAuth(session.access_token);
       if (gen !== this.generation) return;
@@ -53,6 +58,7 @@ export class PartySession {
     } catch (e) { if (gen === this.generation) await this.close(); throw e; }
   }
   attachRealtime(gen) {
+    this.diagnostics.connection = 'CONNECTING';
     const room = this.room;
     const ch = this.client.channel(`watch-party:${room.info.id}`, {
       config: {private: true, broadcast: {ack: false, self: false}, presence: {key: room.memberId}},
@@ -65,16 +71,17 @@ export class PartySession {
     }
     ch.subscribe(async (state, error) => {
       if (gen !== this.generation) return;
+      this.diagnostics.connection = ['SUBSCRIBED', 'CHANNEL_ERROR', 'TIMED_OUT', 'CLOSED'].includes(state) ? state : 'CONNECTING';
       this.emit('connection', state);
-      if (error) this.emit('error', new Error('Privater Realtime-Kanal: ' + (error.message || state)));
+      if (error) this.emit('error', new Error('Privater Realtime-Kanal nicht verbunden. Anmeldung und Netzwerk prüfen.'));
       if (state !== 'SUBSCRIBED') return;
       try { await Promise.all([this.sendPresence(), this.requestState(), this.refresh()]); }
       catch (e) { this.emit('error', e); }
     });
   }
   receive(event, payload) {
+    if (event === 'state') { this.acceptPlayback(payload, 'realtime'); return; }
     if (!this.room || !payload) return;
-    if (event === 'state') this.acceptPlayback(payload);
     if (event === 'stream' && payload.member_id === this.room.info.host_member_id) this.emit('stream', payload.stream ?? null);
     // Database snapshots are authoritative for media, membership and host-only changes.
     if (['media', 'control', 'member_joined'].includes(event)) this.refresh();
@@ -82,12 +89,20 @@ export class PartySession {
     if (event === 'state_request' && payload.member_id !== this.room.memberId) this.sendPresence().catch(e => this.emit('error', e));
     if (event === 'ended' || event === 'member_left') this.refresh();
   }
-  acceptPlayback(next) {
-    if (!this.room || !validPlayback(next)) return;
-    const info = this.room.info;
-    if (next.media_key && next.media_key !== mediaKey(info.media)) return;
-    if (info.host_only && next.member_id !== info.host_member_id) return;
-    if (!isNewerPlayback(next, this.playback)) return;
+  acceptPlayback(next, source = 'snapshot') {
+    source = source === 'realtime' ? 'realtime' : 'snapshot';
+    const d = this.diagnostics, receivedAt = Date.now();
+    if (source === 'realtime') { d.realtimeStates++; d.lastRealtimeAt = receivedAt; }
+    else d.snapshotStates++;
+    d.lastSource = source;
+    d.candidateSeq = Number.isSafeInteger(next?.seq) ? next.seq : null;
+    const info = this.room?.info;
+    d.lastDecision = !info ? 'no_room' : !validPlayback(next) ? 'invalid_playback'
+      : next.media_key && next.media_key !== mediaKey(info.media) ? 'wrong_media'
+      : info.host_only && next.member_id !== info.host_member_id ? 'not_host'
+      : !isNewerPlayback(next, this.playback) ? 'not_newer' : 'accepted';
+    if (d.lastDecision !== 'accepted') return;
+    d.lastAcceptedAt = receivedAt; d.acceptedSource = source;
     this.playback = next; this.emit('playback', next);
   }
   async refresh() {
@@ -101,13 +116,16 @@ export class PartySession {
       const changed = mediaKey(room.info.media) !== mediaKey(result.party.media);
       const hostChanged = room.info.host_member_id !== result.party.host_member_id;
       room.info = result.party; room.members = result.members || [];
-      if (changed) { this.playback = null; this.presence = {status: 'browsing'}; this.emit('media', room.info.media); }
+      // Sequence numbers belong to a coordinator. A new host may start at 0;
+      // never keep following the previous host while waiting for its state.
+      if (changed || hostChanged) this.playback = null;
+      if (changed) { this.presence = {status: 'browsing'}; this.emit('media', room.info.media); }
       if (changed || hostChanged) this.emit('stream', null);
       if (room.info.host_member_id === room.memberId) {
         // This guest cannot provide media/coordinator duties if a backend promotes it.
         return await this.finish('Der Desktop-Host hat die Party verlassen. Bitte eine neue Desktop-Party öffnen.');
       }
-      this.emit('room', room); this.acceptPlayback(result.party.playback);
+      this.emit('room', room); this.acceptPlayback(result.party.playback, 'snapshot');
       if (changed || hostChanged) { await this.sendPresence(); await this.requestState(); }
     } catch (e) {
       if (room !== this.room) return;
@@ -164,15 +182,29 @@ export class PartySession {
     await this.rpc('watch_party_send_message', {p_party_id: room.info.id, p_device_id: this.deviceId, p_body: body, p_client_id: clientId});
     if (room === this.room) await this.loadMessages();
   }
-  async finish(message) { await this.close(false); this.emit('ended', message); }
-  async close(callLeave = true) {
+  async finish(message) {
+    if (!this.room) return;
+    const closing = this.close(false), gen = this.generation;
+    await closing;
+    // An explicit close or a newer join supersedes this end notification.
+    if (gen === this.generation && !this.room) this.emit('ended', message);
+  }
+  close(callLeave = true) {
+    this.generation++; // Also cancel joins still awaiting authentication/RPC.
+    if (this.closing) return this.closing;
     const old = this.room, ch = this.channel;
-    this.generation++; this.room = null; this.channel = null; this.playback = null;
+    this.room = null; this.channel = null; this.playback = null;
+    this.diagnostics.connection = 'CLOSED';
     this.timers.forEach(clearInterval); this.timers = [];
     this.chatCursor = null; this.seenMessages.clear(); this.presence = {status: 'browsing'};
     this.chatBusy = this.refreshBusy = null;
-    this.emit('closed');
-    if (ch) await this.client.removeChannel(ch).catch(() => {});
-    if (old && callLeave) await this.rpc('watch_party_leave', {p_party_id: old.info.id, p_device_id: this.deviceId}).catch(e => this.emit('error', new Error('Austritt nicht bestätigt; die Mitgliedschaft läuft serverseitig aus.')));
+    // Share cleanup so a concurrent close/join cannot run past channel removal.
+    // Install the promise before notifying handlers, which may close again.
+    this.closing = Promise.resolve().then(async () => {
+      if (ch) await this.client.removeChannel(ch).catch(() => {});
+      if (old && callLeave) await this.rpc('watch_party_leave', {p_party_id: old.info.id, p_device_id: this.deviceId}).catch(() => this.emit('error', new Error('Austritt nicht bestätigt; die Mitgliedschaft läuft serverseitig aus.')));
+    }).finally(() => { this.closing = null; });
+    if (old || ch) this.emit('closed');
+    return this.closing;
   }
 }

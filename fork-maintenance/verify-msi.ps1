@@ -1,11 +1,15 @@
 # Read-only Windows Installer database inspection; never invokes msiexec.
 [CmdletBinding()]
-param([string]$RepoPath = (Split-Path -Parent $PSScriptRoot))
+param(
+    [string]$RepoPath = (Split-Path -Parent $PSScriptRoot),
+    [string]$MsiPath
+)
 $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path -LiteralPath $RepoPath).Path
-$msis = @(Get-ChildItem (Join-Path $repo 'composeApp/build/compose/release-msis') -Filter '*.msi')
+$msis = if ($MsiPath) { @(Get-Item -LiteralPath $MsiPath) } else { @(Get-ChildItem (Join-Path $repo 'composeApp/build/compose/release-msis') -Filter '*.msi') }
 if ($msis.Count -ne 1) { throw "Expected one published MSI, found $($msis.Count)" }
 $msi = $msis[0]
+if ($msi.PSIsContainer -or $msi.Extension -ne '.msi') { throw 'Expected an MSI file' }
 $stream = [IO.File]::OpenRead($msi.FullName)
 try {
     $bytes = New-Object byte[] 8
@@ -23,6 +27,19 @@ if (-not $properties['ProductName'] -or -not $properties['ProductVersion']) { th
 $app = Join-Path $repo 'composeApp/build/compose/binaries/main-release/app/Nuvio'
 $jars = @(Get-ChildItem (Join-Path $app 'app') -Filter 'composeApp-desktop-*.jar')
 if ($jars.Count -ne 1) { throw 'Expected one packaged desktop application JAR' }
+# Bind the staged inspection to the selected MSI File table, rather than only
+# checking an unrelated staging directory. Cabinet bytes are not extracted.
+$view = $db.OpenView('SELECT `FileName`, `FileSize` FROM `File`')
+$view.Execute()
+$matchingJars = 0
+while ($record = $view.Fetch()) {
+    if ($record.StringData(1).Split('|')[-1] -eq $jars[0].Name) {
+        if ($record.IntegerData(2) -ne $jars[0].Length) { throw 'MSI application JAR size differs from staged JAR' }
+        $matchingJars++
+    }
+}
+$view.Close()
+if ($matchingJars -ne 1) { throw 'Selected MSI does not contain the staged application JAR name' }
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $zip = [IO.Compression.ZipFile]::OpenRead($jars[0].FullName)
 try {
@@ -44,7 +61,7 @@ $manifest = [ordered]@{
     file = $msi.Name; bytes = $msi.Length; sha256 = (Get-FileHash -LiteralPath $msi.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
     product = $properties['ProductName']; productVersion = $properties['ProductVersion']; signature = [string](Get-AuthenticodeSignature -LiteralPath $msi.FullName).Status
     appJar = $jars[0].Name; requiredNativeEntries = $required; watchInBrowser = $true; javaRuntimePresent = $true
-    installedOrLaunched = $false; msiInspectedReadOnly = $true; stagedAppInspected = $true; publicBackendConfigured = $true; sourceCommit = $env:GITHUB_SHA
+    installedOrLaunched = $false; msiInspectedReadOnly = $true; stagedAppInspected = $true; msiJarMetadataMatchesStage = $true; publicBackendConfigured = $true; sourceCommit = $env:GITHUB_SHA
 }
 $path = Join-Path $msi.DirectoryName ($msi.BaseName + '-verification.json')
 $manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $path -Encoding utf8

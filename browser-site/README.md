@@ -1,5 +1,7 @@
 # Nuvio Watch in Browser
 
+Für den alternativen privaten HLS-Modus siehe [Eigene HLS-URL (Beta): MVP und manuelle Prüfung](HLS_BETA_MANUAL_TEST.md). Dieser MVP wurde auf Wunsch ohne Ausführung von Tests, Builds oder Deployments ergänzt; echte TorBox-Videowiedergabe ist noch nicht bestätigt.
+
 Inoffizieller Browser-Gast für vorhandene Nuvio-Desktop-Partys. Die Website liefert keine Filme und benötigt das **gleiche autorisierte Backend** wie der Desktop-Host. Der Host muss den Player geöffnet halten und die Streamquelle ausdrücklich freigeben.
 
 ## Lokal vorbereiten

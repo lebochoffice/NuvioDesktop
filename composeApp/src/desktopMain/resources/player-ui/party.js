@@ -375,12 +375,21 @@ const buildPartyMembers = party => {
 const buildPartySwitch = (key, title, description, checked, eventType) => {
   const row = partyAction(partyElement("button", "party-switch-row"), key, () => {
     const next = row.getAttribute("aria-checked") !== "true";
+    const apply = () => {
     row.setAttribute("aria-checked", String(next));
     send(eventType, next ? 1 : 0);
     window.setTimeout(() => {
       partyPanelKey = "";
       if (activeModal === "party") renderPartyModal();
     }, partySwitchSettleMs);
+    };
+    if (eventType === "partySharing" && next) {
+      showPartyConfirm({
+        title: "Share this source with party members?",
+        message: "Participants may see and retain the source URL and its credentials. Membership removal cannot revoke a copied provider URL. Never share a full TorBox account key. Automatic restricted TorBox guest sessions are not configured.",
+        confirmLabel: "Share source", danger: false, onConfirm: apply,
+      });
+    } else apply();
   });
   row.setAttribute("role", "switch");
   row.setAttribute("aria-checked", String(Boolean(checked)));
@@ -395,13 +404,14 @@ const buildPartySwitch = (key, title, description, checked, eventType) => {
 // NUVIO_BROWSER_PARTY_BRIDGE_V1: Link to the independently hosted browser guest.
 const partyBrowserHostStorage = "nuvio-browser-party-host";
 const partyBrowserHost = () => {
-  try { return window.localStorage.getItem(partyBrowserHostStorage) || ""; }
-  catch { return ""; }
+  try { return window.localStorage.getItem(partyBrowserHostStorage) || "https://nuvio-watch-friends.pages.dev"; }
+  catch { return "https://nuvio-watch-friends.pages.dev"; }
 };
 
 const buildPartyBrowserShare = party => {
   const section = partyElement("div", "party-section");
   section.appendChild(partyElement("p", "party-switch-title", "Watch in Browser"));
+  section.appendChild(partyElement("p", "party-note", "TorBox HLS is prepared automatically for files resolved by this Nuvio account. See the source status above; enable the existing Share my stream only after consent. Full account keys are never accepted in the prepared HLS URL. Personal HLS remains a fallback. Browser controls remain local."));
   section.appendChild(partyElement("p", "party-text", "Let friends watch from a browser, without installing Nuvio. Set up your own free HTTPS browser site once."));
   const address = partyElement("input", "party-browser-host");
   address.setAttribute("aria-label", "Browser player URL");
@@ -426,7 +436,7 @@ const buildPartyBrowserShare = party => {
     let parsed;
     try {
       parsed = new URL(raw);
-      if (parsed.protocol !== "https:" || !parsed.hostname || parsed.username || parsed.password || parsed.search || parsed.hash || (parsed.pathname !== "/" && parsed.pathname !== "")) throw Error("invalid address");
+      if (!/^https:\/\/[^/?#@]+\/?$/i.test(raw) || /[\u0000-\u001f\u007f\\]/.test(address.value) || parsed.protocol !== "https:" || !parsed.hostname || parsed.username || parsed.password || parsed.search || parsed.hash || /[\u0000-\u0020\u007f\\]/.test(raw) || (parsed.pathname !== "/" && parsed.pathname !== "")) throw Error("invalid address");
     } catch {
       note.textContent = "Enter the HTTPS home address of your deployed browser player (example: https://your-project.pages.dev).";
       return;
@@ -443,18 +453,13 @@ const buildPartyBrowserShare = party => {
   const onClick = () => {
     const invite = inviteUrl();
     if (!invite) return;
-    const copy = confirmed => {
-      send(`partyBrowserInvite:${partyEncodeText(invite)}`, confirmed ? 1 : 0);
+    const copy = () => {
+      send(`partyBrowserInvite:${partyEncodeText(invite)}`, 0);
       note.textContent = "Link requested. Check Nuvio's clipboard confirmation. Keep the host player open; stream compatibility is checked by each browser.";
     };
-    if (party.sharing) return copy(false);
-    showPartyConfirm({
-      title: "Share the stream source?",
-      message: "Browser playback needs 'Share my stream' enabled. Participants can see the stream address, which may contain credentials. Only use sources you are authorized to share.",
-      confirmLabel: "Enable and copy link",
-      danger: false,
-      onConfirm: () => copy(true),
-    });
+    // A party invite is also usable with each guest's personal HLS fallback.
+    // Copying the link must never implicitly enable source sharing.
+    return copy();
   };
   section.appendChild(partyButtonElement("Watch in Browser · Copy link", "primary", "browserShare", onClick));
   return section;
