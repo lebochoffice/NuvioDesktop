@@ -42,6 +42,25 @@ Die Teilnehmerleiste liegt unter dem Player und verkleinert ihn nicht. Bei volle
   - `VITE_PARTY_GUEST_CONTROL`: leer/`desktop` = Parität, `confirmed`/`1` = nur nach Server-Bestätigung, `off` = nur lokal.
   - Voraussetzung im Betrieb: Am Desktop muss „Host only“ ausgeschaltet sein.
 
+## Final Cleanup (Refresh-Icon, Footer, Gastzugang)
+
+- `#resync` ist jetzt ein runder Refresh-Icon-Button (`aria-label`/`title` „Party-Zeit aktualisieren“, sichtbar deaktiviert). Handler unverändert; Code überschreibt das Icon nicht mehr mit Text.
+- Der Footer `#legal` und sein CSS sind entfernt.
+- Die Einladung passt auf eine Desktop-Bildschirmhöhe: Cover-Höhe `min(Breite · 9/16, 42vh)`, kompaktere Abstände bei Höhe ≤ 820 px. Smartphones dürfen weiter scrollen (Tastatur); es gibt kein globales `overflow: hidden`.
+- **Name-only: weiterhin nicht möglich.** Unverändert gilt:
+  - Kein Beleg, dass das offizielle Backend anonyme Supabase-Nutzer für Party-RPCs, Realtime und RLS zulässt.
+  - Nuvio Desktop selbst verlangt ein echtes Konto.
+  - Kein Zugriff auf SQL, Policies oder Projekteinstellungen.
+  - Der Login bleibt als funktionierender Fallback, nur bei Bedarf.
+- **Eigene kontrollierte Erweiterung, Plan (nicht umgesetzt):** Ein Gast kann nur Mitglied einer Party werden, die die offizielle Datenbank führt. Ohne Mitwirkung des Backend-Betreibers gibt es deshalb keinen sicheren Weg. Möglich wäre:
+  1. Im **offiziellen** Supabase-Projekt Anonymous Sign-In aktivieren, mit CAPTCHA (Turnstile) und Rate-Limit.
+  2. `watch_party_join` akzeptiert `is_anonymous` nur mit gültigem, laufendem Code und freier Kapazität; Mitgliedschaft an `auth.uid()` gebunden; Name begrenzt; anonym nie Host.
+  3. Heartbeat, Leave, Chat und Update sowie die Realtime-Policies auf `watch-party:<id>` prüfen dieselbe Mitgliedschaft.
+  4. Danach im Browser `VITE_PARTY_GUEST_JOIN=1` setzen (Code bereits vorhanden). Das ist dann nur ein Cloudflare-Update.
+
+  Ein separater eigener Server oder ein eigenes Supabase-Projekt kann keine Mitgliedschaft in Nuvio-Parties erteilen und würde Realtime nicht autorisieren; diese Variante ist nicht tragfähig.
+- **Status:** UI vorbereitet; echter passwortloser Beitritt funktioniert **nicht**.
+
 ## Sicherheitsbefund: Streamfreigabe
 
 - **Bestätigt (Code):** Der Desktop sendet ein einziges `stream`-Broadcast an **alle** Kanalmitglieder: Original-URL, Original-Header, Dateiname und zusätzlich `browser_hls`. Browser-Gäste erhalten damit auch die Desktop-Originalquelle (z. B. Debrid-/CDN-Link mit Token) und deren Header, obwohl sie nur HLS nutzen. Der vollständige TorBox-Account-Key wird ausgeschlossen (`containsAccountKey`), zeitlich begrenzte Stream-Tokens aber nicht.

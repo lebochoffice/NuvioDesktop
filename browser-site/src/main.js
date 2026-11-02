@@ -71,7 +71,7 @@ const session = client ? new PartySession(client, deviceId, {
     if (['CHANNEL_ERROR', 'TIMED_OUT', 'CLOSED'].includes(state)) {
       syncEnabled = false;
       pauseLocally();
-      $('resync').textContent = 'Party-Zeit aktualisieren';
+     
       status('Privater Realtime-Kanal nicht verbunden. Anmeldung, Backend-Freigabe und Netzwerk prüfen. Nach Wiederverbindung erneut synchronisieren.', true);
     }
   },
@@ -231,7 +231,7 @@ function resetVideo(reason = 'Persönliche Quelle entfernt. Für diesen Film kan
   $('noStream').hidden = false; $('loadStream').hidden = true;
   $('noStream').textContent = 'Warte auf eine freigegebene Streamquelle des Hosts …';
   $('streamInfo').textContent = 'Warte auf eine Desktop-Freigabe oder lade eine eigene zulässige HLS-Quelle (Beta).';
-  $('resync').disabled = true; $('resync').textContent = 'Party-Zeit aktualisieren';
+  $('resync').disabled = true;
 }
 function updatePersonalHlsReadiness(announce = false) {
   if (!personalHls.active || !loadedStream) return;
@@ -292,7 +292,7 @@ function applySync(forcePlay = false) {
       if (!target.retryable) syncEnabled = false;
       waitingForTarget = !!target.retryable;
       pauseLocally(); presence();
-      $('resync').disabled = true; $('resync').textContent = 'Party-Zeit aktualisieren';
+      $('resync').disabled = true;
       $('personalHlsStatus').textContent = target.message; status(target.message, true);
       return;
     }
@@ -328,7 +328,7 @@ function applySync(forcePlay = false) {
       pendingSeek = null;
       lastPlaybackError = 'seek_failed';
       syncEnabled = false; pauseLocally(); presence();
-      $('resync').textContent = 'Party-Zeit aktualisieren';
+     
       const message = 'Der Browser konnte den Party-Zeitpunkt nicht anspringen. Bitte einen suchbaren VOD-Stream verwenden und erneut synchronisieren.';
       if (personalHls.active) $('personalHlsStatus').textContent = message;
       status(message, true); return;
@@ -356,7 +356,7 @@ function applySync(forcePlay = false) {
         failVideo('Der Browser unterstützt diese Videoquelle oder ihre Codecs nicht. Bitte eine andere kompatible eigene Quelle laden.', 'NotSupportedError'); return;
       }
       syncEnabled = false; presence();
-      $('resync').textContent = 'Party-Zeit aktualisieren';
+     
       const message = error?.name === 'NotAllowedError'
         ? 'Der Browser hat den Wiedergabestart blockiert. Bitte „Party-Zeit aktualisieren“ erneut selbst anklicken.'
         : 'Wiedergabestart fehlgeschlagen. Bitte erneut synchronisieren; bei wiederholtem Fehler eine andere kompatible Quelle laden.';
@@ -899,7 +899,7 @@ function resyncNow() {
   pendingPlay = null; // An explicit retry owns a new start attempt.
   syncEnabled = true;
   session.requestState().catch(() => status('Aktueller Host-Zustand konnte nicht angefragt werden. Realtime-Verbindung prüfen.', true));
-  $('resync').textContent = 'Party-Zeit aktualisieren';
+ 
   applySync(true); presence(); renderPlayerUi();
   if (syncEnabled && !waitingForTarget && session.playback.paused) status('Der Host hat pausiert. Die Wiedergabe startet, sobald er fortsetzt.');
 }
@@ -943,7 +943,7 @@ for (const event of ['pause', 'seeking', 'ratechange']) player.addEventListener(
     if (event === 'pause') { sendControl(true, player.currentTime); return; }
     if (event === 'seeking') { userSeekPending = true; return; }
   }
-  syncEnabled = false; $('resync').textContent = 'Party-Zeit aktualisieren';
+  syncEnabled = false;
   pendingPlay = null;
   pendingSeek = internalHlsSeek = null;
   mediaPointerDown = false; mediaGestureUntil = -1;

@@ -776,7 +776,7 @@ test('page markup: no banner headline, no hint bar, no permanent side column; co
   assert.match(html, /<p id="message"[^>]*hidden/);
   assert.match(html, /<aside id="infoDrawer"[^>]*hidden/);
   for (const id of ['ctlPlay', 'ctlBack10', 'ctlFwd10', 'ctlMute', 'ctlSeek', 'ctlFullscreen', 'ctlSubtitles', 'ctlChat', 'ctlBack', 'syncChip', 'resync', 'membersButton']) assert.match(html, new RegExp(`id="${id}"`));
-  assert.match(html, /id="resync"[^>]*>Party-Zeit aktualisieren</);
+  assert.match(html, /id="resync"[^>]*aria-label="Party-Zeit aktualisieren"[^>]*title="Party-Zeit aktualisieren"[^>]*disabled><svg/); // Refresh icon.
   assert.ok(html.indexOf('id="displayName"') < html.indexOf('id="email"')); // Name first, account only on demand.
 });
 
@@ -965,3 +965,28 @@ test('desktop parity respects host_only: snapshot true blocks, and a persist rep
   assert.equal(r.session.room.info.host_only, true); assert.equal(r.session.canControl(), false);
   assert.match(r.get('controlInfo').textContent, /nur der Host/);
 });
+
+// --- Final cleanup: refresh icon, no footer, one-screen invite ---
+
+test('refresh icon keeps #resync, its label and disabled state, and still triggers the existing resync', async () => {
+  const h = await readyGuest();
+  const icon = h.get('resync').textContent;
+  h.get('resync').fire('click'); h.player.fire('seeked');
+  assert.equal(h.sync(), true); assert.equal(h.player.currentTime, 5); // Existing party-time alignment.
+  h.session.handlers.connection('CHANNEL_ERROR'); // Code paths that used to overwrite the label.
+  h.session.handlers.stream(null); h.session.handlers.media();
+  assert.equal(h.get('resync').textContent, icon); assert.equal(h.get('resync').disabled, true);
+  const src = readFileSync(new URL('../src/main.js', import.meta.url), 'utf8');
+  assert.ok(!src.includes("$('resync').textContent")); // The SVG icon is never replaced by text.
+});
+
+test('legal footer is gone and the invitation is sized to fit one desktop screen without hiding the form', () => {
+  const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
+  const css = readFileSync(new URL('../src/style.css', import.meta.url), 'utf8');
+  assert.ok(!html.includes('id="legal"') && !html.includes('Keine Umgehung von DRM') && !css.includes('.legal'));
+  assert.match(css, /\.invite-media \{[^}]*height: min\(calc\(min\(780px, 100vw - 32px\) \* 9 \/ 16\), 42vh\)/);
+  assert.ok(!/\.(invite|invite-body|step|join-form) \{[^}]*overflow: hidden/.test(css)); // No clipping of the form.
+  assert.ok(!/html, body \{[^}]*overflow: hidden/.test(css));
+  for (const id of ['displayName', 'joinButton', 'email', 'password', 'loginButton']) assert.match(html, new RegExp(`id="${id}"`));
+});
+
