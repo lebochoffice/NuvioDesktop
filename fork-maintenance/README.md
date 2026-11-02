@@ -29,7 +29,7 @@ Der Windows-Runner ist `windows-2022`, mit Temurin JDK 21, vorhandenem MSVC/Wind
 5. Default Branch auf **Dev** belassen, **Auto-Merge deaktiviert** lassen. Für Dev nach Möglichkeit eine Regel „Änderungen nur per Pull Request“ sowie die erfolgreichen Fork-CI-Prüfungen verlangen. Bei einem allein verwalteten Fork keine zusätzliche fremde Freigabe erzwingen, wenn niemand sonst reviewen kann. Nicht notwendige Bypass-Rechte vermeiden.
 6. Den Update-Workflow einmal manuell testen. Bei identischem Upstream-Stand ist „Nothing to propose“ das richtige Ergebnis. Einen PR erst nach eigener Prüfung zusammenführen. Danach **Fork - Windows MSI → Run workflow → Dev**. Nach erfolgreichem Lauf das MSI unter **Artifacts** herunterladen und den beiliegenden SHA-256-Bericht prüfen.
 
-Die verbundenen GitHub-Werkzeuge können Quellcode/PRs bearbeiten, bieten hier aber keine Actions-/Variablen-Administration und keinen Zugriff auf Branch-Protection-Endpunkte. Nicht verifizierte Einstellungen sind im lokalen Integrationsbericht ausdrücklich als manuell offen ausgewiesen.
+Der Quellcode-Connector selbst bietet keine Actions-/Variablen-Administration. Über die vorhandene GitHub-Anmeldung des Fork-Eigentümers wurden Actions aktiviert vorgefunden, lesende Standardrechte und die PR-Erlaubnis geprüft sowie beide öffentlichen Repository-Variables eingetragen und zurückgelesen. Private Zugangsdaten wurden dabei weder gedruckt noch in Projektdateien gespeichert. Noch nicht verifizierte Einstellungen stehen im Integrationsbericht.
 
 ## Lokale Arbeit
 
@@ -37,6 +37,6 @@ Die verbundenen GitHub-Werkzeuge können Quellcode/PRs bearbeiten, bieten hier a
 
 Für neue Änderungen einen eigenen Branch von `origin/Dev` anlegen, nach Tests in den eigenen Fork pushen und einen PR **im eigenen Fork** mit Basis `Dev` erstellen. Keine PRs an NuvioMedia eröffnen, wenn dies nicht ausdrücklich gewünscht ist.
 
-Das angeforderte Paket `Nuvio-Fork-Auto-Updates.zip` war bei Erstellung dieser Vorbereitung nicht lokal auffindbar. Die beiden Fork-Workflows sind hier eigenständig vorbereitet; sie sind kein angeblich geprüfter Inhalt dieses fehlenden ZIPs. Sobald das Paket vorliegt, seine Dateien und Funktionen vor Übernahme abgleichen.
+Das ursprünglich genannte Download-Paket war nicht verfügbar. Der Fork-Eigentümer hat anschließend ausdrücklich die eigene Erstellung beauftragt. `Nuvio-Fork-Auto-Updates.zip` wird deshalb aus diesen geprüften Workflows, Skripten und Anleitungen neu erstellt. Es enthält keine lokale Konfiguration, Anmeldesitzung oder privaten Schlüssel und ist kein angeblich geprüftes fremdes Download-Paket.
 
 Quellen: [Workflow-Rechte](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/enabling-features-for-your-repository/managing-github-actions-settings-for-a-repository), [Auslöser und Default Branch](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows), [manueller Workflow-Aufruf](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/trigger-a-workflow).
