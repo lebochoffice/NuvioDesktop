@@ -469,6 +469,14 @@ export class PartySession {
     const sent = await this.channel.send({type: 'broadcast', event: 'status', payload});
     if (sent && sent !== 'ok') throw new Error('Party-Status nicht gesendet (' + sent + ').');
   }
+  // Proposal of a video link to the Desktop host (explicit opt-in per link).
+  // Never applied by the sender: the host must confirm, and the host's checked
+  // stream event is what guests then play.
+  async suggestStream(url, key) {
+    if (!this.room || !this.channel) throw new Error('Keine Party-Verbindung.');
+    const result = await this.channel.send({type: 'broadcast', event: 'stream_suggest', payload: {member_id: this.room.memberId, media_key: key, url}});
+    if (result && result !== 'ok') throw new Error('Vorschlag nicht gesendet (' + result + ').');
+  }
   async requestState() {
     if (this.room && this.channel) {
       const result = await this.channel.send({type: 'broadcast', event: 'state_request', payload: {member_id: this.room.memberId}});

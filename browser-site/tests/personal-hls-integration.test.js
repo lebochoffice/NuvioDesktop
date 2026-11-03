@@ -180,7 +180,7 @@ test('no room cannot load a source; live and expired sources never claim sync su
 
 test('a rejected native seek stops synchronization without reflecting a token-bearing exception', async () => {
   const h = await harness(); h.enter(); h.metadata();
-  h.source().instance.emit(FakeHls.Events.LEVEL_LOADED, {details: vod});
+  h.source().instance.emit(FakeHls.Events.LEVEL_LOADED, {details: vod}); h.player.fire('seeked');
   Object.defineProperty(h.player, 'currentTime', {get: () => 0, set: () => {throw Error(privateUrl);}});
   h.get('resync').fire('click');
   assert.equal(h.player.paused, true);
@@ -191,6 +191,7 @@ test('a rejected native seek stops synchronization without reflecting a token-be
 async function readyGuest(options) {
   const h = await harness(options); h.enter(); h.metadata();
   h.source().instance.emit(FakeHls.Events.LEVEL_LOADED, {details: vod});
+  h.player.fire('seeked'); // The automatic first sync seek has landed.
   return h;
 }
 
@@ -404,10 +405,10 @@ test('unreported internal HLS seeking and delayed native pause events do not dis
 test('local diagnostics are opt-in, show only allowlisted fields and never reflect raw error or state payloads', async () => {
   const off = await harness(); off.tick(); assert.equal(off.get('watchSection').children.length, 0);
   const h = await harness({debug: true}); h.enter(); h.metadata();
+  h.player.play = () => Promise.reject({name: 'NotAllowedError', message: privateUrl});
   h.source().instance.emit(FakeHls.Events.LEVEL_LOADED, {details: vod});
   h.session.diagnostics.url = privateUrl; h.session.diagnostics.error = privateUrl;
-  h.session.receive('state', {...playback, seq: 2, paused: false, token: privateUrl});
-  h.player.play = () => Promise.reject({name: 'NotAllowedError', message: privateUrl});
+  h.session.receive('state', {...playback, seq: 2, paused: false, token: privateUrl}); await settlePlayback();
   h.get('resync').fire('click'); await settlePlayback(); h.tick();
   const text = h.get('watchSection').children.at(-1).children.at(-1).textContent;
   const data = JSON.parse(text);
@@ -862,12 +863,14 @@ test('page markup: no banner headline, no hint bar, no permanent side column; co
   assert.ok(html.indexOf('id="email"') < html.indexOf('id="password"') && html.indexOf('id="password"') < html.indexOf('id="joinButton"')); // Sign-in inline in the invitation.
 });
 
-test('the party code is read from the link; without one the fallback field and a clear notice appear', async () => {
+test('the party code is read from the link; without one the plain join form appears without an error', async () => {
   const linked = await harness({path: '/party/uxz-83h'});
   assert.equal(linked.get('partyCode').value, 'UXZ83H'); assert.equal(linked.get('codeFallback').hidden, true);
   const bare = await harness(); await settlePlayback();
   assert.equal(bare.get('codeFallback').hidden, false);
-  assert.match(bare.get('preview').textContent, /keinen gültigen Party-Code/);
+  assert.equal(bare.get('preview').textContent, ''); // Home page: no red notice.
+  const broken = await harness({path: '/party/abc'}); await settlePlayback();
+  assert.match(broken.get('preview').textContent, /keinen gültigen Party-Code/); // Only a broken invitation link.
   bare.session.room = null; bare.session.join = async () => assert.fail('no join without a valid code');
   bare.get('joinForm').fire('submit'); await settlePlayback();
   assert.match(bare.get('message').textContent, /Party-Code/);
@@ -1594,4 +1597,96 @@ test('browser HLS processing and unsupported states are shown separately', async
   h.session.handlers.stream(offer('unsupported'));
   assert.match(h.get('streamInfo').textContent, /nicht möglich/);
   assert.equal(h.desktopHls(), null);
+});
+
+// --- 0.1.44: shared host video link, suggestions, personal auto-sync ---
+
+const hostLink = (url = 'https://cdn.example.test/movie/index.m3u8?sig=abc', label = 'Video-Link des Hosts', key = 'movie|tt1||') =>
+  ({media_key: key, url, stream_type: 'hls', browser_hls: {url, label}});
+
+test('a host video link reaches several browser guests, loads automatically and survives a reconnect re-offer', async () => {
+  const guests = [await harness({autoHost: true}), await harness({autoHost: true})];
+  for (const h of guests) {
+    h.session.receive('stream', {member_id: 'host', stream: hostLink()});
+    assert.equal(h.desktopHls().source, 'https://cdn.example.test/movie/index.m3u8?sig=abc');
+    assert.match(h.get('streamInfo').textContent, /Video-Link des Hosts/);
+    h.metadata(); await settlePlayback();
+    assert.equal(h.sync(), true); assert.equal(h.player.currentTime, 5); // Party time applied.
+    const instance = h.desktopHls();
+    h.session.receive('stream', {member_id: 'host', stream: hostLink()}); // state_request answer after a reconnect.
+    assert.equal(h.desktopHls(), instance); assert.equal(instance.destroyed, undefined);
+  }
+});
+
+test('a new guest or a reloaded tab gets the current shared link; a new episode link replaces the old one', async () => {
+  const late = await harness({autoHost: true});
+  late.session.receive('stream', {member_id: 'host', stream: hostLink()});
+  const first = late.desktopHls();
+  assert.equal(first.source, 'https://cdn.example.test/movie/index.m3u8?sig=abc');
+  late.session.receive('stream', {member_id: 'host', stream: hostLink('https://cdn.example.test/movie/e2.m3u8')});
+  assert.equal(first.destroyed, true); assert.equal(late.desktopHls().source, 'https://cdn.example.test/movie/e2.m3u8');
+  late.session.receive('stream', {member_id: 'host', stream: hostLink('https://cdn.example.test/other.m3u8', 'x', 'movie|tt9||')});
+  assert.equal(late.desktopHls().source, 'https://cdn.example.test/movie/e2.m3u8'); // Other title: ignored.
+  late.session.handlers.media();
+  assert.equal(late.desktopHls(), null); assert.equal(late.player.paused, true);
+});
+
+test('revoking the shared link stops it; invalid links never load; non-host senders are ignored', async () => {
+  const h = await harness({autoHost: true});
+  h.session.receive('stream', {member_id: 'guest-2', stream: hostLink()}); // Forged host share by another member.
+  assert.equal(h.desktopHls(), null);
+  h.session.receive('stream', {member_id: 'host', stream: hostLink('http://cdn.example.test/a.m3u8')});
+  assert.equal(h.desktopHls(), null); assert.equal(h.get('loadStream').hidden, true);
+  h.session.receive('stream', {member_id: 'host', stream: hostLink()}); h.metadata(); await settlePlayback();
+  const instance = h.desktopHls();
+  h.session.receive('stream', {member_id: 'host', stream: null});
+  assert.equal(instance.destroyed, true); assert.equal(h.player.paused, true); assert.equal(h.get('resync').disabled, true);
+});
+
+test('a personal link is suggested to the host only with the explicit checkbox, and never applied by the sender', async () => {
+  const h = await harness(), channel = [];
+  h.session.channel = {send: async message => { channel.push(message); return 'ok'; }};
+  h.enter(); await settlePlayback();
+  assert.equal(channel.filter(m => m.event === 'stream_suggest').length, 0); // No checkbox: the link stays private.
+  h.get('suggestToHost').checked = true; h.enter(); await settlePlayback();
+  const suggestions = channel.filter(m => m.event === 'stream_suggest');
+  assert.equal(suggestions.length, 1);
+  assert.deepEqual(suggestions[0].payload, {member_id: h.session.room.memberId, media_key: 'movie|tt1||', url: privateUrl});
+  assert.equal(h.get('suggestToHost').checked, false); // Consent covers one link only.
+  assert.match(h.get('message').textContent, /Vorschlag an den Host gesendet/);
+  assert.equal(h.desktopHls(), null); // The sender keeps its private source; nothing is shared by itself.
+  assert.ok(!JSON.stringify(h.storageWrites).includes('INTEGRATION_PRIVATE_SENTINEL'));
+});
+
+test('a personal VOD follows the party time by itself once it is seekable, with bounded retries', async () => {
+  const h = await harness(); h.enter();
+  h.source().instance.emit(FakeHls.Events.LEVEL_LOADED, {details: vod});
+  assert.equal(h.sync(), false); // No metadata yet: waits.
+  h.metadata();
+  assert.equal(h.sync(), true); assert.equal(h.player.currentTime, 5); // No Sync click needed.
+  const late = await harness(); late.enter();
+  late.player.seekable = {length: 0};
+  late.metadata(); late.source().instance.emit(FakeHls.Events.LEVEL_LOADED, {details: vod});
+  assert.equal(late.sync(), false);
+  late.runTimers(); assert.equal(late.sync(), false); // Still not seekable: one bounded retry.
+  late.player.seekable = {length: 1, start: () => 0, end: () => 120};
+  late.runTimers();
+  assert.equal(late.sync(), true); assert.equal(late.player.currentTime, 5);
+  const never = await harness(); never.enter(); never.player.seekable = {length: 0};
+  never.metadata(); never.source().instance.emit(FakeHls.Events.LEVEL_LOADED, {details: vod});
+  for (let i = 0; i < 40; i++) never.runTimers();
+  assert.equal(never.sync(), false); assert.match(never.get('message').textContent, /Party-Zeit aktualisieren/);
+  never.player.seekable = {length: 1, start: () => 0, end: () => 120};
+  never.runTimers(); never.player.fire('canplay');
+  assert.equal(never.sync(), false); // Gave up: only the existing Sync button starts it now.
+});
+
+test('watching alone keeps a newly loaded personal VOD independent of the party', async () => {
+  const h = await harness({autoHost: true});
+  h.session.receive('stream', {member_id: 'host', stream: hostLink()}); h.metadata(); await settlePlayback();
+  h.get('ctlSolo').fire('click');
+  assert.equal(h.get('ctlSolo').textContent, 'Zur Party');
+  h.enter(); h.source().instance.emit(FakeHls.Events.LEVEL_LOADED, {details: vod}); h.metadata();
+  h.runTimers();
+  assert.equal(h.sync(), false); assert.equal(h.get('ctlSolo').textContent, 'Zur Party'); // No automatic return.
 });

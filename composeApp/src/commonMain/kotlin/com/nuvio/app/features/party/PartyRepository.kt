@@ -71,6 +71,13 @@ object PartyRepository {
     private val _sharedStream = MutableStateFlow<PartyStream?>(null)
     val sharedStream: StateFlow<PartyStream?> = _sharedStream.asStateFlow()
 
+    // Latest guest proposal of a video link (host only, memory only). It is
+    // applied solely by the host's explicit confirmation in the party panel.
+    private val _hlsSuggestion = MutableStateFlow<PartyHlsSuggestion?>(null)
+    val hlsSuggestion: StateFlow<PartyHlsSuggestion?> = _hlsSuggestion.asStateFlow()
+
+    fun dismissHlsSuggestion() { _hlsSuggestion.value = null }
+
     private val _enabled = MutableStateFlow(true)
     val available: StateFlow<Boolean> = combine(ServerConfigurationRepository.active, _enabled) { server, enabled ->
         server.capabilities.watchParty && enabled
@@ -337,6 +344,7 @@ object PartyRepository {
         localPresence = null
         _playback.value = null
         _sharedStream.value = null
+        _hlsSuggestion.value = null
         _state.value = PartyUiState()
         PartyChat.stop()
     }
@@ -409,6 +417,17 @@ object PartyRepository {
                     ?.let { decode(it, PartyStream.serializer()) }
                     ?.takeIf { isShareableStreamUrl(it.url) }
                     ?.forDesktop() // HLS renewals must not restart Desktop guests.
+            }
+            "stream_suggest" -> {
+                // Realtime sender identities are not verified by the server: the
+                // name is display only and nothing is shared before the host
+                // confirms and the link passes the desktop playlist check.
+                val memberId = payload.string("member_id") ?: return
+                val url = payload.string("url")?.trim()?.takeIf { it.length <= PARTY_HOST_HLS_MAX_LENGTH } ?: return
+                val member = party.member(memberId)
+                if (!party.isHost || memberId == party.memberId || member == null) return
+                if (payload.string("media_key") != party.media.key || !isPublicHttpsUrl(url)) return
+                _hlsSuggestion.value = PartyHlsSuggestion(memberId, member.displayName, url, party.media.key)
             }
             "chat" -> PartyChat.receive(payload)
         }
@@ -507,6 +526,7 @@ object PartyRepository {
         }
         val name = party.member(memberId)?.displayName
         if (memberId == party.hostMemberId) _sharedStream.value = null
+        if (_hlsSuggestion.value?.memberId == memberId) _hlsSuggestion.value = null
         updateParty { current ->
             current.copy(
                 members = current.members.filterNot { it.id == memberId },
@@ -562,6 +582,7 @@ object PartyRepository {
         if (changed) {
             _playback.value = playback?.takeIf { it.mediaKey == null || it.mediaKey == media.key }
             if (_sharedStream.value?.mediaKey != media.key) _sharedStream.value = null
+            if (_hlsSuggestion.value?.mediaKey != media.key) _hlsSuggestion.value = null
             ignoredWaiting.clear()
             waitStartedAt = null
             _events.tryEmit(PartyEvent.MediaChanged(media))

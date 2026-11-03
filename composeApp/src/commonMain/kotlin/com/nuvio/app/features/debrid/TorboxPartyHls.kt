@@ -1,6 +1,7 @@
 package com.nuvio.app.features.debrid
 
 import com.nuvio.app.features.addons.httpRequestRaw
+import io.ktor.http.URLBuilder
 import io.ktor.http.Url
 import io.ktor.http.decodeURLPart
 import kotlinx.coroutines.CancellationException
@@ -30,6 +31,12 @@ internal sealed interface TorboxHlsCandidate {
     data class Missing(val fieldNames: List<String>) : TorboxHlsCandidate
     data class UnsafeHost(val host: String) : TorboxHlsCandidate
     data object ContainsAccountKey : TorboxHlsCandidate
+    /**
+     * The key appears only as the `token` query parameter. [keyFreeUrl] is the
+     * same address without it; it is used only if TorBox serves the playlist
+     * (and its first variant) without the key, which the probe verifies.
+     */
+    data class KeyOnlyInTokenParameter(val keyFreeUrl: String) : TorboxHlsCandidate
     data object Invalid : TorboxHlsCandidate
 }
 
@@ -51,10 +58,17 @@ internal fun torboxHlsCandidate(body: JsonElement?, apiKey: String): TorboxHlsCa
         val host = parsed.host.lowercase()
         if (parsed.protocol.name != "https" || parsed.user != null || parsed.password != null || parsed.fragment.isNotEmpty()) return TorboxHlsCandidate.Invalid
         // Covers percent-encoded credentials in query/path, not merely raw text.
-        if (candidate.contains(apiKey) || parsed.encodedPath.decodeURLPart().contains(apiKey) ||
-            parsed.parameters.entries().any { (_, values) -> values.any { it.contains(apiKey) } }) return TorboxHlsCandidate.ContainsAccountKey
         if (!(host == "torbox.app" || host.endsWith(".torbox.app"))) {
             return TorboxHlsCandidate.UnsafeHost(host.takeIf { SAFE_HOST.matches(it) } ?: "unbekannt")
+        }
+        if (candidate.contains(apiKey) || parsed.encodedPath.decodeURLPart().contains(apiKey) ||
+            parsed.parameters.entries().any { (_, values) -> values.any { it.contains(apiKey) } }) {
+            val inPathOrOtherParameter = parsed.encodedPath.contains(apiKey) || parsed.encodedPath.decodeURLPart().contains(apiKey) ||
+                parsed.parameters.entries().any { (name, values) -> name != "token" && (name.contains(apiKey) || values.any { it.contains(apiKey) }) }
+            if (inPathOrOtherParameter) return TorboxHlsCandidate.ContainsAccountKey
+            val keyFree = URLBuilder(parsed).apply { parameters.remove("token") }.buildString()
+            if (keyFree.contains(apiKey) || keyFree.decodeURLPart().contains(apiKey)) return TorboxHlsCandidate.ContainsAccountKey
+            return TorboxHlsCandidate.KeyOnlyInTokenParameter(keyFree)
         }
         TorboxHlsCandidate.Url(candidate)
     } catch (_: Exception) { TorboxHlsCandidate.Invalid }
@@ -83,6 +97,7 @@ internal suspend fun prepareTorboxPartyHls(
 ): TorboxPartyHlsResult {
     if (apiKey.isBlank()) return TorboxPartyHlsResult.Failed("TorBox: Kein gespeicherter Account-Key verfügbar.")
     if (file.accountFingerprint != torboxAccountFingerprint(apiKey)) return TorboxPartyHlsResult.Failed("TorBox: Account geändert. Quelle im neuen Account erneut auswählen.")
+    var keyFree = false
     val url = try {
         val response = createStream(apiKey, file.torrentId, file.fileId)
         val root = response.body as? JsonObject
@@ -94,6 +109,8 @@ internal suspend fun prepareTorboxPartyHls(
         }
         when (val candidate = torboxHlsCandidate(response.body, apiKey)) {
             is TorboxHlsCandidate.Url -> candidate.url
+            // Variant A: try the same stream without the account key. Never the keyed URL.
+            is TorboxHlsCandidate.KeyOnlyInTokenParameter -> candidate.keyFreeUrl.also { keyFree = true }
             is TorboxHlsCandidate.Missing -> return TorboxPartyHlsResult.Failed(
                 "TorBox: Antwort enthält keine HLS-Adresse (Felder: ${candidate.fieldNames.joinToString().ifEmpty { "keine" }}). Diese Quelle stellt TorBox so nicht als HLS bereit.",
                 TorboxHlsFailure.Unsupported,
@@ -117,6 +134,10 @@ internal suspend fun prepareTorboxPartyHls(
             catch (cancelled: CancellationException) { throw cancelled }
             catch (_: Exception) { 0 }
         if (manifest == 200) return TorboxPartyHlsResult.Ready(url)
+        if (keyFree && manifest in listOf(401, 403)) return TorboxPartyHlsResult.Failed(
+            "TorBox: Die HLS-Adresse enthält den Account-Key, und ohne ihn liefert TorBox die Playlist nicht (HTTP $manifest). Aus Sicherheitsgründen nicht geteilt.",
+            TorboxHlsFailure.Unsupported,
+        )
         if (manifest in listOf(401, 403, 410)) return TorboxPartyHlsResult.Failed("TorBox: Streamzugriff verweigert (HTTP $manifest). Account und Mehrgeräteberechtigung prüfen.", TorboxHlsFailure.Denied)
         if (manifest == 498) return TorboxPartyHlsResult.Failed("TorBox: Playlist enthält Account-Zugangsdaten. Aus Sicherheitsgründen nicht geteilt.", TorboxHlsFailure.Unsupported)
         if (attempt == 0) onProcessing()
@@ -163,6 +184,31 @@ internal suspend fun findTorboxCloudFile(apiKey: String, infoHash: String, filen
     return TorboxPartyFile(torrentId, fileId, torboxAccountFingerprint(apiKey))
 }
 
+/** One video file of the host's own TorBox cloud, offered for manual linking. */
+data class TorboxCloudChoice(val torrentId: Int, val fileId: Int, val name: String, val size: Long?)
+
+internal const val TORBOX_CHOICES_LIMIT = 400
+
+/** Real torrent/file IDs from mylist; video files only, nothing derived from names. */
+internal fun torboxCloudVideoChoices(items: List<TorboxCloudItemDto>): List<TorboxCloudChoice> =
+    items.flatMap { torrent ->
+        val torrentId = (torrent.id as? JsonPrimitive)?.contentOrNull?.toIntOrNull()?.takeIf { it >= 0 } ?: return@flatMap emptyList()
+        torrent.files.orEmpty().mapNotNull { file ->
+            val fileId = (file.id as? JsonPrimitive)?.contentOrNull?.toIntOrNull()?.takeIf { it >= 0 } ?: return@mapNotNull null
+            val name = (file.shortName ?: file.name ?: file.absolutePath?.substringAfterLast('/'))?.trim()?.takeIf { it.isNotEmpty() } ?: return@mapNotNull null
+            val video = (file.mimeType ?: file.mimeTypeAlt)?.startsWith("video/") == true ||
+                VIDEO_EXTENSIONS.any { name.lowercase().endsWith(it) }
+            if (video) TorboxCloudChoice(torrentId, fileId, name.take(200), file.size) else null
+        }
+    }.sortedBy { it.name.lowercase() }.take(TORBOX_CHOICES_LIMIT)
+
+internal suspend fun listTorboxCloudChoices(apiKey: String): List<TorboxCloudChoice>? {
+    if (apiKey.isBlank()) return null
+    val response = TorboxApiClient.listCloudTorrents(apiKey)
+    if (!response.isSuccessful) return null
+    return torboxCloudVideoChoices(response.body?.data ?: return null)
+}
+
 /** Host-side state of the browser HLS source; shown in the party panel. */
 enum class TorboxHlsPhase { Unavailable, Preparing, Processing, NotReady, Ready, Denied, Unsupported, Expired, Failed }
 
@@ -196,6 +242,15 @@ internal suspend fun probeTorboxPartyHls(url: String, accountKey: String? = null
     // Follows redirects (TorBox may redirect to its CDN); no headers or account
     // key are sent, and the final body is still checked for the key.
     val response = httpRequestRaw(method = "GET", url = url, headers = emptyMap(), body = "", followRedirects = true, maxResponseBodyBytes = 512 * 1024)
-    if (!accountKey.isNullOrBlank() && (response.body.contains(accountKey) || response.body.contains(encodePathSegment(accountKey)))) return 498
-    return if (response.status in 200..299 && response.body.trimStart().startsWith("#EXTM3U")) 200 else response.status.takeUnless { it in 200..299 } ?: 422
+    val result = torboxPlaylistStatus(response.status, response.body, accountKey)
+    if (result != 200 || !response.body.contains("#EXT-X-STREAM-INF")) return result
+    // Master playlist: the first variant must work the same way (and be key free).
+    val variant = com.nuvio.app.features.party.firstHlsVariant(response.body, response.url.ifBlank { url }) ?: return 422
+    val child = httpRequestRaw(method = "GET", url = variant, headers = emptyMap(), body = "", followRedirects = true, maxResponseBodyBytes = 512 * 1024)
+    return torboxPlaylistStatus(child.status, child.body, accountKey)
+}
+
+internal fun torboxPlaylistStatus(status: Int, body: String, accountKey: String?): Int {
+    if (!accountKey.isNullOrBlank() && (body.contains(accountKey) || body.contains(encodePathSegment(accountKey)))) return 498
+    return if (status in 200..299 && body.trimStart().startsWith("#EXTM3U")) 200 else status.takeUnless { it in 200..299 } ?: 422
 }

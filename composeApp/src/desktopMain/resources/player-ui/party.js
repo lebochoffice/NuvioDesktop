@@ -502,7 +502,132 @@ const buildPartyHostSettings = party => {
   // Also explains why there is no button (e.g. an addon stream).
   const hlsStatus = String(party.hlsStatus || "").trim();
   if (hlsStatus) section.appendChild(partyElement("p", "party-note", `Browser-HLS: ${hlsStatus}`));
+  if (party.torboxLinkAvailable) section.appendChild(buildPartyTorboxLink(party));
+  if (party.hostHlsAllowed) section.appendChild(buildPartyHostHls(party));
   return section;
+};
+
+// Drafts survive panel rebuilds; they live only in this overlay's memory.
+let partyHostHlsDraft = "";
+let partyHostHlsConsent = false;
+let partyTorboxFilter = "";
+const partyTorboxVisibleLimit = 60;
+
+const partyInputElement = (className, label, focusKey) => {
+  const input = partyElement("input", className);
+  input.setAttribute("aria-label", label);
+  input.autocomplete = "off";
+  input.spellcheck = false;
+  input.dataset.partyFocus = focusKey;
+  Object.assign(input.style, {
+    width: "100%", boxSizing: "border-box", margin: "8px 0",
+    border: "1px solid #555", borderRadius: "9px", color: "#f5f5f5",
+    padding: "10px 12px", background: "#242424", fontSize: "14px"
+  });
+  input.addEventListener("click", event => event.stopPropagation());
+  input.addEventListener("keydown", event => event.stopPropagation());
+  return input;
+};
+
+// Host's own HLS link for all guests. Sent only with the explicit consent
+// below; the desktop checks it (public HTTPS, finished VOD, no account key)
+// before anything is broadcast. Guest suggestions need the same confirmation.
+const buildPartyHostHls = party => {
+  const box = partyElement("div", "party-host-hls");
+  box.appendChild(partyElement("p", "party-switch-title", "Video-Link für alle teilen"));
+  const from = String(party.hlsSuggestionFrom || "").trim();
+  if (from) {
+    const host = String(party.hlsSuggestionHost || "").trim();
+    box.appendChild(partyElement("p", "party-text primary", `${from} schlägt einen Video-Link vor (${host}).`));
+    box.appendChild(partyButtonElement("Prüfen und für alle freigeben", "primary", "hlsSuggestionAccept", () => showPartyConfirm({
+      title: "Vorgeschlagenen Link freigeben?",
+      message: `Der Link von ${from} wird geprüft und danach an alle Party-Mitglieder gesendet. Enthaltene Zugangstokens sind dann für alle sichtbar, und jeder Browser meldet seine IP-Adresse an ${host}.`,
+      confirmLabel: "Prüfen und freigeben",
+      danger: false,
+      onConfirm: () => send("partyHlsSuggestionAccept", 0),
+    })));
+    box.appendChild(partyButtonElement("Ablehnen", "", "hlsSuggestionReject", () => send("partyHlsSuggestionReject", 0)));
+  }
+  if (party.hostHlsActive) {
+    box.appendChild(partyElement("p", "party-text", `Aktiv: ${String(party.hostHlsLabel || "Video-Link")}. Neue Gäste und Rejoins erhalten ihn automatisch.`));
+    box.appendChild(partyButtonElement("Video-Link-Freigabe beenden", "danger", "hostHlsClear", () => send("partyHostHlsClear", 0)));
+  } else {
+    const input = partyInputElement("party-host-hls-url", "HLS-Adresse für alle", "hostHlsUrl");
+    input.setAttribute("type", "url");
+    input.setAttribute("inputmode", "url");
+    input.placeholder = "https://…/playlist.m3u8";
+    input.value = partyHostHlsDraft;
+    box.appendChild(input);
+    const consent = partyElement("label", "party-note");
+    const check = partyElement("input");
+    check.type = "checkbox";
+    check.checked = partyHostHlsConsent;
+    check.dataset.partyFocus = "hostHlsConsent";
+    check.addEventListener("click", event => event.stopPropagation());
+    consent.appendChild(check);
+    consent.appendChild(document.createTextNode(" Ich gebe diesen Link für alle Party-Mitglieder frei. Er wird an alle gesendet; enthaltene Tokens sind für sie sichtbar. „Share my stream“ wird dabei eingeschaltet."));
+    box.appendChild(consent);
+    const share = partyButtonElement("Für alle freigeben", "primary", "hostHlsShare", () => {
+      const url = input.value.trim();
+      if (!url || !check.checked || party.hostHlsBusy) return;
+      partyHostHlsDraft = ""; partyHostHlsConsent = false;
+      input.value = ""; check.checked = false;
+      send(`partyHostHls:${partyEncodeText(url)}`, 0);
+    });
+    const update = () => { share.disabled = Boolean(party.hostHlsBusy) || !check.checked || !input.value.trim(); };
+    input.addEventListener("input", () => { partyHostHlsDraft = input.value; update(); });
+    check.addEventListener("change", () => { partyHostHlsConsent = check.checked; update(); });
+    update();
+    box.appendChild(share);
+  }
+  const status = String(party.hostHlsStatus || "").trim();
+  if (status) box.appendChild(partyElement("p", "party-note", status));
+  return box;
+};
+
+// Manual TorBox link for addon streams without TorBox identity: the host
+// picks the exact file from its own cloud list (real torrent/file IDs).
+const buildPartyTorboxLink = party => {
+  const box = partyElement("div", "party-torbox-link");
+  const linked = String(party.torboxLinkedName || "").trim();
+  if (linked) {
+    box.appendChild(partyElement("p", "party-text", `Mit TorBox-Datei verknüpft: ${linked}`));
+    box.appendChild(partyButtonElement("Verknüpfung lösen", "", "torboxUnlink", () => send("partyTorboxUnlink", 0)));
+  } else if (!party.torboxChoicesOpen) {
+    box.appendChild(partyButtonElement("Mit TorBox-Datei verknüpfen", "", "torboxList", () => { partyTorboxFilter = ""; send("partyTorboxList", 0); }));
+  } else {
+    const filter = partyInputElement("party-torbox-filter", "TorBox-Dateien filtern", "torboxFilter");
+    filter.placeholder = "Dateiname filtern …";
+    filter.value = partyTorboxFilter;
+    box.appendChild(filter);
+    const list = partyElement("div", "party-torbox-list");
+    const render = () => {
+      list.textContent = "";
+      const words = partyTorboxFilter.toLowerCase().split(/\s+/).filter(Boolean);
+      const matches = normalizeItems(party.torboxChoices)
+        .filter(choice => words.every(word => String(choice.name || "").toLowerCase().includes(word)));
+      matches.slice(0, partyTorboxVisibleLimit).forEach(choice => {
+        const name = String(choice.name || "");
+        const label = choice.size ? `${name} · ${choice.size}` : name;
+        list.appendChild(partyButtonElement(label, "", `torboxPick:${choice.id}`, () => showPartyConfirm({
+          title: "TorBox-Datei verknüpfen?",
+          message: `„${name}“ mit genau diesem Titel verknüpfen? Nur wählen, wenn es exakt dieser Film bzw. diese Folge ist. Danach wird TorBox-HLS für diese Datei vorbereitet.`,
+          confirmLabel: "Verknüpfen",
+          danger: false,
+          onConfirm: () => send(`partyTorboxPick:${String(choice.id)}`, 0),
+        })));
+      });
+      if (matches.length > partyTorboxVisibleLimit) list.appendChild(partyElement("p", "party-note", `${matches.length - partyTorboxVisibleLimit} weitere Treffer. Filter genauer eingeben.`));
+      if (!party.torboxChoicesBusy && !matches.length) list.appendChild(partyElement("p", "party-note", "Keine passende Datei."));
+    };
+    filter.addEventListener("input", () => { partyTorboxFilter = filter.value; render(); });
+    render();
+    box.appendChild(list);
+    box.appendChild(partyButtonElement("Schließen", "", "torboxClose", () => send("partyTorboxClose", 0)));
+  }
+  const status = String(party.torboxChoicesStatus || "").trim();
+  if (status) box.appendChild(partyElement("p", "party-note", status));
+  return box;
 };
 
 const closeAndSendParty = type => {

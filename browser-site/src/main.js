@@ -53,6 +53,10 @@ let expectedPauses = 0, mediaPointerDown = false, mediaGestureUntil = -1;
 let lastPlaybackError = 'none', debugOutput = null, debugEnabled = false;
 try { debugEnabled = sessionStorage.getItem('nuvio-party-debug') === '1'; } catch { /* Local opt-in unavailable. */ }
 let personalReadinessMessage = '';
+// Personal link: follow the party time automatically once the VOD is ready.
+// Bounded retries; never while watching alone, never after the user left sync.
+const PERSONAL_AUTO_SYNC_TRIES = 30, PERSONAL_AUTO_SYNC_MS = 1000;
+let personalAutoSync = null;
 const personalHls = new PersonalHlsSource(Hls, player, {
   onInternalSeek: seconds => { internalHlsSeek = {seconds}; },
   onInstance: instance => watchHlsInstance(instance),
@@ -318,6 +322,7 @@ function pauseLocally() {
   player.pause();
 }
 function resetVideo(reason = 'Persönliche Quelle entfernt. Für diesen Film kann eine neue eigene Quelle geladen werden.') {
+  cancelPersonalAutoSync();
   pendingSeek = internalHlsSeek = pendingPlay = ownSeek = null;
   waitingForTarget = false;
   lastAlignedPlayback = null; lastPresence = null;
@@ -351,11 +356,38 @@ function updatePersonalHlsReadiness(announce = false) {
     loading = false; $('noStream').hidden = true;
     if (wasLoading) presence();
   }
+  if (personalAutoSync && !syncEnabled) {
+    if (soloMode) personalAutoSync = null; // "Allein schauen" stays independent.
+    else if (result.ready) {
+      personalAutoSync = null; autoStarting = true;
+      resyncNow(); return;
+    } else if (!personalHls.playlist) { /* LEVEL_LOADED checks again. */ }
+    else if (!result.retryable) personalAutoSync = null;
+    else schedulePersonalAutoSync();
+  }
   if (announce || personalReadinessMessage !== message) {
     personalReadinessMessage = message;
     $('personalHlsStatus').textContent = message;
     if (!syncEnabled) status(message);
   }
+}
+function schedulePersonalAutoSync() {
+  const pending = personalAutoSync;
+  if (!pending || pending.timer) return;
+  if (pending.tries >= PERSONAL_AUTO_SYNC_TRIES) {
+    personalAutoSync = null;
+    status('Die eigene Quelle ist noch nicht synchronisierbar. „Party-Zeit aktualisieren“ versucht es erneut.');
+    return;
+  }
+  pending.tries++;
+  pending.timer = setTimeout(() => {
+    pending.timer = null;
+    if (personalAutoSync === pending) updatePersonalHlsReadiness();
+  }, PERSONAL_AUTO_SYNC_MS);
+}
+function cancelPersonalAutoSync() {
+  if (personalAutoSync?.timer) globalThis.clearTimeout?.(personalAutoSync.timer);
+  personalAutoSync = null;
 }
 function presence() {
   if (!session?.room) return;
@@ -493,6 +525,7 @@ function applySync(forcePlay = false) {
 }
 function failVideo(message, errorCode = 'media_error') {
   lastPlaybackError = errorCode;
+  cancelPersonalAutoSync();
   pendingSeek = internalHlsSeek = pendingPlay = ownSeek = null;
   waitingForTarget = false;
   lastAlignedPlayback = null;
@@ -757,6 +790,7 @@ function skip(seconds) {
 // nor followed (applySync and all senders are gated by syncEnabled/soloMode).
 function enterSolo() {
   if (!session?.room || !loadedStream) return;
+  cancelPersonalAutoSync();
   soloMode = true; syncEnabled = false; resumeAfterReconnect = false;
   pendingPlay = null; pendingSeek = ownSeek = null; userSeekPending = false;
   if (player.playbackRate !== 1) player.playbackRate = 1; // No party nudging any more.
@@ -970,7 +1004,17 @@ $('personalHlsForm').addEventListener('submit', e => {
   const currentMediaKey = media?.meta_type && media?.meta_id ? mediaKey(media) : '';
   const problem = personalHlsUrlProblem(value) || (!currentMediaKey ? 'Die Party hat noch keine gültige Filmkennung. Bitte den Host prüfen und erneut laden.' : '');
   if (problem) { $('personalHlsStatus').textContent = problem; status(problem, true); return; }
+  const suggest = $('suggestToHost').checked === true;
+  $('suggestToHost').checked = false; // Consent applies to this one link only.
+  if (suggest) {
+    session.suggestStream(value, currentMediaKey)
+      .then(() => status('Vorschlag an den Host gesendet. Er wird erst nach seiner Prüfung und Freigabe für alle verwendet.'))
+      .catch(() => status('Vorschlag konnte nicht gesendet werden. Party-Verbindung prüfen.', true));
+  }
+  const solo = soloMode;
   resetVideo();
+  cancelPersonalAutoSync();
+  if (!solo) personalAutoSync = {tries: 0, timer: null};
   loadedStream = {personal: true, media_key: currentMediaKey};
   loading = true;
   $('useDesktopStream').hidden = false;
@@ -1017,7 +1061,14 @@ function updateInviteLinks() {
 async function preview() {
   updateInviteLinks();
   if (!client) return;
-  if (!validCode($('partyCode').value)) { $('preview').textContent = 'Dieser Link enthält keinen gültigen Party-Code. Bitte den Einladungslink erneut öffnen oder den Party-Code eingeben.'; return; }
+  if (!validCode($('partyCode').value)) {
+    // Home page or an empty field: just the join form. Only a broken
+    // /party/… link or a typed invalid code gets a notice.
+    const brokenLink = /^\/party\//i.test(location.pathname) && !partyCodeFromPath(location.pathname);
+    $('preview').textContent = brokenLink ? 'Dieser Einladungslink enthält keinen gültigen Party-Code. Bitte den Link erneut öffnen oder den Party-Code eingeben.'
+      : $('partyCode').value.trim() ? 'Der Party-Code hat sechs Zeichen (Buchstaben und Ziffern aus der Einladung).' : '';
+    return;
+  }
   try {
     const p = await callRpc(client, 'watch_party_preview', {p_code: normalizeCode($('partyCode').value)});
     renderInvite(p);

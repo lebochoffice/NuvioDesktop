@@ -24,6 +24,22 @@ data class PlayerControlPartyState(
     val hlsStatus: String = "",
     // Default origin of "Watch in Browser" (production, or the preview in a test build).
     val browserOrigin: String = "",
+    // Host's own video link for all browser guests (never the URL itself here).
+    val hostHlsAllowed: Boolean = false,
+    val hostHlsActive: Boolean = false,
+    val hostHlsLabel: String = "",
+    val hostHlsBusy: Boolean = false,
+    val hostHlsStatus: String = "",
+    // Pending guest proposal: name and host name only.
+    val hlsSuggestionFrom: String = "",
+    val hlsSuggestionHost: String = "",
+    // "Mit TorBox-Datei verknüpfen" for addon streams without TorBox identity.
+    val torboxLinkAvailable: Boolean = false,
+    val torboxLinkedName: String = "",
+    val torboxChoicesOpen: Boolean = false,
+    val torboxChoicesBusy: Boolean = false,
+    val torboxChoicesStatus: String = "",
+    val torboxChoices: List<PlayerControlTorboxChoice> = emptyList(),
     val canEnd: Boolean = false,
     val seatsLabel: String = "",
     val maxMembers: Int = 0,
@@ -38,6 +54,13 @@ data class PlayerControlPartyState(
     val messageToken: Long = 0L,
     val labels: Map<String, String> = emptyMap(),
     val chat: PlayerControlChatState = PlayerControlChatState(),
+)
+
+@Serializable
+data class PlayerControlTorboxChoice(
+    val id: String = "",
+    val name: String = "",
+    val size: String = "",
 )
 
 @Serializable

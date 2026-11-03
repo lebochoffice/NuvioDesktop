@@ -51,6 +51,8 @@ data class PartyBrowserHls(
     // Optional, for browsers: "preparing", "denied" or "failed" while url is
     // null. Older browsers ignore it and keep showing "pending".
     val state: String? = null,
+    // Optional display name ("TorBox HLS", "Video-Link des Hosts"); older browsers ignore it.
+    val label: String? = null,
 )
 
 @Serializable

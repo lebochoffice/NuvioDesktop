@@ -298,6 +298,20 @@ internal class PlayerScreenRuntime(
     var torboxMappedFor by mutableStateOf<String?>(null)
     // Incremented by "HLS erstellen / aktualisieren": restarts the single producer.
     var torboxPartyRefresh by mutableStateOf(0)
+    // File the host explicitly linked from its TorBox cloud for this title
+    // (torboxManualFor = party media key). Real IDs from mylist only.
+    var torboxManualFile by mutableStateOf<com.nuvio.app.features.debrid.TorboxPartyFile?>(null)
+    var torboxManualFor by mutableStateOf<String?>(null)
+    var torboxManualName by mutableStateOf("")
+    // Cloud file list for "Mit TorBox-Datei verknüpfen" (open picker only).
+    var torboxChoices by mutableStateOf<List<com.nuvio.app.features.debrid.TorboxCloudChoice>?>(null)
+    var torboxChoicesFor by mutableStateOf<String?>(null)
+    var torboxChoicesBusy by mutableStateOf(false)
+    var torboxChoicesStatus by mutableStateOf("")
+    // Video link the host shares as the party's browser source (memory only).
+    var hostPartyHls by mutableStateOf<com.nuvio.app.features.party.PartyHostHls?>(null)
+    var hostPartyHlsStatus by mutableStateOf("")
+    var hostPartyHlsBusy by mutableStateOf(false)
     var partyBehindMs by mutableStateOf<Long?>(null)
     var partyRateNudge: Float? = null
     var partyPreviousKey: String? = null

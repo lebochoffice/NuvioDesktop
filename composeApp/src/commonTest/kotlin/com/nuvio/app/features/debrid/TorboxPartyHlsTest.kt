@@ -4,6 +4,7 @@ import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.Json
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertIs
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -42,7 +43,8 @@ class TorboxPartyHlsTest {
         assertEquals(TorboxHlsCandidate.Missing(listOf("presigned_token", "stream_id", "user_token")), missing)
         assertTrue("SECRET_VALUE" !in missing.toString() && "account-secret" !in missing.toString())
         assertEquals(TorboxHlsCandidate.UnsafeHost("cdn.example.net"), torboxHlsCandidate(response("https://cdn.example.net/a.m3u8"), "account-secret"))
-        assertEquals(TorboxHlsCandidate.ContainsAccountKey, torboxHlsCandidate(response("https://stream.torbox.app/a?token=account-secret"), "account-secret"))
+        assertEquals(TorboxHlsCandidate.ContainsAccountKey, torboxHlsCandidate(response("https://stream.torbox.app/account-secret/a"), "account-secret"))
+        assertEquals(TorboxHlsCandidate.ContainsAccountKey, torboxHlsCandidate(response("https://stream.torbox.app/a?x=account-secret&token=account-secret"), "account-secret"))
         assertEquals(TorboxHlsCandidate.Url("https://stream.torbox.app/a.m3u8"), torboxHlsCandidate(response("https://stream.torbox.app/a.m3u8"), "account-secret"))
         assertEquals(TorboxHlsCandidate.Invalid, torboxHlsCandidate(Json.parseToJsonElement("""{"success":false}"""), "account-secret"))
     }
@@ -60,6 +62,23 @@ class TorboxPartyHlsTest {
         assertEquals("failed", torboxBrowserState(TorboxHlsPhase.Failed))
         assertEquals("failed", torboxBrowserState(TorboxHlsPhase.NotReady))
         assertEquals("unsupported", torboxBrowserState(TorboxHlsPhase.Unsupported))
+    }
+    @Test fun `a key only in the token parameter yields the key free variant, never the keyed url`() {
+        for (url in listOf("https://stream.torbox.app/stream/p/0/0/0/0?token=account-secret", "https://stream.torbox.app/stream/p/0/0/0/0?token=account%2Dsecret&res=1")) {
+            val candidate = torboxHlsCandidate(response(url), "account-secret")
+            assertIs<TorboxHlsCandidate.KeyOnlyInTokenParameter>(candidate)
+            assertTrue(candidate.keyFreeUrl.startsWith("https://stream.torbox.app/stream/p/0/0/0/0"))
+            assertTrue("account" !in candidate.keyFreeUrl && "token" !in candidate.keyFreeUrl, candidate.keyFreeUrl)
+        }
+        assertTrue("res=1" in (torboxHlsCandidate(response("https://stream.torbox.app/a?token=account-secret&res=1"), "account-secret") as TorboxHlsCandidate.KeyOnlyInTokenParameter).keyFreeUrl)
+    }
+    @Test fun `cloud choices list only video files with their real ids`() {
+        val choices = torboxCloudVideoChoices(cloud("""[
+            {"id":21,"hash":"a","files":[{"id":3,"short_name":"Zeta.S01E02.mkv","size":2147483648},{"id":4,"name":"readme.txt"}]},
+            {"id":22,"hash":"b","files":[{"id":0,"name":"alpha.bin","mimetype":"video/mp4"},{"id":"bad","name":"x.mkv"}]},
+            {"id":"bad","hash":"c","files":[{"id":1,"name":"y.mkv"}]}
+        ]"""))
+        assertEquals(listOf(TorboxCloudChoice(22, 0, "alpha.bin", null), TorboxCloudChoice(21, 3, "Zeta.S01E02.mkv", 2147483648)), choices)
     }
     private fun cloud(json: String) = Json { ignoreUnknownKeys = true }.decodeFromString<List<TorboxCloudItemDto>>(json)
     @Test fun `an addon stream maps only to a unique file of the user's own TorBox cloud`() {

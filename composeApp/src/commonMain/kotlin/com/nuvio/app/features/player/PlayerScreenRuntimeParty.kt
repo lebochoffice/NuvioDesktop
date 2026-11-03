@@ -206,9 +206,17 @@ internal fun PlayerScreenRuntime.currentPartyMedia(): PartyMedia = PartyMedia(
     ),
 )
 
-/** TorBox file of the current source: its own identity or a unique cloud match. */
+/** TorBox file of the current source: its own identity, a unique cloud match, or the host's manual link. */
 internal val PlayerScreenRuntime.effectiveTorboxFile: com.nuvio.app.features.debrid.TorboxPartyFile?
     get() = activeStream?.torboxPartyFile ?: torboxMappedFile?.takeIf { torboxMappedFor == torboxMappingKey() }
+        ?: torboxManualFile?.takeIf { torboxManualFor == partyKey }
+
+/** The host's shared video link, valid only for the title it was entered for. */
+internal val PlayerScreenRuntime.activeHostPartyHls: com.nuvio.app.features.party.PartyHostHls?
+    get() = hostPartyHls?.takeIf { it.mediaKey == partyKey && PartyRepository.state.value.party?.media?.key == partyKey }
+
+private fun configuredDebridKeys(): List<String> =
+    com.nuvio.app.features.debrid.DebridSettingsRepository.snapshot().providerApiKeys.values.filter { it.isNotBlank() }
 
 /** Identity of the addon stream a cloud match was made for (hash + filename + media). */
 internal fun PlayerScreenRuntime.torboxMappingKey(): String? =
@@ -216,15 +224,20 @@ internal fun PlayerScreenRuntime.torboxMappingKey(): String? =
 
 internal fun PlayerScreenRuntime.currentPartyStream(): PartyStream? {
     val stream = activeStream ?: return null
-    val torboxFile = effectiveTorboxFile
+    // An explicitly shared host link replaces the TorBox HLS as browser source.
+    val hostLink = activeHostPartyHls?.takeUnless { link -> configuredDebridKeys().any { link.url.contains(it) } }
+    val torboxFile = effectiveTorboxFile.takeIf { hostLink == null }
     if (torboxFile != null) {
         if (PartyRepository.state.value.party?.media?.key != partyKey) return null
     }
     val accountKey = com.nuvio.app.features.debrid.DebridSettingsRepository.snapshot()
         .apiKeyFor(com.nuvio.app.features.debrid.DebridProviders.TORBOX_ID)
     if (torboxFile != null && torboxFile.accountFingerprint != com.nuvio.app.features.debrid.torboxAccountFingerprint(accountKey)) return null
-    val prepared = torboxPartyStream?.takeIf { torboxFile != null && it.mediaKey == partyKey && torboxPreparedFile == torboxFile }
-    val browserHls = if (torboxFile != null) {
+    val prepared = if (hostLink != null) PartyStream(mediaKey = partyKey, url = hostLink.url, streamType = "hls")
+        else torboxPartyStream?.takeIf { torboxFile != null && it.mediaKey == partyKey && torboxPreparedFile == torboxFile }
+    val browserHls = if (hostLink != null) {
+        com.nuvio.app.features.party.PartyBrowserHls(url = hostLink.url, label = hostLink.label)
+    } else if (torboxFile != null) {
         com.nuvio.app.features.party.PartyBrowserHls(
             url = prepared?.url,
             headers = prepared?.headers.orEmpty(),
@@ -453,6 +466,18 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
 
     LaunchedEffect(sharing, sharedStream) {
         if (sharing) PartyRepository.shareStream(sharedStream)
+    }
+
+    LaunchedEffect(key, partyId) {
+        // A shared video link and a manual TorBox link belong to one title of one party.
+        if (hostPartyHls != null && (partyId == null || hostPartyHls?.mediaKey != key)) {
+            hostPartyHls = null
+            hostPartyHlsStatus = if (partyId == null) "" else "Der geteilte Video-Link galt für den vorherigen Titel und wurde beendet."
+        }
+        if (torboxManualFor != null && (partyId == null || torboxManualFor != key)) {
+            torboxManualFile = null; torboxManualFor = null; torboxManualName = ""
+        }
+        if (torboxChoicesFor != key) { torboxChoices = null; torboxChoicesFor = null; torboxChoicesStatus = "" }
     }
 
     LaunchedEffect(key) {

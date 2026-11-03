@@ -126,10 +126,11 @@
       <form id="personalHlsForm" class="stack compact" autocomplete="off">
         <label class="sr-only" for="personalHlsUrl">Video-Link (HTTPS-HLS-Playlist)</label>
         <input id="personalHlsUrl" type="url" inputmode="url" autocomplete="off" spellcheck="false" maxlength="16384" placeholder="https://…/playlist.m3u8" aria-describedby="personalHlsStatus videoLinkFormats" required>
+        <label class="muted small" for="suggestToHost"><input id="suggestToHost" type="checkbox"> Auch dem Host als Party-Quelle vorschlagen. Der Host sieht den Link und kann ihn nach Prüfung für alle freigeben; enthaltene Tokens sind dann für alle sichtbar.</label>
         <div class="button-row"><button id="loadPersonalHls" class="btn primary small" type="submit">Video laden</button><button id="useDesktopStream" type="button" class="btn ghost small" hidden>Zur Host-Quelle zurück</button></div>
       </form>
       <p id="personalHlsStatus" class="muted small" role="status" aria-live="polite">Die Eingabe wird nach dem Laden geleert und nicht dauerhaft gespeichert.</p>
-      <p id="videoLinkFormats" class="muted small">Unterstützt: HLS-Playlists (.m3u8) über HTTPS, keine Livestreams, dieselbe Filmfassung wie der Host. Keine Webseiten-Links (z. B. YouTube), kein DRM, keine lokalen Adressen. Der Link bleibt in diesem Browser und wird nicht an die Party gesendet.</p>
+      <p id="videoLinkFormats" class="muted small">Unterstützt: HLS-Playlists (.m3u8) über HTTPS, keine Livestreams, dieselbe Filmfassung wie der Host. Keine Webseiten-Links (z. B. YouTube), kein DRM, keine lokalen Adressen. Der Link bleibt in diesem Browser und wird nur mit dem Häkchen oben an den Host gesendet.</p>
     </section>
     <details class="drawer-block"><summary>Technik</summary>
       <div class="setting-row">

@@ -65,6 +65,23 @@ class TorboxPartyHlsPrepareTest {
     }
 
     @Test
+    fun aKeyBearingHlsUrlIsUsedOnlyWithoutTheKeyAndOnlyIfTorBoxServesIt() = runTest {
+        val probed = mutableListOf<String>()
+        suspend fun run(code: Int) = prepareTorboxPartyHls(file, key,
+            createStream = { _, _, _ -> ok("https://stream.torbox.app/stream/p/0/0/0/0?token=$key") },
+            probe = { url, _ -> probed += url; code },
+            pause = {},
+        )
+        val ready = run(200)
+        assertIs<TorboxPartyHlsResult.Ready>(ready)
+        assertTrue(key !in ready.url && "token" !in ready.url)
+        val refused = run(401) as TorboxPartyHlsResult.Failed
+        assertEquals(TorboxHlsFailure.Unsupported, refused.reason)
+        assertTrue("Account-Key" in refused.message && key !in refused.message)
+        assertTrue(probed.none { key in it }) // The keyed URL is never requested or shared.
+    }
+
+    @Test
     fun accountChangeAndMissingKeyNeverCallTheApi() = runTest {
         val calls = mutableListOf<String>()
         val other = prepareTorboxPartyHls(file.copy(accountFingerprint = "other"), key,

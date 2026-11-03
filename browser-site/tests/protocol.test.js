@@ -86,3 +86,10 @@ test('member sync labels and drift formatting', () => {
   assert.equal(memberSyncLabel({state: 'buffering'}), 'Puffert'); assert.equal(memberSyncLabel({state: 'stale'}), 'Status veraltet');
   assert.equal(memberSyncLabel({state: 'unsynced', driftMs: -90000}), 'Unsynchron (−1:30)'); assert.equal(memberSyncLabel({state: 'unknown'}), '');
 });
+
+test('browser_hls label names a host video link; control characters are stripped and it never changes the transport', () => {
+  const stream = {media_key: 'movie|tt1||', url: 'https://cdn.example.test/a.m3u8', browser_hls: {url: 'https://cdn.example.test/a.m3u8', label: 'Video-Link\u0000 des Hosts'}};
+  assert.equal(browserPartyStream(stream).name, 'Video-Link des Hosts');
+  assert.equal(browserPartyStream({...stream, browser_hls: {url: stream.url}}).name, 'TorBox HLS');
+  assert.equal(browserPartyStream({...stream, browser_hls: {url: stream.url, label: 'x'.repeat(200)}}).name.length, 80);
+});
