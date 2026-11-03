@@ -1476,8 +1476,23 @@ tasks.matching { it.name == "packageMsi" }.configureEach {
     }
 }
 
+// Fork guard: IntroDbConfig.URL is generated from local.properties. When it is
+// empty, IntroDB (the only skip source for regular films/series) is silently
+// disabled and "Skip intro" never appears. Never package that by accident.
+val releaseIntroDbUrl = supabaseProps.getProperty("INTRODB_API_URL").orEmpty().trim()
+val allowMissingIntroDb = providers.gradleProperty("nuvio.allowMissingIntroDb").orNull == "true"
 tasks.matching { it.name == "packageReleaseMsi" }.configureEach {
     notCompatibleWithConfigurationCache("Windows MSI artifact publication uses script file operations.")
+    doFirst {
+        if (!releaseIntroDbUrl.startsWith("https://") && !allowMissingIntroDb) {
+            throw GradleException("INTRODB_API_URL missing or not https in local.properties; Skip intro would be disabled. Set it or pass -Pnuvio.allowMissingIntroDb=true for diagnostic builds only.")
+        }
+        // Without the WebView2 SDK the runtime Sync silently omits
+        // WebView2Loader.dll and the Windows player cannot start.
+        if (isWindowsHost && !windowsWebView2LoaderDll.exists()) {
+            throw GradleException("WebView2Loader.dll not found (${windowsWebView2LoaderDll.path}). Install the Microsoft.Web.WebView2 NuGet package or pass -Pnuvio.webview2.dir=<sdk>; the MSI would lack the player runtime.")
+        }
+    }
     doLast {
         publishWindowsMsiOutput(release = true)
     }

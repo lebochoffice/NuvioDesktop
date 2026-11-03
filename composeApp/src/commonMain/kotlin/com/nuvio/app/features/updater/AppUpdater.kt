@@ -28,6 +28,7 @@ data class AppUpdate(
     val assetName: String,
     val assetUrl: String,
     val assetSizeBytes: Long?,
+    val assetSha256: String? = null,
 )
 
 data class AppUpdaterUiState(
@@ -230,6 +231,27 @@ class AppUpdaterController internal constructor(
             currentCoroutineContext().ensureActive()
             if (channel != preferences.channel.value) return@launch
             result.onSuccess { path ->
+                // Integrity gate before any installer runs: the published
+                // SHA-256 must match; platforms may require it to exist.
+                val checksum = update.assetSha256
+                val verification = when {
+                    checksum != null -> AppUpdaterPlatform.verifyDownloadedUpdate(path, checksum)
+                    AppUpdaterPlatform.requiresUpdateChecksum -> Result.failure(IllegalStateException(getString(Res.string.updates_checksum_missing)))
+                    else -> Result.success(Unit)
+                }
+                verification.onFailure { error ->
+                    AppUpdaterPlatform.deleteDownloadedUpdate(path)
+                    _uiState.update { state ->
+                        state.copy(
+                            isDownloading = false,
+                            downloadProgress = null,
+                            downloadedUpdatePath = null,
+                            errorMessage = error.message ?: getString(Res.string.updates_checksum_mismatch),
+                            showDialog = true,
+                        )
+                    }
+                    return@launch
+                }
                 _uiState.update { state ->
                     state.copy(
                         isDownloading = false,

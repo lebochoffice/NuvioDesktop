@@ -1042,6 +1042,8 @@
     <string name="updates_download_failed">Download fehlgeschlagen</string>
     <string name="updates_downloading_progress">Wird heruntergeladen %1$d%</string>
     <string name="updates_install_failed">Installation kann nicht gestartet werden</string>
+    <string name="updates_checksum_missing">Dieses Update hat keine veröffentlichte SHA-256-Prüfsumme und wurde nicht installiert.</string>
+    <string name="updates_checksum_mismatch">Das heruntergeladene Update hat die SHA-256-Prüfung nicht bestanden und wurde gelöscht.</string>
     <string name="updates_latest_version">Du verwendest die neueste Version.</string>
     <string name="updates_message_allow_installs">Aktiviere App-Installationen für Nuvio und komm dann zurück, um fortzufahren.</string>
     <string name="updates_message_downloading">Update wird heruntergeladen...</string>

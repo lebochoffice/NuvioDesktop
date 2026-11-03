@@ -402,16 +402,24 @@ const buildPartySwitch = (key, title, description, checked, eventType) => {
 };
 
 // NUVIO_BROWSER_PARTY_BRIDGE_V1: Link to the independently hosted browser guest.
-const partyBrowserHostStorage = "nuvio-browser-party-host";
+// v2 key: values stored by older builds (e.g. preview URLs) are ignored.
+const partyBrowserDefaultHost = "https://nuvio-watch-friends.pages.dev";
+const partyBrowserHostStorage = "nuvio-browser-party-host-v2";
+// Cloudflare preview deployments (<hash>.<project>.pages.dev) are never
+// used as invitation targets; only production project hosts.
+const partyBrowserPreviewHost = host => /\.pages\.dev$/i.test(host) && host.split(".").length > 3;
 const partyBrowserHost = () => {
-  try { return window.localStorage.getItem(partyBrowserHostStorage) || "https://nuvio-watch-friends.pages.dev"; }
-  catch { return "https://nuvio-watch-friends.pages.dev"; }
+  try {
+    const stored = window.localStorage.getItem(partyBrowserHostStorage) || "";
+    const host = stored ? new URL(stored).hostname : "";
+    return stored && !partyBrowserPreviewHost(host) ? stored : partyBrowserDefaultHost;
+  } catch { return partyBrowserDefaultHost; }
 };
 
 const buildPartyBrowserShare = party => {
   const section = partyElement("div", "party-section");
   section.appendChild(partyElement("p", "party-switch-title", "Watch in Browser"));
-  section.appendChild(partyElement("p", "party-note", "TorBox HLS is prepared automatically for files resolved by this Nuvio account. See the source status above; enable the existing Share my stream only after consent. Full account keys are never accepted in the prepared HLS URL. Personal HLS remains a fallback. Browser controls remain local."));
+  section.appendChild(partyElement("p", "party-note", "TorBox HLS is prepared automatically for files resolved by this Nuvio account. See the source status above; enable the existing Share my stream only after consent. Full account keys are never accepted in the prepared HLS URL. Personal HLS remains a fallback. With Host only off, browser guests can play, pause and seek for everyone."));
   section.appendChild(partyElement("p", "party-text", "Let friends watch from a browser, without installing Nuvio. Set up your own free HTTPS browser site once."));
   const address = partyElement("input", "party-browser-host");
   address.setAttribute("aria-label", "Browser player URL");
@@ -436,7 +444,7 @@ const buildPartyBrowserShare = party => {
     let parsed;
     try {
       parsed = new URL(raw);
-      if (!/^https:\/\/[^/?#@]+\/?$/i.test(raw) || /[\u0000-\u001f\u007f\\]/.test(address.value) || parsed.protocol !== "https:" || !parsed.hostname || parsed.username || parsed.password || parsed.search || parsed.hash || /[\u0000-\u0020\u007f\\]/.test(raw) || (parsed.pathname !== "/" && parsed.pathname !== "")) throw Error("invalid address");
+      if (partyBrowserPreviewHost(new URL(raw).hostname) || !/^https:\/\/[^/?#@]+\/?$/i.test(raw) || /[\u0000-\u001f\u007f\\]/.test(address.value) || parsed.protocol !== "https:" || !parsed.hostname || parsed.username || parsed.password || parsed.search || parsed.hash || /[\u0000-\u0020\u007f\\]/.test(raw) || (parsed.pathname !== "/" && parsed.pathname !== "")) throw Error("invalid address");
     } catch {
       note.textContent = "Enter the HTTPS home address of your deployed browser player (example: https://your-project.pages.dev).";
       return;

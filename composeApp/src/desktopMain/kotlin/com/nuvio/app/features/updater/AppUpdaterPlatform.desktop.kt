@@ -6,6 +6,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import nuvio.composeapp.generated.resources.Res
+import nuvio.composeapp.generated.resources.updates_checksum_mismatch
 import nuvio.composeapp.generated.resources.updates_download_failed
 import nuvio.composeapp.generated.resources.updates_download_failed_http
 import nuvio.composeapp.generated.resources.updates_downloaded_file_missing
@@ -25,6 +26,14 @@ import kotlin.io.path.createDirectories
 import kotlin.system.exitProcess
 
 private const val desktopUpdaterPreferencesName = "nuvio_updater"
+
+// Fork build (watch party): updates come only from this fork's GitHub releases,
+// never from the official NuvioMedia repository, so an update can never
+// replace the fork with an unmodified official build.
+internal const val forkReleaseOwner = "lebochoffice"
+internal const val forkReleaseRepo = "NuvioDesktop"
+internal const val forkAssetNameFragment = "WatchParty"
+private const val forkDownloadPrefix = "https://github.com/$forkReleaseOwner/$forkReleaseRepo/releases/download/"
 private const val ignoredTagKey = "ignored_release_tag"
 private const val updateChannelKey = "update_channel"
 
@@ -53,12 +62,21 @@ actual object AppUpdaterPlatform {
         get() = currentOs != DesktopUpdaterOs.UNKNOWN && linuxInstallMethod != LinuxInstallMethod.FLATPAK
 
     actual val releaseSource: AppUpdateReleaseSource = AppUpdateReleaseSource(
-        owner = "NuvioMedia",
-        repo = "NuvioDesktop",
+        owner = forkReleaseOwner,
+        repo = forkReleaseRepo,
         channelBranch = null,
         includePrereleases = true,
-        userAgent = "NuvioDesktop",
+        userAgent = "NuvioDesktop-WatchParty",
     )
+
+    actual val requiresUpdateChecksum: Boolean = true
+
+    actual fun verifyDownloadedUpdate(path: String, expectedSha256: String): Result<Unit> = runCatching {
+        val actual = sha256Hex(File(path))
+        check(actual.equals(expectedSha256.trim(), ignoreCase = true)) {
+            runBlocking { getString(Res.string.updates_checksum_mismatch) }
+        }
+    }
 
     actual val assetSelector: AppUpdateAssetSelector
         get() = currentOs.assetSelector(linuxInstallMethod)
@@ -89,6 +107,7 @@ actual object AppUpdaterPlatform {
         onProgress: (downloadedBytes: Long, totalBytes: Long?) -> Unit,
     ): Result<String> = withContext(Dispatchers.IO) {
         runCatching {
+            require(isForkReleaseAsset(assetUrl)) { "Update source not allowed: only $forkReleaseOwner/$forkReleaseRepo releases are installed." }
             clearDir(updatesDir())
             val safeName = assetName.replace(Regex("[^a-zA-Z0-9._-]"), "_")
             val destination = File(updatesDir(), safeName)
@@ -193,10 +212,12 @@ private enum class DesktopUpdaterOs {
     fun assetSelector(linuxInstallMethod: LinuxInstallMethod): AppUpdateAssetSelector {
         val archFragments = desktopArchitectureFragments()
         return when (this) {
+            // Fork releases publish exactly one "Nuvio-WatchParty-Windows-x64-<version>.msi".
             WINDOWS -> AppUpdateAssetSelector(
-                fileExtensions = listOf(".msi", ".exe"),
+                fileExtensions = listOf(".msi"),
                 preferredNameFragments = archFragments + listOf("windows", "win"),
                 fallbackNameFragments = listOf("universal", "all"),
+                requiredNameFragments = listOf(forkAssetNameFragment, "windows"),
             )
             MACOS -> AppUpdateAssetSelector(
                 fileExtensions = listOf(".dmg", ".pkg"),
@@ -235,12 +256,29 @@ private fun desktopArchitectureFragments(): List<String> {
     }
 }
 
-internal fun windowsInstallerCommand(updateFile: File): List<String> {
-    if (!updateFile.extension.equals("msi", ignoreCase = true)) {
-        return listOf(updateFile.absolutePath)
-    }
+internal fun isForkReleaseAsset(assetUrl: String): Boolean =
+    assetUrl.startsWith(forkDownloadPrefix) && !assetUrl.contains("..") && '?' !in assetUrl
 
-    return listOf("msiexec", "/i", updateFile.absolutePath)
+internal fun sha256Hex(file: File): String {
+    val digest = java.security.MessageDigest.getInstance("SHA-256")
+    file.inputStream().use { input ->
+        val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+        while (true) {
+            val read = input.read(buffer)
+            if (read <= 0) break
+            digest.update(buffer, 0, read)
+        }
+    }
+    return digest.digest().joinToString("") { "%02x".format(it) }
+}
+
+// Interactive msiexec: Windows Installer shows its own UI/UAC prompt and rolls
+// back to the installed version if the upgrade fails. A verbose log is kept
+// next to the downloaded MSI for diagnosis. Only .msi files are accepted.
+internal fun windowsInstallerCommand(updateFile: File): List<String> {
+    require(updateFile.extension.equals("msi", ignoreCase = true)) { "Only MSI updates are installed." }
+    val log = File(updateFile.parentFile, updateFile.nameWithoutExtension + "-install.log")
+    return listOf("msiexec", "/i", updateFile.absolutePath, "/l*v", log.absolutePath)
 }
 
 internal enum class LinuxInstallMethod {

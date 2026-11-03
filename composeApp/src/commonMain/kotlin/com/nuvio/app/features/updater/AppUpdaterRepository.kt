@@ -27,6 +27,8 @@ internal data class GitHubAssetDto(
     @SerialName("browser_download_url") val browserDownloadUrl: String,
     val size: Long? = null,
     @SerialName("content_type") val contentType: String? = null,
+    /** GitHub-computed asset digest, e.g. "sha256:<hex>". */
+    val digest: String? = null,
 )
 
 internal class NoChannelReleaseException : IllegalStateException()
@@ -36,7 +38,13 @@ internal data class AppUpdateAssetCandidate(
     val downloadUrl: String,
     val size: Long? = null,
     val contentType: String? = null,
+    val sha256: String? = null,
 )
+
+/** Lower-case hex SHA-256 from a GitHub digest ("sha256:<64 hex>"), else null. */
+internal fun sha256FromDigest(digest: String?): String? =
+    digest?.trim()?.takeIf { it.startsWith("sha256:", ignoreCase = true) }
+        ?.substringAfter(':')?.lowercase()?.takeIf { hex -> hex.length == 64 && hex.all { it in '0'..'9' || it in 'a'..'f' } }
 
 internal fun selectBestUpdateAsset(
     assets: List<AppUpdateAssetCandidate>,
@@ -45,7 +53,7 @@ internal fun selectBestUpdateAsset(
     val updateAssets = assets.filter { asset ->
         selector.fileExtensions.any { extension -> asset.name.endsWith(extension, ignoreCase = true) } ||
             selector.contentTypes.any { it.equals(asset.contentType, ignoreCase = true) }
-    }
+    }.filter { asset -> selector.requiredNameFragments.all { asset.name.contains(it, ignoreCase = true) } }
     if (updateAssets.isEmpty()) return null
     if (updateAssets.size == 1) return updateAssets.first()
 
@@ -124,6 +132,7 @@ internal object AppUpdaterRepository {
                         downloadUrl = candidate.browserDownloadUrl,
                         size = candidate.size,
                         contentType = candidate.contentType,
+                        sha256 = sha256FromDigest(candidate.digest),
                     )
                 },
                 selector = selector,
@@ -144,6 +153,7 @@ internal object AppUpdaterRepository {
                 assetName = asset.name,
                 assetUrl = asset.downloadUrl,
                 assetSizeBytes = asset.size,
+                assetSha256 = asset.sha256,
             )
         }
     }

@@ -7,6 +7,9 @@ actual object AppUpdaterPlatform {
     actual val isDebugBuild: Boolean
         get() = AndroidAppUpdaterPlatform.isDebugBuild()
     actual val hasSingleUpdateChannel: Boolean = false
+    // Upstream behaviour unchanged here; only the fork's desktop build enforces checksums.
+    actual val requiresUpdateChecksum: Boolean = false
+    actual fun verifyDownloadedUpdate(path: String, expectedSha256: String): Result<Unit> = Result.success(Unit)
 
     actual val releaseSource: AppUpdateReleaseSource = AppUpdateReleaseSource(
         owner = "NuvioMedia",

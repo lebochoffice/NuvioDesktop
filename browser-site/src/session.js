@@ -75,18 +75,25 @@ export class PartySession {
     if (gen !== this.generation || room !== this.room) throw Object.assign(new Error('closed'), {code: 'closed'});
     this.acceptPlayback(playback, 'command');
     d.lastCommandResult = 'broadcast';
-    // Persist like Desktop's schedulePersist; a failure does not revert the
-    // already distributed state, the snapshot is applied with normal ordering.
+    // Persist in the background like Desktop's schedulePersist: the command is
+    // already distributed, so the next gesture must not wait for this RPC.
+    this.persistControl(room, gen, playback);
+    return playback;
+  }
+  // A failure does not revert the distributed state; a late or stale reply is
+  // applied with normal ordering (acceptPlayback) and cannot roll back newer ones.
+  async persistControl(room, gen, playback) {
+    const d = this.diagnostics;
     try {
       const result = await this.rpc('watch_party_update', {p_party_id: room.info.id, p_device_id: this.deviceId, p_playback: playback});
-      if (gen !== this.generation || room !== this.room) return playback;
+      if (gen !== this.generation || room !== this.room) return;
       const party = result?.party;
       if (party && typeof party.host_only === 'boolean' && party.host_only !== room.info.host_only) { room.info.host_only = party.host_only; this.emit('room', room); }
       if (party?.playback) this.acceptPlayback(party.playback, 'snapshot');
-      d.lastCommandResult = 'persisted';
-    } catch { d.lastCommandResult = 'persist_failed'; }
-    return playback;
+      if (this.playback === playback || this.playback?.seq === playback.seq) d.lastCommandResult = 'persisted';
+    } catch { if (gen === this.generation) d.lastCommandResult = 'persist_failed'; }
   }
+
   rpc(name, args) { return callRpc(this.client, name, args); }
   emit(name, value) { this.handlers[name]?.(value); }
   now() { return Date.now() + this.clockOffset; }

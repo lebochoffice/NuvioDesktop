@@ -10,9 +10,9 @@ const source = desktopPath ? readFileSync(desktopPath, 'utf8') : '';
 const start = source.indexOf('// NUVIO_BROWSER_PARTY_BRIDGE_V1:');
 if (source) assert.ok(start >= 0, 'Desktop bridge must be applied before this integration test');
 const bridge = source.slice(start, source.indexOf('const buildPartyHostSettings', start));
-function setup(party) {
+function setup(party, initialStorage = {}) {
   const events = [], confirmations = [];
-  const stored = new Map();
+  const stored = new Map(Object.entries(initialStorage));
   const element = (tag, className) => ({tag, className, attrs: new Map(), children: [], style: {}, appendChild(child) {this.children.push(child);}, setAttribute(k, v) {this.attrs.set(k, v);}, getAttribute(k) {return this.attrs.get(k);}, addEventListener() {}});
   const context = {URL, TextEncoder, btoa, partySwitchSettleMs: 0, window:{setTimeout() {}, localStorage:{getItem:k => stored.get(k), setItem:(k,v) => stored.set(k,v)}}, partyElement: element,
     partyAction: (el, _key, click) => Object.assign(el, {click}),
@@ -70,3 +70,16 @@ test('existing sharing copies without toggling it, invalid addresses never promp
     assert.equal(bad.events.length, 0, address); assert.equal(bad.confirmations.length, 0, address);
   }
 });
+
+test('0.1.37: old stored hosts and Cloudflare preview URLs never become invitation targets', {skip: !source && 'Separate browser repository: desktop source unavailable'}, () => {
+  const old = setup({code: 'UXZ83H', sharing: false}, {'nuvio-browser-party-host': 'https://abc123.old-preview.pages.dev'});
+  assert.equal(old.input.value, 'https://nuvio-watch-friends.pages.dev'); // v1 key ignored.
+  const preview = setup({code: 'UXZ83H', sharing: false}, {'nuvio-browser-party-host-v2': 'https://f00d.nuvio-watch-friends.pages.dev'});
+  assert.equal(preview.input.value, 'https://nuvio-watch-friends.pages.dev');
+  preview.button.click();
+  assert.equal(Buffer.from(preview.events[0].type.split(':')[1], 'base64url').toString(), 'https://nuvio-watch-friends.pages.dev/party/UXZ83H');
+  const typed = setup({code: 'UXZ83H', sharing: false});
+  typed.input.value = 'https://f00d.nuvio-watch-friends.pages.dev'; typed.button.click();
+  assert.equal(typed.events.length, 0); // Preview hosts are rejected.
+});
+

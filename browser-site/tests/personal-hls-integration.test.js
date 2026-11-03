@@ -1065,3 +1065,52 @@ test('invitation: no copy-link; "Account erstellen" only signed out, "Abmelden" 
   assert.equal(signedOut, 1); assert.equal(signedIn.get('credentials').hidden, false); assert.equal(signedIn.get('accountLine').hidden, true);
   assert.equal(signedIn.get('message').textContent, 'Abgemeldet.');
 });
+
+// --- Smooth browser control (0.1.37): no waiting for slow RPCs, no duplicate seeks ---
+
+test('desktop parity: rapid pause/play is not blocked by a slow persist RPC', async () => {
+  const h = await playingGuest(), c = controllable(h, {hold: true});
+  h.player.play = function () { this.paused = false; this.fire('play'); return Promise.resolve(); };
+  h.get('ctlPlay').fire('click'); await settlePlayback();
+  h.get('ctlPlay').fire('click'); await settlePlayback();
+  h.get('ctlPlay').fire('click'); await settlePlayback();
+  assert.deepEqual(c.sends.map(s => s.payload.paused), [true, false, true]); // All sent while every RPC is still pending.
+  assert.deepEqual(c.sends.map(s => s.payload.seq), [2, 3, 4]);
+  assert.equal(c.rpcs.length, 3); assert.equal(h.player.paused, true);
+  c.release(); c.release(); c.release(); await settlePlayback(); // Late replies.
+  assert.equal(h.session.playback.seq, 4); assert.equal(h.player.paused, true);
+});
+
+test('repeated ±10 s and seek-bar jumps send exactly one command each, immediately, even during HLS buffering', async () => {
+  const h = await playingGuest(), c = controllable(h);
+  h.get('ctlFwd10').fire('click'); await settlePlayback();
+  h.player.fire('seeking'); h.player.fire('waiting'); // Native events of our own seek; HLS still loading.
+  h.get('ctlFwd10').fire('click'); await settlePlayback();
+  h.get('ctlBack10').fire('click'); await settlePlayback();
+  h.player.fire('seeking'); h.player.fire('seeked'); h.player.fire('canplay'); await settlePlayback();
+  assert.deepEqual(c.sends.map(s => s.payload.position_ms), [15000, 25000, 15000]);
+  h.tick(); h.tick(); await settlePlayback();
+  assert.equal(c.sends.length, 3); // No echo, no re-send after seeked.
+});
+
+test('after a reconnect browser control works again; host-only still blocks it', async () => {
+  const h = await playingGuest(), c = controllable(h);
+  h.session.handlers.connection('CHANNEL_ERROR'); assert.equal(h.sync(), false);
+  h.session.handlers.connection('SUBSCRIBED'); h.get('resync').fire('click'); h.player.fire('seeked');
+  h.get('ctlPlay').fire('click'); await settlePlayback();
+  assert.equal(c.sends.length, 1); assert.equal(c.sends[0].payload.paused, true);
+  h.session.room.info.host_only = true; h.get('resync').fire('click'); h.player.fire('seeked');
+  h.player.play = function () { this.paused = false; this.fire('play'); return Promise.resolve(); };
+  h.get('ctlPlay').fire('click'); await settlePlayback();
+  assert.equal(c.sends.length, 1); // Host-only: no shared command.
+});
+
+test('desktop host commands still drive the browser while a browser command is pending', async () => {
+  const h = await playingGuest(), c = controllable(h, {hold: true});
+  h.get('ctlPlay').fire('click'); // Browser pause (seq 2) broadcast, persist pending.
+  await settlePlayback();
+  h.session.receive('state', {...playback, seq: 3, member_id: 'host', paused: false, position_ms: 40000});
+  assert.equal(h.player.paused, false); assert.equal(h.player.currentTime, 40);
+  c.release(); await settlePlayback();
+  assert.equal(h.session.playback.seq, 3); // The late persist reply of seq 2 cannot override the host.
+});

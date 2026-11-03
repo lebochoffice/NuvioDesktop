@@ -33,7 +33,7 @@ try {
 let hls = null, selectedStream = null, loadedStream = null, syncEnabled = false;
 let suppressUntil = 0, loading = false, buffering = false;
 let pendingChat = null;
-let pendingSeek = null, internalHlsSeek = null, pendingPlay = null;
+let pendingSeek = null, internalHlsSeek = null, pendingPlay = null, ownSeek = null;
 let waitingForTarget = false;
 let lastAlignedPlayback = null;
 let presenceRoom = null, lastPresence = null;
@@ -214,7 +214,7 @@ function pauseLocally() {
   player.pause();
 }
 function resetVideo(reason = 'Persönliche Quelle entfernt. Für diesen Film kann eine neue eigene Quelle geladen werden.') {
-  pendingSeek = internalHlsSeek = pendingPlay = null;
+  pendingSeek = internalHlsSeek = pendingPlay = ownSeek = null;
   waitingForTarget = false;
   lastAlignedPlayback = null; lastPresence = null;
   resetSyncState(); renderQuality(null); clearSubtitles();
@@ -372,7 +372,7 @@ function applySync(forcePlay = false) {
 }
 function failVideo(message, errorCode = 'media_error') {
   lastPlaybackError = errorCode;
-  pendingSeek = internalHlsSeek = pendingPlay = null;
+  pendingSeek = internalHlsSeek = pendingPlay = ownSeek = null;
   waitingForTarget = false;
   lastAlignedPlayback = null;
   resetSyncState(); renderQuality(null);
@@ -613,11 +613,20 @@ function togglePlay() {
   if (player.readyState < 1) { status('Die Quelle lädt noch. Gleich geht es los.'); return; }
   playLocally();
 }
+// Own seek controls know the target immediately: with guest control the
+// command goes out at once (no waiting for a possibly slow HLS "seeked"), and
+// the resulting native seeking event is recognised as ours, not re-sent.
+function seekTo(seconds) {
+  if (guestControl()) {
+    pendingSeek = ownSeek = {seconds, at: performance.now()};
+    player.currentTime = seconds;
+    sendControl(effectivePlayback()?.paused ?? player.paused, seconds);
+  } else { markGesture(); player.currentTime = seconds; }
+}
 function skip(seconds) {
   const duration = player.duration;
   if (!loadedStream || !Number.isFinite(duration)) return;
-  markGesture();
-  player.currentTime = Math.max(0, Math.min(duration - .1, player.currentTime + seconds));
+  seekTo(Math.max(0, Math.min(duration - .1, player.currentTime + seconds)));
   renderPlayerUi(); revealControls();
 }
 function toggleFullscreen() {
@@ -668,8 +677,7 @@ $('ctlSeek').addEventListener('change', () => {
   seekDragging = false;
   const duration = player.duration;
   if (!loadedStream || !Number.isFinite(duration)) return;
-  markGesture();
-  player.currentTime = duration * Number($('ctlSeek').value) / 1000;
+  seekTo(duration * Number($('ctlSeek').value) / 1000);
   renderPlayerUi();
 });
 // Mouse: movement reveals, click on the picture toggles playback.
@@ -953,7 +961,8 @@ for (const event of ['pause', 'seeking', 'ratechange']) player.addEventListener(
   if (event === 'seeking') {
     const matches = seek => seek && Math.abs(player.currentTime - seek.seconds) < .05;
     const internal = matches(internalHlsSeek);
-    if (matches(pendingSeek) || internal) { presence(); return; }
+    // ownSeek: a seek from our own controls whose command was already sent.
+    if (matches(pendingSeek) || internal || matches(ownSeek)) { presence(); return; }
     if (hlsPlayback && !userControl) { presence(); return; }
   } else if (!userControl && hlsPlayback && (buffering || waitingForTarget || player.seeking || player.readyState < 3)) return;
   else if (!userControl && !hlsPlayback && performance.now() <= suppressUntil) return;
@@ -972,7 +981,7 @@ for (const event of ['pause', 'seeking', 'ratechange']) player.addEventListener(
   status('Lokal pausiert oder gespult. Zum Anschluss an die Party erneut synchronisieren.'); presence(); renderPlayerUi();
 });
 player.addEventListener('seeked', () => {
-  pendingSeek = internalHlsSeek = null;
+  pendingSeek = internalHlsSeek = ownSeek = null;
   // seeked = target position decodable; also the end of a seek's load delay.
   if (!buffering) mediaResumed();
   if (userSeekPending) {

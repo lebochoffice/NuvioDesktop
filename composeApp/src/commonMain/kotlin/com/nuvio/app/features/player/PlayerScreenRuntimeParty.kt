@@ -418,6 +418,11 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
         var lastSeek: TimeMark? = null
         var lastCorrection: TimeMark? = null
         var lastSeq: Pair<Long, String?>? = null
+        // Set when a command from another member (e.g. a browser guest) was
+        // applied: the local player may need a moment (seek/HLS/network) to
+        // reach that state; until then its old state must not be published
+        // back as a new command (playback ping-pong).
+        var lastRemoteApply: TimeMark? = null
         var lastStatus: Triple<PartyMemberStatus, String, Long?>? = null
         var wasInBackground = false
         var publishedInitial = false
@@ -505,6 +510,7 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
                 lastSeq = identity
                 applyPartyPaused(playback.paused, force = forced)
                 val own = playback.memberId == party.memberId && !forced
+                lastRemoteApply = if (own || forced) null else clock.markNow()
                 if ((!own || playback.paused) && abs(snapshot.positionMs - expected) > PartySync.PAUSED_TOLERANCE_MS) {
                     controller.seekTo(if (playback.paused) expected else expected + seekLeadMs)
                     measureSeekLead = !playback.paused
@@ -523,6 +529,10 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
             }
 
             if (snapshot.isPlaying != shouldPlay) {
+                if (lastRemoteApply?.let { it.elapsedNow() < REMOTE_APPLY_GRACE } == true) {
+                    mismatchSince = null
+                    continue
+                }
                 val since = mismatchSince ?: clock.markNow().also { mismatchSince = it }
                 if (since.elapsedNow() > OUTSIDE_TOGGLE_DELAY) {
                     mismatchSince = null
@@ -747,6 +757,7 @@ private val PARTY_TICK = 250.milliseconds
 private val NOTICE_DURATION = 3_000.milliseconds
 private val BUFFERING_REPORT_DELAY = 1_000.milliseconds
 private val OUTSIDE_TOGGLE_DELAY = 1_200.milliseconds
+private val REMOTE_APPLY_GRACE = 3_000.milliseconds
 private val SEEK_SETTLE = 2_500.milliseconds
 private val CORRECTION_INTERVAL = 500.milliseconds
 private const val MAX_SEEK_LEAD_MS = 3_000L

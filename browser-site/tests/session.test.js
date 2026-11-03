@@ -344,11 +344,34 @@ test('desktop-parity mode broadcasts the command first (like Nuvio Desktop guest
   const stored = await f.session.commitControl(f.session.prepareControl({paused: true, positionMs: 7000}), {mode: 'desktop'});
   assert.deepEqual(order, [['send', 'state'], ['rpc', 'watch_party_update']]);
   assert.equal(f.session.playback, stored); assert.equal(stored.seq, 3); assert.equal(stored.member_id, 'guest');
+  assert.equal(f.session.diagnostics.lastCommandResult, 'broadcast'); // Returns before the RPC finished.
+  await new Promise(resolve => setImmediate(resolve));
   assert.equal(f.session.diagnostics.lastCommandResult, 'persisted');
   f.ch.send = async () => 'rate limited';
   await assert.rejects(f.session.commitControl(f.session.prepareControl({paused: false, positionMs: 0}), {mode: 'desktop'}), e => e.code === 'broadcast_failed');
   assert.equal(f.session.playback, stored); // Nothing applied without a broadcast.
   f.session.room.info.host_only = true;
   assert.throws(() => f.session.prepareControl({paused: true, positionMs: 0}), e => e.code === 'host_only');
+});
+
+test('desktop parity: rapid commands never wait for a slow RPC; late or duplicate states cannot roll back newer ones', async t => {
+  const f = fixture(); t.after(() => f.session.close());
+  await f.session.join('UXZ83H', 'Guest'); await f.connect();
+  f.session.room.info.host_only = false;
+  const pending = [], rpc = f.client.rpc;
+  f.client.rpc = (name, args) => name === 'watch_party_update'
+    ? new Promise(resolve => pending.push(() => resolve({data: {party: {...snapshot().party, host_only: false, playback: args.p_playback}}})))
+    : rpc(name, args);
+  const pause = await f.session.commitControl(f.session.prepareControl({paused: true, positionMs: 1000}), {mode: 'desktop'});
+  const play = await f.session.commitControl(f.session.prepareControl({paused: false, positionMs: 1000}), {mode: 'desktop'});
+  const seek = await f.session.commitControl(f.session.prepareControl({paused: false, positionMs: 11000}), {mode: 'desktop'});
+  assert.deepEqual([pause.seq, play.seq, seek.seq], [3, 4, 5]); // Sequential without waiting for any RPC.
+  assert.equal(pending.length, 3); assert.equal(f.session.playback, seek);
+  pending.reverse().forEach(release => release()); await new Promise(resolve => setImmediate(resolve)); // Late replies, oldest last.
+  assert.equal(f.session.playback, seek);
+  f.emit('state', {...pause}); f.emit('state', {...seek}); // Duplicate/outdated realtime echoes.
+  assert.equal(f.session.playback, seek); assert.equal(f.session.diagnostics.lastDecision, 'not_newer');
+  f.session.acceptPlayback({...playback, seq: 4, paused: true}, 'snapshot'); // Stale snapshot.
+  assert.equal(f.session.playback, seek);
 });
 

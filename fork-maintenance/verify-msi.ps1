@@ -13,7 +13,7 @@ if ($msi.PSIsContainer -or $msi.Extension -ne '.msi') { throw 'Expected an MSI f
 $stream = [IO.File]::OpenRead($msi.FullName)
 try {
     $bytes = New-Object byte[] 8
-    if ($stream.Read($bytes, 0, 8) -ne 8 -or [Convert]::ToHexString($bytes) -ne 'D0CF11E0A1B11AE1') { throw 'Not an MSI compound document' }
+    if ($stream.Read($bytes, 0, 8) -ne 8 -or (-join ($bytes | ForEach-Object { $_.ToString('X2') })) -ne 'D0CF11E0A1B11AE1') { throw 'Not an MSI compound document' }
 } finally { $stream.Dispose() }
 $installer = New-Object -ComObject WindowsInstaller.Installer
 $db = $installer.OpenDatabase($msi.FullName, 0)
@@ -55,13 +55,25 @@ try {
     $reader = New-Object IO.StreamReader($configEntry.Open(), [Text.Encoding]::UTF8)
     try { $configText = $reader.ReadToEnd() } finally { $reader.Dispose() }
     if (-not $configText.Contains('https://api.nuvio.tv') -or -not $configText.Contains('sb_publishable_')) { throw 'Official public backend configuration missing from staged application' }
+    # 0.1.37: IntroDB must be configured (empty URL disables "Skip intro").
+    $introEntry = $zip.GetEntry('com/nuvio/app/features/player/skip/IntroDbConfig.class')
+    if (-not $introEntry) { throw 'IntroDbConfig missing from packaged application' }
+    $reader = New-Object IO.StreamReader($introEntry.Open(), [Text.Encoding]::UTF8)
+    try { $introText = $reader.ReadToEnd() } finally { $reader.Dispose() }
+    if (-not $introText.Contains('https://api.introdb.app')) { throw 'IntroDB URL missing from packaged application' }
+    # Invitation links must point to the browser watch party.
+    $partyClass = $zip.GetEntry('com/nuvio/app/features/party/PartyRepositoryKt.class')
+    if (-not $partyClass) { throw 'PartyRepositoryKt missing from packaged application' }
+    $reader = New-Object IO.StreamReader($partyClass.Open(), [Text.Encoding]::UTF8)
+    try { $partyText = $reader.ReadToEnd() } finally { $reader.Dispose() }
+    if (-not $partyText.Contains('https://nuvio-watch-friends.pages.dev')) { throw 'Browser watch party invite origin missing from packaged application' }
 } finally { $zip.Dispose() }
 if (-not (Test-Path -LiteralPath (Join-Path $app 'runtime/bin/server/jvm.dll'))) { throw 'Packaged Java runtime missing' }
 $manifest = [ordered]@{
     file = $msi.Name; bytes = $msi.Length; sha256 = (Get-FileHash -LiteralPath $msi.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
     product = $properties['ProductName']; productVersion = $properties['ProductVersion']; signature = [string](Get-AuthenticodeSignature -LiteralPath $msi.FullName).Status
     appJar = $jars[0].Name; requiredNativeEntries = $required; watchInBrowser = $true; javaRuntimePresent = $true
-    installedOrLaunched = $false; msiInspectedReadOnly = $true; stagedAppInspected = $true; msiJarMetadataMatchesStage = $true; publicBackendConfigured = $true; sourceCommit = $env:GITHUB_SHA
+    installedOrLaunched = $false; msiInspectedReadOnly = $true; stagedAppInspected = $true; msiJarMetadataMatchesStage = $true; publicBackendConfigured = $true; introDbConfigured = $true; browserInviteOrigin = 'https://nuvio-watch-friends.pages.dev'; sourceCommit = $env:GITHUB_SHA
 }
 $path = Join-Path $msi.DirectoryName ($msi.BaseName + '-verification.json')
 $manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $path -Encoding utf8
