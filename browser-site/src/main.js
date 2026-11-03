@@ -853,7 +853,6 @@ const usableSession = auth => !!auth?.user && !auth.user.is_anonymous;
 function renderAuthState(signedIn) {
   $('credentials').hidden = signedIn;
   $('accountLine').hidden = !signedIn;
-  $('logoutButton').hidden = !signedIn;
 }
 let joining = false;
 async function joinParty() {
@@ -909,12 +908,6 @@ $('passwordToggle').addEventListener('click', () => {
   $('passwordToggle').textContent = show ? 'Verbergen' : 'Anzeigen';
   $('passwordToggle').setAttribute?.('aria-pressed', String(show));
   $('passwordToggle').setAttribute?.('aria-label', show ? 'Passwort verbergen' : 'Passwort anzeigen');
-});
-$('copyLink').addEventListener('click', () => {
-  const code = normalizeCode($('partyCode').value);
-  if (!validCode(code)) return status('Kein gültiger Party-Code.', true);
-  Promise.resolve(navigator.clipboard?.writeText(`${location.origin}/party/${code}`))
-    .then(() => status('Einladungslink kopiert.'), () => status('Kopieren nicht möglich. Bitte den Link aus der Adresszeile teilen.', true));
 });
 $('loadStream').addEventListener('click', startStream);
 function resyncNow() {
@@ -1051,7 +1044,6 @@ function renderSyncDebug() {
 }
 setInterval(() => { applySync(); presence(); renderControlInfo(); renderSyncDebug(); }, 1000);
 $('leaveButton').addEventListener('click', async () => { await session?.close(); showPanel('join'); status('Party verlassen.'); });
-$('logoutButton').addEventListener('click', async () => { await session?.close(); await client?.auth.signOut(); renderAuthState(false); showPanel('join'); status('Abgemeldet.'); });
 $('chatForm').addEventListener('submit', async e => {
   e.preventDefault(); const body = $('chatText').value.trim();
   if (!session?.room || !body) return;

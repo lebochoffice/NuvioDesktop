@@ -104,6 +104,9 @@ input:focus, select:focus { border-color: #ff8a80; box-shadow: 0 0 0 3px rgba(25
 .password-wrap input { padding-right: 92px; }
 .pw-toggle { position: absolute; right: 8px; top: 50%; transform: translateY(-50%); border: 0; background: transparent; color: var(--text-2); font: inherit; font-size: 13px; font-weight: 650; cursor: pointer; padding: 6px 8px; border-radius: 8px; }
 .pw-toggle:hover { color: var(--text); background: rgba(255, 255, 255, .06); }
+.signup-line { grid-column: 1 / -1; margin: 0; font-size: 13px; color: var(--text-3); }
+.signup-line a { color: var(--text); font-weight: 650; text-underline-offset: 3px; }
+.signup-line a:hover { color: #ff8a80; }
 .account-line { margin: 0; font-size: 14px; color: var(--text-2); }
 .advanced summary { color: var(--text-3); font-size: 13px; cursor: pointer; }
 .advanced .field { margin-top: 10px; }

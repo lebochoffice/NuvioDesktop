@@ -1045,3 +1045,15 @@ test('legal footer is gone and the invitation is sized to fit one desktop screen
   for (const id of ['email', 'password', 'passwordToggle', 'joinButton']) assert.match(html, new RegExp(`id="${id}"`));
 });
 
+
+test('invitation footer: no copy-link/logout; "Account erstellen" links to the official Nuvio signup in a new tab, only while signed out', async () => {
+  const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
+  assert.ok(!html.includes('id="copyLink"') && !html.includes('id="logoutButton"') && !html.includes('Link kopieren') && !html.includes('>Abmelden<'));
+  assert.match(html, /Noch kein Nuvio-Konto\? <a id="signupLink" href="https:\/\/nuvio\.tv\/account\/signup" target="_blank" rel="noopener noreferrer">Account erstellen<\/a>/);
+  const credentials = html.slice(html.indexOf('id="credentials"'), html.indexOf('id="accountLine"'));
+  assert.ok(credentials.includes('id="signupLink"')); // Hidden together with the sign-in fields.
+  const out = await harness({path: '/party/UXZ83H'}); await settlePlayback();
+  assert.equal(out.get('credentials').hidden, false);
+  const signedIn = await harness({path: '/party/UXZ83H', rpc: {session: {user: {id: 'u1', is_anonymous: false, user_metadata: {}}}}}); await settlePlayback();
+  assert.equal(signedIn.get('credentials').hidden, true);
+});
