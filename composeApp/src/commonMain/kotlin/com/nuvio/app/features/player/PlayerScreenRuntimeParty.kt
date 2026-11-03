@@ -305,11 +305,15 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
     val torboxFile = activeStream?.torboxPartyFile
     val debridSettings by com.nuvio.app.features.debrid.DebridSettingsRepository.uiState.collectAsState()
     val torboxKey = debridSettings.apiKeyFor(com.nuvio.app.features.debrid.DebridProviders.Torbox.id)
-    LaunchedEffect(partyId, key, torboxFile, torboxKey, partyState.party?.isHost, partyState.party?.media?.key) {
+    // torboxPartyRefresh restarts this single producer (button); the previous
+    // run is cancelled first, so a click never runs two TorBox sessions at once.
+    LaunchedEffect(partyId, key, torboxFile, torboxKey, partyState.party?.isHost, partyState.party?.media?.key, torboxPartyRefresh) {
         torboxPartyStream = null
         torboxPreparedFile = null
         torboxPartyStatus = ""
+        torboxPartyPhase = com.nuvio.app.features.debrid.TorboxHlsPhase.Unavailable
         if (torboxFile == null || partyId == null || partyState.party?.isHost != true || partyState.party?.media?.key != key) return@LaunchedEffect
+        torboxPartyPhase = com.nuvio.app.features.debrid.TorboxHlsPhase.Preparing
         torboxPartyStatus = "TorBox: Stream wird vorbereitet …"
         var renewals = 0
         // One producer per player/file; cancellation on media, account or party change.
@@ -319,11 +323,13 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
                 is com.nuvio.app.features.debrid.TorboxPartyHlsResult.Failed -> {
                     torboxPartyStream = null
                     torboxPartyStatus = result.message
+                    torboxPartyPhase = if (result.denied) com.nuvio.app.features.debrid.TorboxHlsPhase.Denied else com.nuvio.app.features.debrid.TorboxHlsPhase.Failed
                     return@LaunchedEffect
                 }
                 is com.nuvio.app.features.debrid.TorboxPartyHlsResult.Ready -> {
                     torboxPreparedFile = torboxFile
                     torboxPartyStream = PartyStream(mediaKey = key, url = result.url, name = "TorBox HLS", streamType = "hls")
+                    torboxPartyPhase = com.nuvio.app.features.debrid.TorboxHlsPhase.Ready
                     torboxPartyStatus = "TorBox HLS vorbereitet. Freigabe erst mit Share my stream. Mehrgerätezugriff und Browserwiedergabe müssen geprüft werden."
                     // Renew only after an explicit expiry/access failure, never on
                     // every recomposition, toggle or transient network failure.
@@ -335,6 +341,7 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
                         if (code == 498) {
                             torboxPartyStream = null
                             torboxPartyStatus = "TorBox: Manifest enthält Account-Zugangsdaten. Browserfreigabe gestoppt."
+                            torboxPartyPhase = com.nuvio.app.features.debrid.TorboxHlsPhase.Denied
                             return@LaunchedEffect
                         }
                         if (code in listOf(401, 403, 404, 410)) break
@@ -342,8 +349,10 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
                     torboxPartyStream = null
                     if (++renewals > 3) {
                         torboxPartyStatus = "TorBox: Wiederholte Zugriffsfehler. Browserfreigabe gestoppt; Account und Mehrgeräteberechtigung prüfen."
+                        torboxPartyPhase = com.nuvio.app.features.debrid.TorboxHlsPhase.Failed
                         return@LaunchedEffect
                     }
+                    torboxPartyPhase = com.nuvio.app.features.debrid.TorboxHlsPhase.Expired
                     torboxPartyStatus = "TorBox: Stream abgelaufen oder Zugriff entzogen. Neue HLS-Quelle wird vorbereitet …"
                 }
             }

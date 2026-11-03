@@ -91,10 +91,17 @@ const session = client ? new PartySession(client, deviceId, {
   stream: stream => {
     // Includes revocations, incompatible URLs and host source changes. Only an
     // authoritative media/room lifecycle event clears a personal source.
-    if (personalHls.active) return;
     if (stream && stream.media_key !== mediaKey(session.room?.info.media)) return;
+    lastHostStreamEvent = stream; // Memory only, for enabling auto mode later.
     const browserPending = !!stream && Object.hasOwn(stream, 'browser_hls');
-    stream = browserPartyStream(stream);
+    const offered = browserPartyStream(stream);
+    // A personal source is replaced only in the opt-in automatic mode, and
+    // only by a playable host source; never by a revocation or pending HLS.
+    if (personalHls.active) {
+      if (!autoHostStream || !offered || streamProblem(offered)) return;
+      resetVideo('Automatischer Modus: Die eigene HLS-Quelle wurde durch die Host-Freigabe ersetzt.');
+    }
+    stream = offered;
     if (!stream) {
       resetVideo();
       $('streamInfo').textContent = browserPending
@@ -104,16 +111,22 @@ const session = client ? new PartySession(client, deviceId, {
     }
     if (stream.media_key !== mediaKey(session.room?.info.media)) return;
     const identity = JSON.stringify(stream);
-    if (identity === JSON.stringify(selectedStream)) return;
+    if (identity === JSON.stringify(selectedStream)) return; // Reconnect re-offers the same source: no reload.
     // Do not keep playing a revoked or superseded source until the next user click.
     resetVideo(); selectedStream = stream;
     $('streamInfo').textContent = `Freigegebene Quelle: ${stream.name || stream.filename || 'Video'}. Laden überträgt deine IP-Adresse an den Medienanbieter. Die Quelladresse kann private Tokens enthalten.`;
     const problem = streamProblem(stream);
     $('loadStream').hidden = !!problem;
     if (problem) { $('noStream').textContent = 'Diese Quelle kann der Browser nicht abspielen. Der Host kann eine andere Quelle teilen.'; status(problem, true); }
+    else if (autoHostStream) {
+      // Opt-in: load at once (new episode or renewed link) and follow the
+      // current party time after metadata, like the big play button.
+      status('Host-Stream wird automatisch geladen …');
+      startStream();
+    }
     else { $('noStream').textContent = 'Stream bereit. Tippe auf ▶, um gemeinsam zu schauen.'; status('Stream bereit. Tippe auf ▶ zum Abspielen.'); }
   },
-  media: () => { resetVideo('Film gewechselt. Persönliche Quelle entfernt. Bitte eine neue eigene Quelle laden.'); $('streamInfo').textContent = 'Film gewechselt. Warte auf die neue Streamfreigabe oder lade eine eigene HLS-Quelle.'; },
+  media: () => { lastHostStreamEvent = undefined; resetVideo('Film gewechselt. Persönliche Quelle entfernt. Bitte eine neue eigene Quelle laden.'); $('streamInfo').textContent = 'Film gewechselt. Warte auf die neue Streamfreigabe oder lade eine eigene HLS-Quelle.'; },
   chat: message => {
     const line = document.createElement('div'), author = document.createElement('b');
     author.textContent = `${message.name || session.room?.members.find(m => m.id === message.member_id)?.display_name || 'Gast'}: `;
@@ -123,12 +136,17 @@ const session = client ? new PartySession(client, deviceId, {
     $('chatLog').scrollTop = $('chatLog').scrollHeight;
   },
   error: e => status(friendlyError(e), true),
-  closed: () => { resetVideo('Party-Verbindung geschlossen. Persönliche Quelle entfernt.'); $('chatLog').replaceChildren(); pendingChat = null; $('connection').textContent = 'Nicht verbunden'; renderControlInfo(); },
+  closed: () => { lastHostStreamEvent = undefined; resetVideo('Party-Verbindung geschlossen. Persönliche Quelle entfernt.'); $('chatLog').replaceChildren(); pendingChat = null; $('connection').textContent = 'Nicht verbunden'; renderControlInfo(); },
   ended: message => { resetVideo('Party beendet oder Mitgliedschaft verloren. Persönliche Quelle entfernt.'); showPanel('join'); status(message); },
 }) : null;
 
 // Transient toast instead of a permanent banner; errors stay a little longer.
 let toastTimer = null, connectionLost = false, realtimeReconnecting = false, resumeAfterReconnect = false;
+// Opt-in "Host-Stream automatisch verwenden". Only this boolean is stored
+// locally; stream URLs and tokens stay in memory.
+const AUTO_HOST_STREAM_KEY = 'nuvio-party-auto-host-stream';
+let autoHostStream = false, lastHostStreamEvent;
+try { autoHostStream = globalThis.localStorage?.getItem(AUTO_HOST_STREAM_KEY) === '1'; } catch { /* Preference unavailable. */ }
 function status(message, error = false) {
   $('message').textContent = message;
   $('message').style.borderColor = error ? '#ff6969' : '';
@@ -839,6 +857,16 @@ $('useDesktopStream').addEventListener('click', () => {
   resetVideo(); presence();
   $('streamInfo').textContent = 'Persönliche Quelle gelöscht. Warte auf die aktuelle Desktop-Freigabe.';
   session?.requestState().catch(() => status('Desktop-Freigabe konnte nicht angefragt werden. Verbindung prüfen.', true));
+});
+$('autoHostStream').checked = autoHostStream;
+$('autoHostStream').addEventListener('change', () => {
+  autoHostStream = $('autoHostStream').checked === true;
+  try { globalThis.localStorage?.setItem(AUTO_HOST_STREAM_KEY, autoHostStream ? '1' : '0'); } catch { /* Session only. */ }
+  // Enabling it (a user gesture) applies the host source that is already offered.
+  if (!autoHostStream || !session?.room) return;
+  if (selectedStream && !loadedStream && !$('loadStream').hidden) startStream();
+  else if (lastHostStreamEvent) session.handlers.stream(lastHostStreamEvent);
+  else session.requestState().catch(() => {});
 });
 for (const event of ['canplay', 'progress', 'durationchange']) player.addEventListener(event, () => updatePersonalHlsReadiness());
 window.addEventListener('pagehide', () => {

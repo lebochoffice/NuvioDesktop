@@ -199,6 +199,11 @@ internal fun PlayerScreenRuntime.rememberPartyControlsState(): PlayerControlPart
         hostOnly = party.hostOnly,
         sharing = party.sharing,
         shareNote = if (party.sharing && currentPartyStream() == null) stringResource(Res.string.party_share_unavailable) else torboxPartyStatus,
+        hlsAvailable = party.isHost && !elsewhere && activeStream?.torboxPartyFile != null,
+        hlsBusy = torboxPartyPhase == com.nuvio.app.features.debrid.TorboxHlsPhase.Preparing,
+        hlsStatus = if (party.isHost && !elsewhere && activeStream?.torboxPartyFile != null) {
+            com.nuvio.app.features.debrid.torboxHlsStatusLabel(torboxPartyPhase, party.sharing)
+        } else "",
         canEnd = party.isHost && party.members.size > 1,
         seatsLabel = stringResource(Res.string.party_seats, party.members.size, party.maxMembers),
         maxMembers = party.maxMembers,
@@ -260,6 +265,13 @@ internal fun PlayerScreenRuntime.handlePartyControlsEvent(type: String, value: D
         "partyCopyInvite" -> copyPartyInvite()
         "partyHostOnly" -> PartyRepository.setHostOnly(value >= 0.5)
         "partySharing" -> PartyRepository.setSharing(value >= 0.5)
+        // Restarts the single HLS producer; ignored while one is preparing.
+        // Never changes the sharing consent.
+        "partyHlsRefresh" -> {
+            val party = PartyRepository.state.value.party
+            if (party?.isHost == true && activeStream?.torboxPartyFile != null &&
+                torboxPartyPhase != com.nuvio.app.features.debrid.TorboxHlsPhase.Preparing) torboxPartyRefresh += 1
+        }
         "partyWatch" -> watchWithParty()
         "partySwitch" -> switchPartyMedia()
         "partyCatchUp" -> catchUpWithParty()

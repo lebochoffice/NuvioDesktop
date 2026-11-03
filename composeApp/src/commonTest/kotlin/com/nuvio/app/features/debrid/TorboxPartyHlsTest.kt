@@ -23,4 +23,13 @@ class TorboxPartyHlsTest {
             assertNull(torboxShareableHls(response(url), "account-secret"))
         }
     }
+    @Test fun `panel status distinguishes the phases and counts a ready source as sent only while sharing`() {
+        assertEquals("Nicht verfügbar", torboxHlsStatusLabel(TorboxHlsPhase.Unavailable, sharing = true))
+        assertEquals("HLS wird vorbereitet …", torboxHlsStatusLabel(TorboxHlsPhase.Preparing, sharing = true))
+        assertEquals("An Teilnehmer gesendet", torboxHlsStatusLabel(TorboxHlsPhase.Ready, sharing = true))
+        assertEquals("HLS bereit (Share my stream ist aus)", torboxHlsStatusLabel(TorboxHlsPhase.Ready, sharing = false))
+        assertEquals("Zugriff verweigert", torboxHlsStatusLabel(TorboxHlsPhase.Denied, sharing = true))
+        assertEquals("Link abgelaufen – wird erneuert …", torboxHlsStatusLabel(TorboxHlsPhase.Expired, sharing = true))
+        assertEquals("Fehlgeschlagen", torboxHlsStatusLabel(TorboxHlsPhase.Failed, sharing = false))
+    }
 }

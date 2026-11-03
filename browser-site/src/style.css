@@ -289,3 +289,7 @@ input[type=range]:disabled { cursor: default; opacity: .5; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
+
+/* Opt-in "Host-Stream automatisch verwenden" in the drawer's Technik block. */
+.check-row { display: flex; gap: .5rem; align-items: flex-start; margin: .25rem 0 .5rem; line-height: 1.35; cursor: pointer; }
+.check-row input { margin-top: .2rem; flex: none; }

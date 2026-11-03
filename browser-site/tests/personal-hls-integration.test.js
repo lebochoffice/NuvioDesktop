@@ -1225,3 +1225,72 @@ test('a deliberate local pause before the connection loss is not overridden by t
   h.session.handlers.connection('SUBSCRIBED'); await settlePlayback();
   assert.equal(h.sync(), false); assert.equal(h.player.paused, true);
 });
+
+// --- Automatic host HLS ("Host-Stream automatisch verwenden"). Written, not executed here. ---
+const hostOffer = (url, mediaKeyValue = 'movie|tt1||') => ({media_key: mediaKeyValue, url: 'https://desktop.example.test/film.mkv',
+  filename: 'original.mkv', browser_hls: {url}});
+const enableAuto = h => { h.get('autoHostStream').checked = true; h.get('autoHostStream').fire('change'); };
+
+test('manual mode (default): a host HLS offer needs the play click and never replaces a personal source', async () => {
+  const h = await harness();
+  assert.equal(h.get('autoHostStream').checked, false);
+  h.session.handlers.stream(hostOffer('https://stream.example.test/a.m3u8'));
+  assert.equal(h.desktopHls(), null); assert.equal(h.get('loadStream').hidden, false); // Consent click still required.
+  const p = await harness(); p.enter(); const personal = p.source().instance;
+  p.session.handlers.stream(hostOffer('https://stream.example.test/a.m3u8'));
+  assert.equal(p.source().active, true); assert.equal(p.source().instance, personal); assert.equal(p.desktopHls(), null);
+});
+
+test('automatic mode: the offered host HLS is loaded at once and follows the party time after metadata', async () => {
+  const h = await harness();
+  enableAuto(h);
+  h.session.handlers.stream(hostOffer('https://stream.example.test/a.m3u8'));
+  assert.equal(h.desktopHls().source, 'https://stream.example.test/a.m3u8');
+  assert.equal(h.get('loadStream').hidden, true);
+  h.metadata(); await settlePlayback();
+  assert.equal(h.sync(), true); assert.equal(h.player.currentTime, 5); // Current party time (5 s).
+  h.session.handlers.stream(hostOffer('https://stream.example.test/a.m3u8')); // Reconnect re-offers the same source.
+  assert.equal(h.desktopHls().source, 'https://stream.example.test/a.m3u8'); assert.equal(h.sync(), true); // No reload.
+});
+
+test('automatic mode: a renewed link or a new episode reloads only the new source; pending HLS or other media is ignored', async () => {
+  const h = await harness(); enableAuto(h);
+  h.session.handlers.stream(hostOffer('https://stream.example.test/a.m3u8')); h.metadata(); await settlePlayback();
+  const first = h.desktopHls();
+  h.session.handlers.stream(hostOffer('https://stream.example.test/a-renewed.m3u8'));
+  assert.equal(first.destroyed, true); assert.equal(h.desktopHls().source, 'https://stream.example.test/a-renewed.m3u8');
+  h.metadata(); await settlePlayback(); assert.equal(h.sync(), true);
+  h.session.handlers.stream(hostOffer('https://stream.example.test/other-film.m3u8', 'movie|tt9||')); // Other film: never used.
+  assert.equal(h.desktopHls().source, 'https://stream.example.test/a-renewed.m3u8');
+});
+
+test('automatic mode replaces a personal source with a playable host source, but not with a revocation or pending HLS', async () => {
+  const h = await harness(); h.enter(); const personal = h.source().instance; enableAuto(h);
+  h.session.handlers.stream({...hostOffer(''), browser_hls: {url: null}}); // Host HLS still preparing.
+  h.session.handlers.stream(null); // Revocation.
+  assert.equal(h.source().active, true); assert.equal(h.source().instance, personal);
+  h.session.handlers.stream(hostOffer('https://stream.example.test/a.m3u8'));
+  assert.equal(h.source().active, false); assert.equal(personal.destroyed, true);
+  assert.equal(h.desktopHls().source, 'https://stream.example.test/a.m3u8');
+});
+
+test('enabling automatic mode applies the source already offered; revoking sharing stops playback at once', async () => {
+  const h = await harness();
+  h.session.handlers.stream(hostOffer('https://stream.example.test/a.m3u8'));
+  assert.equal(h.desktopHls(), null);
+  enableAuto(h);
+  assert.equal(h.desktopHls().source, 'https://stream.example.test/a.m3u8');
+  h.metadata(); await settlePlayback();
+  const instance = h.desktopHls();
+  h.session.handlers.stream(null);
+  assert.equal(instance.destroyed, true); assert.equal(h.player.paused, true); assert.equal(h.desktopHls(), null);
+});
+
+test('stream URLs are never stored; only the automatic-mode preference may be', async () => {
+  const h = await harness(); enableAuto(h);
+  h.session.handlers.stream(hostOffer('https://stream.example.test/token=PRIVATE_HOST_SENTINEL.m3u8'));
+  assert.ok(!JSON.stringify(h.storageWrites).includes('PRIVATE_HOST_SENTINEL'));
+  h.session.handlers.media();
+  h.get('autoHostStream').checked = false; h.get('autoHostStream').fire('change'); h.get('autoHostStream').checked = true; h.get('autoHostStream').fire('change');
+  assert.equal(h.desktopHls(), null); // The old film's offer is forgotten after a media change.
+});

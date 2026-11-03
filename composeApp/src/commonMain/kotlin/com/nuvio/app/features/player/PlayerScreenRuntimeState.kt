@@ -291,6 +291,9 @@ internal class PlayerScreenRuntime(
     var torboxPartyStream by mutableStateOf<com.nuvio.app.features.party.PartyStream?>(null)
     var torboxPartyStatus by mutableStateOf("")
     var torboxPreparedFile by mutableStateOf<com.nuvio.app.features.debrid.TorboxPartyFile?>(null)
+    var torboxPartyPhase by mutableStateOf(com.nuvio.app.features.debrid.TorboxHlsPhase.Unavailable)
+    // Incremented by "HLS erstellen / aktualisieren": restarts the single producer.
+    var torboxPartyRefresh by mutableStateOf(0)
     var partyBehindMs by mutableStateOf<Long?>(null)
     var partyRateNudge: Float? = null
     var partyPreviousKey: String? = null

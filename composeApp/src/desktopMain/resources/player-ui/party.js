@@ -479,6 +479,15 @@ const buildPartyHostSettings = party => {
   section.appendChild(buildPartySwitch("sharing", partyLabel("shareTitle"), partyLabel("shareDescription"), party.sharing, "partySharing"));
   const note = String(party.shareNote || "").trim();
   if (note) section.appendChild(partyElement("p", "party-note", note));
+  // Only for a suitable TorBox source of the host. Prepares or renews the
+  // browser HLS; distribution still requires the "sharing" switch above.
+  if (party.hlsAvailable) {
+    const hls = partyButtonElement("HLS erstellen / aktualisieren", "", "hlsRefresh", () => send("partyHlsRefresh", 0));
+    if (party.hlsBusy) hls.disabled = true;
+    section.appendChild(hls);
+    const hlsStatus = String(party.hlsStatus || "").trim();
+    if (hlsStatus) section.appendChild(partyElement("p", "party-note", `Browser-HLS: ${hlsStatus}`));
+  }
   return section;
 };
 

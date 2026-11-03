@@ -18,6 +18,10 @@ data class PlayerControlPartyState(
     val hostOnly: Boolean = false,
     val sharing: Boolean = false,
     val shareNote: String = "",
+    // Browser HLS of the host's TorBox source ("HLS erstellen / aktualisieren").
+    val hlsAvailable: Boolean = false,
+    val hlsBusy: Boolean = false,
+    val hlsStatus: String = "",
     val canEnd: Boolean = false,
     val seatsLabel: String = "",
     val maxMembers: Int = 0,

@@ -14,7 +14,8 @@ internal fun torboxAccountFingerprint(apiKey: String): String =
 
 internal sealed interface TorboxPartyHlsResult {
     class Ready(val url: String) : TorboxPartyHlsResult
-    class Failed(val message: String) : TorboxPartyHlsResult
+    // denied: the account/plan refused access (not a transient failure).
+    class Failed(val message: String, val denied: Boolean = false) : TorboxPartyHlsResult
 }
 
 // Field names verified against TorBox's public Stream/streamFunctions modules.
@@ -45,8 +46,8 @@ internal suspend fun prepareTorboxPartyHls(file: TorboxPartyFile, apiKey: String
         val body = response.body
         val root = body as? JsonObject
         if (!response.isSuccessful || (root?.get("success") as? JsonPrimitive)?.booleanOrNull != true) {
-            return TorboxPartyHlsResult.Failed(if (response.status == 403) "TorBox: Streamzugriff verweigert. Tarif und Account-Berechtigung prüfen."
-                else "TorBox: HLS-Vorbereitung fehlgeschlagen. Account, Tarif und Verfügbarkeit prüfen.")
+            return if (response.status == 403) TorboxPartyHlsResult.Failed("TorBox: Streamzugriff verweigert. Tarif und Account-Berechtigung prüfen.", denied = true)
+                else TorboxPartyHlsResult.Failed("TorBox: HLS-Vorbereitung fehlgeschlagen. Account, Tarif und Verfügbarkeit prüfen.")
         }
         val url = torboxShareableHls(body, apiKey)
             ?: return TorboxPartyHlsResult.Failed("TorBox: Keine sichere HLS-Freigabe erhalten. Fehlender Link, unbekanntes CDN oder Account-Key in der URL. Persönliches HLS bleibt verfügbar.")
@@ -55,12 +56,28 @@ internal suspend fun prepareTorboxPartyHls(file: TorboxPartyFile, apiKey: String
         repeat(15) {
             val manifest = probeTorboxPartyHls(url, apiKey)
             if (manifest == 200) return TorboxPartyHlsResult.Ready(url)
-            if (manifest in listOf(401, 403, 410, 498)) return TorboxPartyHlsResult.Failed("TorBox: Streamzugriff nicht freigabefähig. Account und Berechtigungen prüfen.")
+            if (manifest in listOf(401, 403, 410, 498)) return TorboxPartyHlsResult.Failed("TorBox: Streamzugriff nicht freigabefähig. Account und Berechtigungen prüfen.", denied = true)
             kotlinx.coroutines.delay(2_000L)
         }
         TorboxPartyHlsResult.Failed("TorBox: HLS-Playlist nach Wartezeit noch nicht bereit. Party neu öffnen oder persönliche HLS-Quelle verwenden.")
     } catch (cancelled: CancellationException) { throw cancelled }
     catch (_: Exception) { TorboxPartyHlsResult.Failed("TorBox: HLS-Vorbereitung nicht erreichbar. Netzwerk und Account prüfen.") }
+}
+
+/** Host-side state of the browser HLS source; shown in the party panel. */
+enum class TorboxHlsPhase { Unavailable, Preparing, Ready, Denied, Expired, Failed }
+
+/**
+ * Panel label. "Sent" is not a phase of its own: a ready source counts as sent
+ * only while the host has explicitly enabled "Share my stream".
+ */
+internal fun torboxHlsStatusLabel(phase: TorboxHlsPhase, sharing: Boolean): String = when (phase) {
+    TorboxHlsPhase.Unavailable -> "Nicht verfügbar"
+    TorboxHlsPhase.Preparing -> "HLS wird vorbereitet …"
+    TorboxHlsPhase.Ready -> if (sharing) "An Teilnehmer gesendet" else "HLS bereit (Share my stream ist aus)"
+    TorboxHlsPhase.Denied -> "Zugriff verweigert"
+    TorboxHlsPhase.Expired -> "Link abgelaufen – wird erneuert …"
+    TorboxHlsPhase.Failed -> "Fehlgeschlagen"
 }
 
 // Playlist-only probe: no media forwarding, no account key or raw error logging.
