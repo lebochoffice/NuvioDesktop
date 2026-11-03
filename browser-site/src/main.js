@@ -901,6 +901,8 @@ async function joinParty() {
   finally { joining = false; $('joinButton').disabled = false; $('joinButton').textContent = session.room ? 'Zurück zur Party' : 'Jetzt ansehen'; }
 }
 $('joinForm').addEventListener('submit', e => { e.preventDefault(); joinParty(); });
+// Sign out: visible only with a session (inside the account line).
+$('logoutButton').addEventListener('click', async () => { await session?.close(); await client?.auth.signOut(); renderAuthState(false); showPanel('join'); status('Abgemeldet.'); });
 $('invitePlay').addEventListener('click', () => joinParty());
 $('passwordToggle').addEventListener('click', () => {
   const show = $('password').type === 'password';
