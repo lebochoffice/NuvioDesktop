@@ -12,6 +12,9 @@ import com.nuvio.app.core.format.formatLocalTime
 import com.nuvio.app.features.party.PartyChat
 import com.nuvio.app.features.party.PartyChatStatus
 import com.nuvio.app.features.party.PartyMember
+import com.nuvio.app.features.party.PartyMemberStatus
+import com.nuvio.app.features.party.PartyPresence
+import com.nuvio.app.features.party.PartySync
 import com.nuvio.app.features.party.PartyRepository
 import com.nuvio.app.features.party.partyChatRows
 import com.nuvio.app.features.party.behindMs
@@ -135,9 +138,18 @@ internal fun PlayerScreenRuntime.rememberPartyControlsState(): PlayerControlPart
     val selfBehindMs = if (partyBehind) partyBehindMs ?: 0L else null
     val storage = "${ServerConfigurationRepository.active.value.backendUrl}/storage/v1/object/"
     val you = stringResource(Res.string.party_you)
+    val nowMs = PartyRepository.nowMs()
     val members = party.members.map { member ->
         val isSelf = member.id == party.memberId
         val behindMs = if (isSelf) selfBehindMs else party.behindMs(member)
+        // Estimated distance to the party time (display only). Own row uses
+        // the live player position instead of the last report.
+        val reported = if (isSelf) {
+            PartyPresence(memberId = member.id, status = party.presence[member.id]?.status ?: PartyMemberStatus.Ready,
+                mediaKey = partyKey, positionMs = currentPlaybackPositionMs(), positionAt = nowMs, playing = playbackSnapshot.isPlaying)
+                .takeIf { !elsewhere }
+        } else party.presence[member.id]
+        val syncLabel = PartySync.memberSyncLabel(PartySync.memberSync(reported, playback, party.media.key, nowMs))
         PlayerControlPartyMember(
             id = member.id,
             name = if (isSelf) "${member.displayName} ($you)" else member.displayName,
@@ -145,11 +157,11 @@ internal fun PlayerScreenRuntime.rememberPartyControlsState(): PlayerControlPart
             imageUrl = member.avatarUrl?.takeIf { it.startsWith(storage) }.orEmpty(),
             color = member.avatarColor.orEmpty(),
             isHost = member.id == party.hostMemberId,
-            status = if (behindMs != null) {
+            status = (if (behindMs != null) {
                 stringResource(Res.string.party_behind, formatPlaybackTime(behindMs))
             } else {
                 stringResource(party.statusRes(member))
-            },
+            }).let { base -> if (syncLabel.isEmpty()) base else "$base · $syncLabel" },
             presence = party.presenceState(member).name.lowercase(),
             canRemove = party.isHost && !isSelf,
             removeTitle = stringResource(Res.string.party_remove_title, member.displayName),
@@ -201,9 +213,13 @@ internal fun PlayerScreenRuntime.rememberPartyControlsState(): PlayerControlPart
         shareNote = if (party.sharing && currentPartyStream() == null) stringResource(Res.string.party_share_unavailable) else torboxPartyStatus,
         hlsAvailable = party.isHost && !elsewhere && activeStream?.torboxPartyFile != null,
         hlsBusy = torboxPartyPhase == com.nuvio.app.features.debrid.TorboxHlsPhase.Preparing,
-        hlsStatus = if (party.isHost && !elsewhere && activeStream?.torboxPartyFile != null) {
-            com.nuvio.app.features.debrid.torboxHlsStatusLabel(torboxPartyPhase, party.sharing)
-        } else "",
+        hlsStatus = when {
+            !party.isHost || elsewhere -> ""
+            activeStream?.torboxPartyFile != null -> com.nuvio.app.features.debrid.torboxHlsStatusLabel(torboxPartyPhase, party.sharing)
+            // A provider name such as "[TB+] …" is no TorBox file identity.
+            party.sharing && activeStream != null -> "Nicht verfügbar: Diese Quelle stammt nicht aus der integrierten TorBox-Auflösung (z. B. ein Addon-Stream). Browser-Gäste erhalten die Originalquelle; für Browser-HLS die Quelle über TorBox-Debrid wählen."
+            else -> ""
+        },
         canEnd = party.isHost && party.members.size > 1,
         seatsLabel = stringResource(Res.string.party_seats, party.members.size, party.maxMembers),
         maxMembers = party.maxMembers,

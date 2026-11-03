@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import {strict as assert} from 'node:assert';
-import {normalizeCode,partyCodeFromPath,validCode,mediaKey,expectedPositionMs,safeStreamUrl,isNewerPlayback,validPlayback,streamProblem,streamIsHls,browserPartyStream,publicConfigProblem} from '../src/protocol.js';
+import {normalizeCode,partyCodeFromPath,validCode,mediaKey,expectedPositionMs,safeStreamUrl,isNewerPlayback,validPlayback,streamProblem,streamIsHls,browserPartyStream,publicConfigProblem,memberSync,memberSyncLabel,formatDrift} from '../src/protocol.js';
 test('normalize URL party code',()=>{assert.equal(normalizeCode('uxz-83h'),'UXZ83H');assert.ok(validCode('UXZ 83H'));assert.equal(partyCodeFromPath('/party/UXZ83H'),'UXZ83H');assert.equal(partyCodeFromPath('/party/abcd'),'');});
 test('media key same as desktop contract',()=>{assert.equal(mediaKey({meta_type:'Movie',meta_id:'tt123',season:null,episode:null}),'movie|tt123||');assert.equal(mediaKey({meta_type:'Movie',meta_id:'TT123'}),'movie|TT123||');});
 test('expected playback position accounts for pauses and clock',()=>{assert.equal(expectedPositionMs({paused:false,waiting:false,position_ms:120000,rate:1,at:1000},3500),122500);assert.equal(expectedPositionMs({paused:true,position_ms:120000,rate:1,at:1000},3500),120000);});
@@ -61,4 +61,28 @@ test('browser selection leaves the Desktop original intact and inherits its medi
   assert.equal(browserPartyStream(null), null);
   const legacy = {media_key: original.media_key, url: 'https://desktop.example.test/video.mp4'};
   assert.equal(browserPartyStream(legacy), legacy);
+});
+
+// Member sync display (same rule as Desktop PartySync.memberSync). Written, not executed here.
+test('member sync: synced, catching up, buffering, unsynced (behind), stale and other film', () => {
+  const party = {seq: 3, member_id: 'host', paused: false, position_ms: 60000, rate: 1, at: 10000};
+  const r = extra => ({status: 'ready', media_key: 'movie|tt1||', position_ms: 60000, position_at: 10000, playing: true, ...extra});
+  assert.deepEqual(memberSync(r({}), party, 'movie|tt1||', 15000), {state: 'synced', positionMs: 65000, driftMs: 0});
+  assert.equal(memberSync(r({position_ms: 56000}), party, 'movie|tt1||', 15000).state, 'catching_up');
+  assert.equal(memberSync(r({position_ms: 56000}), party, 'movie|tt1||', 15000).driftMs, -4000);
+  assert.equal(memberSync(r({position_ms: 20000}), party, 'movie|tt1||', 15000).state, 'unsynced');
+  assert.equal(memberSync(r({status: 'buffering'}), party, 'movie|tt1||', 15000).state, 'buffering');
+  assert.equal(memberSync(r({status: 'behind'}), party, 'movie|tt1||', 15000).state, 'unsynced');
+  assert.equal(memberSync(r({}), party, 'movie|tt1||', 10000 + 30001).state, 'stale');
+  assert.equal(memberSync(r({media_key: 'movie|tt9||'}), party, 'movie|tt1||', 15000).state, 'unknown');
+  assert.equal(memberSync({status: 'ready'}, party, 'movie|tt1||', 15000).state, 'unknown'); // Old client: no position.
+  assert.equal(memberSync({status: 'behind'}, party, 'movie|tt1||', 15000).state, 'unsynced');
+  assert.equal(memberSync(r({playing: false}), {...party, paused: true}, 'movie|tt1||', 15000).state, 'synced');
+});
+test('member sync labels and drift formatting', () => {
+  assert.equal(formatDrift(0), '+0,0 s'); assert.equal(formatDrift(-4249), '−4,2 s'); assert.equal(formatDrift(65400), '+1:05');
+  assert.equal(memberSyncLabel({state: 'synced', driftMs: 300}), 'Synchron (+0,3 s)');
+  assert.equal(memberSyncLabel({state: 'catching_up', driftMs: -4000}), 'Holt auf (−4,0 s)');
+  assert.equal(memberSyncLabel({state: 'buffering'}), 'Puffert'); assert.equal(memberSyncLabel({state: 'stale'}), 'Status veraltet');
+  assert.equal(memberSyncLabel({state: 'unsynced', driftMs: -90000}), 'Unsynchron (−1:30)'); assert.equal(memberSyncLabel({state: 'unknown'}), '');
 });

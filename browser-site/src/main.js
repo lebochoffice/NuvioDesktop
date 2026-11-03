@@ -1,7 +1,7 @@
 import {createClient} from '@supabase/supabase-js';
 import Hls from 'hls.js';
 import './style.css';
-import {normalizeCode, validCode, partyCodeFromPath, mediaKey, expectedPositionMs, isNewerPlayback, streamProblem, streamIsHls, browserPartyStream, publicConfigProblem} from './protocol.js';
+import {normalizeCode, validCode, partyCodeFromPath, mediaKey, expectedPositionMs, isNewerPlayback, streamProblem, streamIsHls, browserPartyStream, publicConfigProblem, memberSync, memberSyncLabel} from './protocol.js';
 import {PartySession, callRpc} from './session.js';
 import {PersonalHlsSource, personalHlsUrlProblem} from './personal-hls.js';
 import {SYNC, HLS_TUNING, bufferedRanges, bufferAhead, correctionFor, seekTarget, SeekLead, StallTracker, qualityOptions} from './sync-policy.js';
@@ -92,12 +92,23 @@ const session = client ? new PartySession(client, deviceId, {
     applySync(); renderSyncDebug();
   },
   command: entry => commandSettled(entry),
-  stream: stream => {
+  members: () => { if (session?.room) renderMembers(session.room); },
+  stream: (stream, reason) => {
+    // A host change is no revocation by the sharing host: an already loaded
+    // source continues locally ("Allein"); an explicit revocation (null without
+    // reason) still stops it at once.
+    if (!stream && reason === 'host_changed' && loadedStream && !personalHls.active) {
+      lastHostStreamEvent = undefined;
+      continueLocally('Der Host hat gewechselt. Die bisherige Quelle läuft lokal weiter; „Zur Party“ übernimmt die Party-Zeit des neuen Hosts.');
+      return;
+    }
     // Includes revocations, incompatible URLs and host source changes. Only an
     // authoritative media/room lifecycle event clears a personal source.
     if (stream && stream.media_key !== mediaKey(session.room?.info.media)) return;
     lastHostStreamEvent = stream; // Memory only, for enabling auto mode later.
     const browserPending = !!stream && Object.hasOwn(stream, 'browser_hls');
+    // Optional desktop hint while browser_hls has no URL yet (older hosts send none).
+    const browserState = browserPending ? String(stream.browser_hls?.state || 'preparing') : null;
     const offered = browserPartyStream(stream);
     // A personal source is replaced only in the opt-in automatic mode, and
     // only by a playable host source; never by a revocation or pending HLS.
@@ -108,9 +119,11 @@ const session = client ? new PartySession(client, deviceId, {
     stream = offered;
     if (!stream) {
       resetVideo();
-      $('streamInfo').textContent = browserPending
-        ? 'Desktop-Quelle freigegeben. Browser-HLS ist noch nicht verfügbar; bitte auf die Vorbereitung warten oder die eigene HLS-Quelle verwenden.'
-        : 'Keine aktive Streamfreigabe. Der Desktop-Host muss „Share my stream“ aktivieren.';
+      $('streamInfo').textContent = !browserPending ? 'Keine aktive Streamfreigabe. Der Desktop-Host muss „Share my stream“ aktivieren.'
+        : browserState === 'denied' ? 'Browser-HLS nicht möglich: TorBox hat den Zugriff verweigert (Tarif oder Berechtigung). Eigene HLS-Quelle verwenden.'
+        : browserState === 'failed' ? 'Browser-HLS konnte am Desktop nicht vorbereitet werden. Der Host kann „HLS erstellen / aktualisieren“ drücken, oder du lädst eine eigene HLS-Quelle.'
+        : 'Desktop-Quelle freigegeben. Browser-HLS wird vorbereitet; bei automatischem Laden startet sie danach von selbst.';
+      if (browserPending) $('noStream').textContent = browserState === 'preparing' ? 'Browser-HLS wird am Desktop vorbereitet …' : 'Keine abspielbare Browserquelle vom Host.';
       return;
     }
     if (stream.media_key !== mediaKey(session.room?.info.media)) return;
@@ -123,16 +136,23 @@ const session = client ? new PartySession(client, deviceId, {
     $('streamInfo').textContent = `Freigegebene Quelle: ${stream.name || stream.filename || 'Video'}. Laden überträgt deine IP-Adresse an den Medienanbieter. Die Quelladresse kann private Tokens enthalten.`;
     const problem = streamProblem(stream);
     $('loadStream').hidden = !!problem;
-    if (problem) { $('noStream').textContent = 'Diese Quelle kann der Browser nicht abspielen. Der Host kann eine andere Quelle teilen.'; status(problem, true); }
+    if (problem) {
+      // No browser_hls at all: the host's source is no integrated TorBox file
+      // (e.g. an addon stream, even if its name says "TB+"), so the browser
+      // only has the original. Say so instead of pretending automation works.
+      $('noStream').textContent = 'Diese Quelle kann der Browser nicht abspielen. Der Host kann eine andere Quelle teilen.';
+      $('streamInfo').textContent = 'Die freigegebene Host-Quelle ist für Browser nicht geeignet (z. B. MKV). Browser-HLS gibt es nur für Quellen aus der integrierten TorBox-Auflösung des Hosts; ein Addon-Name wie „TB+“ reicht dafür nicht. Alternativ eine eigene HLS-Quelle laden.';
+      status(problem, true);
+    }
     else if (autoHostStream && soloMode && soloResume) {
       status('Neue Host-Quelle wird geladen; du schaust weiter allein.');
       loadStream();
     }
     else if (autoHostStream) {
-      // Opt-in: load at once (new episode or renewed link) and follow the
-      // current party time after metadata, like the big play button.
-      status('Host-Stream wird automatisch geladen …');
+      // Automatic mode: load at once (new episode or renewed link) and follow
+      // the current party time after metadata, like the big play button.
       startStream();
+      status('Host-Stream wird automatisch geladen. Der Anbieter der Quelle erhält dabei deine IP-Adresse.');
     }
     else { $('noStream').textContent = 'Stream bereit. Tippe auf ▶, um gemeinsam zu schauen.'; status('Stream bereit. Tippe auf ▶ zum Abspielen.'); }
   },
@@ -146,16 +166,29 @@ const session = client ? new PartySession(client, deviceId, {
     $('chatLog').scrollTop = $('chatLog').scrollHeight;
   },
   error: e => status(friendlyError(e), true),
-  closed: () => { lastHostStreamEvent = undefined; resetVideo('Party-Verbindung geschlossen. Persönliche Quelle entfernt.'); $('chatLog').replaceChildren(); pendingChat = null; $('connection').textContent = 'Nicht verbunden'; renderControlInfo(); },
-  ended: message => { resetVideo('Party beendet oder Mitgliedschaft verloren. Persönliche Quelle entfernt.'); showPanel('join'); status(message); },
+  closed: reason => {
+    lastHostStreamEvent = undefined;
+    // Party ended / host left: a loaded source may keep playing locally (see
+    // "ended"). A removal, leave or new join stops it.
+    if (!keepAfterPartyEnd(reason)) resetVideo('Party-Verbindung geschlossen. Persönliche Quelle entfernt.');
+    $('chatLog').replaceChildren(); pendingChat = null; $('connection').textContent = 'Nicht verbunden'; renderControlInfo();
+  },
+  ended: (message, reason) => {
+    if (keepAfterPartyEnd(reason)) {
+      continueLocally(`${message} Die geladene Quelle läuft lokal weiter, bis sie abläuft oder du sie schließt. Es gibt keine gemeinsame Party mehr.`);
+      return;
+    }
+    resetVideo('Party beendet oder Mitgliedschaft verloren. Persönliche Quelle entfernt.'); showPanel('join'); status(message);
+  },
 }) : null;
 
 // Transient toast instead of a permanent banner; errors stay a little longer.
 let toastTimer = null, connectionLost = false, realtimeReconnecting = false, resumeAfterReconnect = false;
-// Opt-in "Host-Stream automatisch verwenden". Only this boolean is stored
-// locally; stream URLs and tokens stay in memory.
+// "Host-Stream automatisch verwenden": on by default (first visit), a manual
+// "off" is remembered. Only this boolean is stored locally; stream URLs and
+// tokens stay in memory. The IP disclosure is stated next to the switch.
 const AUTO_HOST_STREAM_KEY = 'nuvio-party-auto-host-stream';
-let autoHostStream = false, lastHostStreamEvent;
+let autoHostStream = true, lastHostStreamEvent;
 // Automatic start after loading: 'loaded' → 'synced' (party position applied)
 // → 'playing'; 'blocked' (browser autoplay rule) or 'muted' (started without
 // sound because of that rule). awaitingPartyState: loaded before the first
@@ -164,7 +197,7 @@ let autoStarting = false, autoStartPhase = null, awaitingPartyState = false;
 // "Allein schauen": membership and source stay, nothing is published and
 // incoming party states do not touch the local player.
 let soloMode = false, soloResume = null;
-try { autoHostStream = globalThis.localStorage?.getItem(AUTO_HOST_STREAM_KEY) === '1'; } catch { /* Preference unavailable. */ }
+try { autoHostStream = globalThis.localStorage?.getItem(AUTO_HOST_STREAM_KEY) !== '0'; } catch { /* Preference unavailable: default. */ }
 function status(message, error = false) {
   $('message').textContent = message;
   $('message').style.borderColor = error ? '#ff6969' : '';
@@ -219,6 +252,9 @@ function renderMembers(room) {
     item.append(avatar, name);
     if (member.id === room.info.host_member_id) { const badge = document.createElement('span'); badge.className = 'badge'; badge.textContent = 'Host'; item.append(badge); }
     if (member.id === room.memberId) { const badge = document.createElement('span'); badge.className = 'badge'; badge.textContent = 'Du'; item.append(badge); }
+    // Estimated distance to the party time (display only, never a command).
+    const sync = memberSyncLabel(memberSyncFor(room, member));
+    if (sync) { const note = document.createElement('span'); note.className = 'member-sync'; note.textContent = sync; item.append(note); }
     return item;
   }));
   // Compact strip under the player: up to five avatars plus the count.
@@ -229,6 +265,16 @@ function renderMembers(room) {
   }));
   $('memberCount').textContent = `${room.members.length}/${room.info.max_members || 3} Teilnehmer`;
   $('drawerCode').textContent = room.info.code || '–';
+}
+// Own row from the live player; others from their last status report.
+function memberSyncFor(room, member) {
+  const now = session?.now?.() ?? Date.now(), current = mediaKey(room.info.media);
+  if (member.id === room.memberId) {
+    if (!loadedStream) return {state: 'unknown'};
+    const status = soloMode || !syncEnabled ? 'behind' : buffering || waitingForTarget || loading ? 'buffering' : 'ready';
+    return memberSync({status, media_key: current, position_ms: player.currentTime * 1000, position_at: now, playing: !player.paused}, session.playback, current, now);
+  }
+  return memberSync(session?.memberStatus?.get(member.id), session?.playback, current, now);
 }
 // Invitation from watch_party_preview: rendered with textContent only; no
 // stream source or private data is shown.
@@ -707,6 +753,15 @@ function enterSolo() {
   status('Du schaust allein weiter. Play, Pause und Springen gelten nur für dich. „Zur Party“ übernimmt wieder die Party-Zeit.');
   presence(); renderSoloUi(); renderPlayerUi();
 }
+// Continue the loaded source alone after a party end or host change; never
+// after a removal or an explicit revocation (those reset the player).
+function keepAfterPartyEnd(reason) { return (reason === 'ended' || reason === 'host_left') && !!loadedStream; }
+function continueLocally(message) {
+  soloMode = true; syncEnabled = false; resumeAfterReconnect = false;
+  pendingPlay = null; pendingSeek = ownSeek = null; userSeekPending = false;
+  if (player.playbackRate !== 1) player.playbackRate = 1;
+  status(message); presence(); renderSoloUi(); renderPlayerUi();
+}
 function renderSoloUi() {
   $('ctlSolo').textContent = soloMode ? 'Zur Party' : 'Allein schauen';
   $('ctlSolo').setAttribute?.('aria-pressed', String(soloMode));
@@ -1044,6 +1099,8 @@ $('passwordToggle').addEventListener('click', () => {
 });
 $('loadStream').addEventListener('click', startStream);
 function resyncNow() {
+  // After a party end there is no party time to return to.
+  if (!session?.room && soloMode) { status('Die Party ist beendet. Für eine neue Party den Einladungslink öffnen.'); return; }
   // Back to the party time always ends "Allein schauen".
   if (soloMode) { soloMode = false; renderSoloUi(); }
   // A lost subscription is not repaired by requestState/applySync: rebuild it
@@ -1210,7 +1267,19 @@ function renderSyncDebug() {
     latestCommandReason: choice(session?.latestCommand?.reason, ['host_only', 'superseded', 'stale_epoch', 'not_member', 'invalid', 'rejected']),
   }, null, 2);
 }
-setInterval(() => { applySync(); presence(); renderControlInfo(); renderSyncDebug(); }, 1000);
+// Sparse position report (about every 10 s) for the members' sync display.
+const POSITION_REPORT_MS = 10000;
+let lastPositionReportAt = -Infinity;
+if (session) session.positionProvider = () => loadedStream && Number.isFinite(player.currentTime)
+  ? {position_ms: player.currentTime * 1000, playing: !player.paused} : null;
+setInterval(() => {
+  applySync(); presence(); renderControlInfo(); renderSyncDebug();
+  if (session?.room && loadedStream && performance.now() - lastPositionReportAt >= POSITION_REPORT_MS) {
+    lastPositionReportAt = performance.now();
+    session.reportPosition?.().catch?.(() => {});
+  }
+  if (session?.room && !$('infoDrawer').hidden) renderMembers(session.room);
+}, 1000);
 $('leaveButton').addEventListener('click', async () => { await session?.close(); showPanel('join'); status('Party verlassen.'); });
 $('chatForm').addEventListener('submit', async e => {
   e.preventDefault(); const body = $('chatText').value.trim();

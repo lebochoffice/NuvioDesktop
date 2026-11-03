@@ -485,9 +485,10 @@ const buildPartyHostSettings = party => {
     const hls = partyButtonElement("HLS erstellen / aktualisieren", "", "hlsRefresh", () => send("partyHlsRefresh", 0));
     if (party.hlsBusy) hls.disabled = true;
     section.appendChild(hls);
-    const hlsStatus = String(party.hlsStatus || "").trim();
-    if (hlsStatus) section.appendChild(partyElement("p", "party-note", `Browser-HLS: ${hlsStatus}`));
   }
+  // Also explains why there is no button (e.g. an addon stream).
+  const hlsStatus = String(party.hlsStatus || "").trim();
+  if (hlsStatus) section.appendChild(partyElement("p", "party-note", `Browser-HLS: ${hlsStatus}`));
   return section;
 };
 

@@ -229,7 +229,10 @@ object PartyRepository {
     fun setLocalStatus(status: PartyMemberStatus, mediaKey: String?, behindMs: Long? = null) {
         scope.launch {
             val party = _state.value.party ?: return@launch
-            val next = PartyPresence(memberId = party.memberId, status = status, mediaKey = mediaKey, behindMs = behindMs)
+            // Keep the last position report; a status change does not clear it.
+            val previous = localPresence?.takeIf { it.mediaKey == mediaKey }
+            val next = PartyPresence(memberId = party.memberId, status = status, mediaKey = mediaKey, behindMs = behindMs,
+                positionMs = previous?.positionMs, positionAt = previous?.positionAt, playing = previous?.playing)
             if (next == localPresence) return@launch
             localPresence = next
             if (status == PartyMemberStatus.Ready) ignoredWaiting.remove(party.memberId)
@@ -239,6 +242,23 @@ object PartyRepository {
                 delay(250)
                 runCatching { channel?.send("status", encodePresence(next)) }
             }
+        }
+    }
+
+    /**
+     * Sparse position report for the members' sync display (about every 10 s
+     * from the player). Informational only: it rides on the existing "status"
+     * event, is never treated as a playback command and is ignored by older
+     * clients.
+     */
+    fun reportPosition(positionMs: Long, playing: Boolean) {
+        scope.launch {
+            val party = _state.value.party ?: return@launch
+            val base = localPresence?.takeIf { it.mediaKey == party.media.key } ?: return@launch
+            val next = base.copy(positionMs = positionMs.coerceAtLeast(0L), positionAt = clock.nowMs(), playing = playing)
+            localPresence = next
+            updateParty { it.copy(presence = it.presence + (party.memberId to next)) }
+            runCatching { channel?.send("status", encodePresence(next)) }
         }
     }
 

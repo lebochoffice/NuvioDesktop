@@ -34,7 +34,9 @@ class FakeHls {
   destroy() { this.destroyed = true; this.source = null; }
   emit(event, data) { this.listeners.get(event)?.(event, data); }
 }
-async function harness({debug = false, guestControl = false, guestJoin = false, rpc = null, path = '/'} = {}) {
+// autoHost: stored preference ('0'/'1'); null = first visit (default on). The
+// existing tests keep the manual flow, so the default here is a stored 'off'.
+async function harness({debug = false, guestControl = false, guestJoin = false, rpc = null, path = '/', autoHost = false} = {}) {
   const elements = new Map(), storageWrites = [], sent = [];
   let clock = 0, tick = () => {};
   const get = id => { if (!elements.has(id)) elements.set(id, new Element()); return elements.get(id); };
@@ -73,6 +75,7 @@ async function harness({debug = false, guestControl = false, guestJoin = false, 
     document: {getElementById: get, createElement: () => new Element()}, location: {pathname: path, origin: 'https://watch.example.test'},
     window: {addEventListener: (event, callback) => windowEvents.set(event, callback)},
     sessionStorage: {getItem: key => key === 'nuvio-party-debug' ? (debug ? '1' : null) : 'test-device', setItem: (...args) => storageWrites.push(args)},
+    localStorage: {getItem: key => key === 'nuvio-party-auto-host-stream' && autoHost !== null ? (autoHost ? '1' : '0') : null, setItem: (...args) => storageWrites.push(args)},
     crypto: {randomUUID: () => 'test-id'}, performance: {now: () => clock},
     setInterval: callback => { tick = callback; return 1; }, clearInterval() {}, setTimeout: () => 1,
   });
@@ -454,10 +457,11 @@ test('browser HLS metadata selects only the browser transport while keeping the 
 
 // Simulates the existing Nuvio RPC: confirm stores exactly the sent playback.
 function controllable(h, {confirm = true, hostOnlyAfter = false, hold = false} = {}) {
-  const rpcs = [], sends = [], pending = [];
+  const rpcs = [], sends = [], statuses = [], pending = [];
   h.session.room.memberId = 'guest';
   h.session.room.info.host_only = false;
-  h.session.channel = {send: async message => { sends.push(message); return 'ok'; }};
+  // Informational status/position reports are kept apart from control traffic.
+  h.session.channel = {send: async message => { (message.event === 'status' ? statuses : sends).push(message); return 'ok'; }};
   h.session.client.removeChannel = async () => {};
   h.session.rpc = (name, args) => {
     rpcs.push([name, args]);
@@ -466,7 +470,7 @@ function controllable(h, {confirm = true, hostOnlyAfter = false, hold = false} =
     if (!hold) return Promise.resolve(reply());
     return new Promise(resolve => pending.push(() => resolve(reply())));
   };
-  return {rpcs, sends, release: () => pending.shift()?.()};
+  return {rpcs, sends, statuses, release: () => pending.shift()?.()};
 }
 async function playingGuest(options) {
   const h = await readyGuest(options); h.session.playback = {...playback, paused: false};
@@ -1231,7 +1235,7 @@ const hostOffer = (url, mediaKeyValue = 'movie|tt1||') => ({media_key: mediaKeyV
   filename: 'original.mkv', browser_hls: {url}});
 const enableAuto = h => { h.get('autoHostStream').checked = true; h.get('autoHostStream').fire('change'); };
 
-test('manual mode (default): a host HLS offer needs the play click and never replaces a personal source', async () => {
+test('manual mode (switched off): a host HLS offer needs the play click and never replaces a personal source', async () => {
   const h = await harness();
   assert.equal(h.get('autoHostStream').checked, false);
   h.session.handlers.stream(hostOffer('https://stream.example.test/a.m3u8'));
@@ -1382,4 +1386,97 @@ test('Allein schauen: a renewed host source continues locally at the same positi
   assert.equal(h.player.currentTime, 50); assert.equal(h.sync(), false); assert.equal(h.get('ctlSolo').textContent, 'Zur Party');
   h.session.handlers.media();
   assert.equal(h.get('ctlSolo').textContent, 'Allein schauen'); assert.equal(h.get('ctlSolo').disabled, true);
+});
+
+// --- Settings layout, default automatic host stream, clear HLS reasons, member sync, host exit. Written, not executed here. ---
+test('the automatic-stream setting is a compact switch: the global full-width input rule cannot stretch it', () => {
+  const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
+  const css = readFileSync(new URL('../src/style.css', import.meta.url), 'utf8');
+  assert.match(html, /class="setting-row"[\s\S]*Host-Stream automatisch verwenden[\s\S]*Neue Folgen und freigegebene Streams automatisch laden\.[\s\S]*class="switch"><input id="autoHostStream" type="checkbox" role="switch">/);
+  assert.match(html, /id="autoHostNote"[^>]*>[^<]*IP-Adresse/); // Privacy note outside the narrow row.
+  assert.ok(!html.includes('check-row'));
+  assert.match(css, /\.switch \{[^}]*flex: none; width: 44px/);
+  assert.match(css, /\.switch input \{[^}]*width: 100%; height: 100%; margin: 0; padding: 0; opacity: 0/);
+  assert.match(css, /\.setting-text \{[^}]*min-width: 0/);
+});
+
+test('first visit: automatic host stream is on and loads a compatible source at once; a stored "off" is respected', async () => {
+  const h = await harness({autoHost: null});
+  assert.equal(h.get('autoHostStream').checked, true);
+  h.session.handlers.stream({media_key: 'movie|tt1||', url: 'https://stream.example.test/a.m3u8', stream_type: 'hls'});
+  assert.equal(h.desktopHls().source, 'https://stream.example.test/a.m3u8');
+  assert.match(h.get('message').textContent, /IP-Adresse/); // Transparent about the disclosure.
+  const off = await harness({autoHost: false});
+  assert.equal(off.get('autoHostStream').checked, false);
+  off.session.handlers.stream({media_key: 'movie|tt1||', url: 'https://stream.example.test/a.m3u8', stream_type: 'hls'});
+  assert.equal(off.desktopHls(), null);
+});
+
+test('an addon stream without browser HLS (e.g. "[TB+] …" MKV) is explained, not silently retried', async () => {
+  const h = await harness({autoHost: true});
+  h.session.handlers.stream({media_key: 'movie|tt1||', url: 'https://addon.example.test/resolve/film.mkv', name: '[TB+] LeLibrary 4K · HDR', filename: 'film.mkv'});
+  assert.equal(h.desktopHls(), null); assert.equal(h.get('loadStream').hidden, true);
+  assert.match(h.get('streamInfo').textContent, /integrierten TorBox-Auflösung[\s\S]*„TB\+“ reicht dafür nicht/);
+});
+
+test('browser HLS states from the host are shown separately: preparing, denied, failed, then ready loads automatically', async () => {
+  const h = await harness({autoHost: true});
+  const offer = state => ({media_key: 'movie|tt1||', url: 'https://desktop.example.test/film.mkv', browser_hls: {url: null, state}});
+  h.session.handlers.stream(offer('preparing'));
+  assert.match(h.get('noStream').textContent, /wird am Desktop vorbereitet/); assert.match(h.get('streamInfo').textContent, /wird vorbereitet/);
+  h.session.handlers.stream(offer('denied')); assert.match(h.get('streamInfo').textContent, /Zugriff verweigert/);
+  h.session.handlers.stream(offer('failed')); assert.match(h.get('streamInfo').textContent, /HLS erstellen \/ aktualisieren/);
+  h.session.handlers.stream({media_key: 'movie|tt1||', url: 'https://desktop.example.test/film.mkv', browser_hls: {url: 'https://stream.example.test/ready.m3u8'}});
+  assert.equal(h.desktopHls().source, 'https://stream.example.test/ready.m3u8');
+  h.session.handlers.stream({media_key: 'movie|tt1||', url: 'https://desktop.example.test/film.mkv', browser_hls: {url: null}}); // Older host: no state.
+  assert.match(h.get('streamInfo').textContent, /wird vorbereitet/);
+});
+
+test('member sync: the drawer shows the estimated distance per member; reports of other films or unknown members are ignored', async () => {
+  const h = await playingGuest();
+  h.session.room.memberId = 'guest';
+  h.session.room.members = [{id: 'host', display_name: 'Host'}, {id: 'guest', display_name: 'Ich'}, {id: 'guest2', display_name: 'Ben'}];
+  h.session.playback = {...playback, paused: false, position_ms: 5000, at: 1000};
+  h.session.receive('status', {member_id: 'guest2', status: 'ready', media_key: 'movie|tt1||', position_ms: 9000, position_at: 1000, playing: false});
+  h.session.receive('status', {member_id: 'host', status: 'buffering', media_key: 'movie|tt1||', position_ms: 5000, position_at: 1000, playing: true});
+  h.session.receive('status', {member_id: 'stranger', status: 'ready', media_key: 'movie|tt1||', position_ms: 1, position_at: 1000});
+  const labels = () => h.get('memberList').children.map(item => item.children.at(-1).textContent);
+  assert.deepEqual(labels(), ['Puffert', 'Synchron (+0,0 s)', 'Holt auf (+4,0 s)']);
+  h.session.receive('status', {member_id: 'guest2', status: 'ready', media_key: 'movie|tt9||', position_ms: 9000, position_at: 1000});
+  assert.equal(h.session.memberStatus.has('guest2'), false);
+  assert.equal(h.session.playback.seq, 1); // A report never changes the party state.
+});
+
+test('party ended or host left: the loaded source keeps playing alone, without pretending a party; a removal stops it', async () => {
+  const h = await playingGuest(), instance = h.source().instance;
+  h.session.handlers.closed('ended'); h.session.handlers.ended('Die Party wurde beendet.', 'ended');
+  assert.equal(h.player.paused, false); assert.equal(h.source().active, true); assert.equal(instance.destroyed, undefined);
+  assert.equal(h.get('syncChip').textContent, 'Allein'); assert.equal(h.get('connection').textContent, 'Nicht verbunden');
+  assert.match(h.get('message').textContent, /lokal weiter[\s\S]*keine gemeinsame Party mehr/);
+  h.session.room = null;
+  h.get('ctlSolo').fire('click'); assert.match(h.get('message').textContent, /Party ist beendet/);
+  const r = await playingGuest(), personal = r.source().instance;
+  r.session.handlers.closed('removed'); r.session.handlers.ended('Deine Mitgliedschaft in der Party wurde entfernt.', 'removed');
+  assert.equal(personal.destroyed, true); assert.equal(r.player.paused, true);
+});
+
+test('host change keeps a loaded host source locally; an explicit revocation still stops it', async () => {
+  const h = await harness({autoHost: true}); h.session.playback = {...playback, paused: false};
+  h.session.handlers.stream({media_key: 'movie|tt1||', url: 'https://stream.example.test/a.m3u8', stream_type: 'hls'}); h.metadata(); await settlePlayback();
+  const instance = h.desktopHls();
+  h.session.handlers.stream(null, 'host_changed');
+  assert.equal(h.desktopHls(), instance); assert.equal(h.player.paused, false); assert.equal(h.get('syncChip').textContent, 'Allein');
+  h.session.handlers.stream(null);
+  assert.equal(instance.destroyed, true); assert.equal(h.player.paused, true);
+});
+
+test('the periodic position report is a status event only, about every 10 s, and never a control message', async () => {
+  const h = await playingGuest(), c = controllable(h);
+  h.tick();
+  assert.equal(c.statuses.length, 1); assert.equal(c.sends.length, 0);
+  const report = c.statuses[0].payload;
+  assert.equal(report.position_ms, h.player.currentTime * 1000); assert.equal(report.playing, true); assert.equal(report.media_key, 'movie|tt1||');
+  h.tick(); h.advance(5000); h.tick(); assert.equal(c.statuses.length, 1); // Not more often than every 10 s.
+  h.advance(5000); h.tick(); assert.equal(c.statuses.length, 2);
+  assert.ok(!JSON.stringify(c.statuses).includes('INTEGRATION_PRIVATE_SENTINEL'));
 });

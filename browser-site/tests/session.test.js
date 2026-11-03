@@ -652,3 +652,41 @@ test('a rejected command with a newer host revision fetches that revision instea
   assert.equal(entry.status, 'rejected');
   assert.equal(requests(), r + 1); assert.equal(heartbeats(), h + 1);
 });
+
+// --- Position reports and end reasons. Written, not executed here. ---
+test('position reports ride on the status event with allowlisted numbers only and never change playback', async t => {
+  const f = fixture(); t.after(() => f.session.close());
+  await f.session.join('UXZ83H', 'Guest'); await f.connect();
+  f.session.positionProvider = () => ({position_ms: 12345.6, playing: true, url: 'https://secret.example.test/x'});
+  await f.session.reportPosition();
+  const report = f.messages.filter(m => m.event === 'status').at(-1).payload;
+  assert.equal(report.position_ms, 12346); assert.equal(report.playing, true); assert.ok(Number.isSafeInteger(report.position_at));
+  assert.ok(!JSON.stringify(report).includes('secret'));
+  await f.session.sendPresence('ready'); assert.equal(f.tracks.at(-1).position_ms, 12346); // Presence carries it too.
+  f.session.positionProvider = () => null; await f.session.reportPosition(); // Nothing loaded: no report.
+  assert.equal(f.messages.filter(m => m.event === 'status').at(-1).payload.status, 'ready');
+  f.emit('status', {member_id: 'host', status: 'ready', media_key: 'movie|tt1||', position_ms: 99999, position_at: 1, playing: true, seq: 99, paused: true});
+  assert.equal(f.session.playback.seq, 2); assert.equal(f.session.memberStatus.get('host').position_ms, 99999);
+  assert.ok(!('seq' in f.session.memberStatus.get('host')));
+});
+
+test('end reasons: a host change emits stream(null, "host_changed"); removal and party end are distinguished', async t => {
+  const streams = [], ends = [], closes = [];
+  const f = fixture({stream: (s, reason) => streams.push([s, reason]), ended: (m, reason) => ends.push(reason), closed: reason => closes.push(reason)});
+  t.after(() => f.session.close());
+  await f.session.join('UXZ83H', 'Guest');
+  f.client.rpc = async () => ({data: {...snapshot(), party: {...snapshot().party, host_member_id: 'host2', playback: {...playback, seq: 0, member_id: 'host2'}}}});
+  await f.session.refresh();
+  assert.deepEqual(streams.at(-1), [null, 'host_changed']);
+  f.client.rpc = async () => ({data: {error: 'removed'}});
+  await f.session.refresh();
+  assert.deepEqual([closes.at(-1), ends.at(-1)], ['removed', 'removed']);
+  const g = fixture({ended: (m, reason) => ends.push(reason), closed: reason => closes.push(reason)}); t.after(() => g.session.close());
+  await g.session.join('UXZ83H', 'Guest');
+  g.client.rpc = async () => ({data: {members: []}}); // No party in the snapshot: ended.
+  await g.session.refresh();
+  assert.deepEqual([closes.at(-1), ends.at(-1)], ['ended', 'ended']);
+  const h = fixture({closed: reason => closes.push(reason)}); t.after(() => h.session.close());
+  await h.session.join('UXZ83H', 'Guest'); await h.session.close();
+  assert.equal(closes.at(-1), null); // An explicit leave carries no end reason.
+});

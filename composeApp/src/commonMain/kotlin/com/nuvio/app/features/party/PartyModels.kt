@@ -48,6 +48,9 @@ data class PartyBrowserHls(
     // Null means preparation unavailable/pending, never "use the Desktop URL".
     val url: String? = null,
     val headers: Map<String, String> = emptyMap(),
+    // Optional, for browsers: "preparing", "denied" or "failed" while url is
+    // null. Older browsers ignore it and keep showing "pending".
+    val state: String? = null,
 )
 
 @Serializable
@@ -168,6 +171,11 @@ data class PartyPresence(
     @SerialName("behind_ms") val behindMs: Long? = null,
     // Set by a host that sequences guest commands (PartyCommands.PROTOCOL).
     val commands: Int? = null,
+    // Optional position report (fork, informational only, never a command):
+    // player position at server time positionAt and whether it was playing.
+    @SerialName("position_ms") val positionMs: Long? = null,
+    @SerialName("position_at") val positionAt: Long? = null,
+    val playing: Boolean? = null,
 )
 
 @Serializable

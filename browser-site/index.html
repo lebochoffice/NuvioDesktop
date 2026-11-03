@@ -122,7 +122,11 @@
     <section class="drawer-block"><h4>Teilnehmer</h4><ul id="memberList" class="members"></ul></section>
     <details id="chatPanel" class="drawer-block"><summary>Chat</summary><div id="chatLog" class="chat" aria-live="polite"></div><form id="chatForm" class="chat-form"><input id="chatText" maxlength="500" placeholder="Nachricht schreiben …" aria-label="Chatnachricht" required><button type="submit" class="btn primary small">Senden</button></form></details>
     <details class="drawer-block"><summary>Technik</summary>
-      <label class="check-row small"><input id="autoHostStream" type="checkbox"> <span>Host-Stream automatisch verwenden: lädt jede vom Host freigegebene Quelle ohne weiteren Klick (auch neue Folgen) und ersetzt dabei eine eigene HLS-Quelle. Dabei wird deine IP-Adresse an den Medienanbieter übertragen.</span></label>
+      <div class="setting-row">
+        <label class="setting-text" for="autoHostStream"><span class="setting-title">Host-Stream automatisch verwenden</span><span class="setting-desc">Neue Folgen und freigegebene Streams automatisch laden.</span></label>
+        <span class="switch"><input id="autoHostStream" type="checkbox" role="switch"><span class="switch-track" aria-hidden="true"></span></span>
+      </div>
+      <p id="autoHostNote" class="muted small setting-note">Beim Laden erhält der Anbieter der Quelle deine IP-Adresse, wie bei einem manuellen Start. Eine eigene HLS-Quelle wird dabei ersetzt.</p>
       <p id="streamInfo" class="muted small">Nutze eine Desktop-Freigabe („Share my stream“) oder deine eigene zulässige HLS-Quelle (Beta).</p>
       <details id="personalHlsPanel" class="nested">
         <summary>Eigene HLS-URL (Beta)</summary>

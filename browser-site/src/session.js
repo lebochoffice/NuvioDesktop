@@ -53,6 +53,8 @@ export class PartySession {
     this.closing = null;
     this.hostCommands = false; this.commands = new Map(); this.latestCommand = null;
     this.commandTimers = new Set(); this.ackTimeoutMs = ACK_TIMEOUT_MS;
+    // Latest informational status/position report per member (display only).
+    this.memberStatus = new Map(); this.positionProvider = null;
     this.reconnectTimer = null; this.reconnectAttempts = 0; this.reconnecting = null; this.rejoinGraceMs = REJOIN_GRACE_MS; this.reconnectBaseMs = 1000;
     // Local, allowlisted telemetry only: never retain payloads, identities or URLs.
     this.diagnostics = {connection: 'CLOSED', realtimeStates: 0, snapshotStates: 0,
@@ -234,7 +236,7 @@ export class PartySession {
   }
 
   rpc(name, args) { return callRpc(this.client, name, args); }
-  emit(name, value) { this.handlers[name]?.(value); }
+  emit(name, ...values) { this.handlers[name]?.(...values); }
   now() { return Date.now() + this.clockOffset; }
   // allowAnonymous is only passed by builds whose backend authorizes anonymous
   // Supabase members server-side; the server remains the authority.
@@ -353,6 +355,7 @@ export class PartySession {
     // Only the current host's status announces the sequencer capability.
     if (event === 'status') {
       if (payload.member_id === this.room.info.host_member_id) this.hostCommands = payload.commands === COMMAND_PROTOCOL;
+      this.noteMemberStatus(payload);
       return;
     }
     if (event === 'stream' && payload.member_id === this.room.info.host_member_id) this.emit('stream', payload.stream ?? null);
@@ -399,7 +402,7 @@ export class PartySession {
     try {
       const result = await this.rpc('watch_party_heartbeat', {p_party_id: room.info.id, p_device_id: this.deviceId});
       if (room !== this.room) return;
-      if (!result?.party) return await this.finish('Die Party wurde beendet.');
+      if (!result?.party) return await this.finish('Die Party wurde beendet.', 'ended');
       const changed = mediaKey(room.info.media) !== mediaKey(result.party.media);
       const hostChanged = room.info.host_member_id !== result.party.host_member_id;
       room.info = result.party; room.members = result.members || [];
@@ -409,17 +412,21 @@ export class PartySession {
       // New epoch: commands for the previous host or film never become valid.
       if (hostChanged) this.hostCommands = false;
       if (changed || hostChanged) this.dropCommands('stale_epoch');
+      if (changed) { this.memberStatus.clear(); this.emit('members', this.memberStatus); }
       if (changed) { this.presence = {status: 'browsing'}; this.emit('media', room.info.media); }
-      if (changed || hostChanged) this.emit('stream', null);
+      // A host change is not a revocation by the sharing host; main decides
+      // whether an already loaded source may continue locally.
+      if (changed || hostChanged) this.emit('stream', null, changed ? 'media_changed' : 'host_changed');
       if (room.info.host_member_id === room.memberId) {
         // This guest cannot provide media/coordinator duties if a backend promotes it.
-        return await this.finish('Der Desktop-Host hat die Party verlassen. Bitte eine neue Desktop-Party öffnen.');
+        return await this.finish('Der Desktop-Host hat die Party verlassen. Bitte eine neue Desktop-Party öffnen.', 'host_left');
       }
       this.emit('room', room); this.acceptPlayback(result.party.playback, 'snapshot');
       if (changed || hostChanged) { await this.sendPresence(); await this.requestState(); }
     } catch (e) {
       if (room !== this.room) return;
-      if (['not_member', 'removed', 'party_ended', 'party_not_found', 'unavailable'].includes(e.code)) await this.finish('Die Party ist beendet oder deine Mitgliedschaft wurde entfernt.');
+      if (['not_member', 'removed'].includes(e.code)) await this.finish('Deine Mitgliedschaft in der Party wurde entfernt.', 'removed');
+      else if (['party_ended', 'party_not_found', 'unavailable'].includes(e.code)) await this.finish('Die Party ist beendet.', 'ended');
       else this.emit('error', e);
     } finally { if (this.refreshBusy === room) this.refreshBusy = null; }
   }
@@ -430,10 +437,33 @@ export class PartySession {
       if (room && room === this.room && Number.isFinite(time)) this.clockOffset = time - (sent + Date.now()) / 2;
     } catch (e) { if (room === this.room) this.emit('error', new Error('Serverzeit nicht aktualisierbar; Synchronisierung kann abweichen.')); }
   }
+  // Allowlisted numbers/labels only; a report never changes playback.
+  noteMemberStatus(payload) {
+    const room = this.room, id = String(payload?.member_id ?? '');
+    if (!room || !id || id === room.memberId || !room.members.some(m => m.id === id)) return;
+    if (payload.media_key && payload.media_key !== mediaKey(room.info.media)) { this.memberStatus.delete(id); return; }
+    const number = v => Number.isFinite(v) ? v : undefined;
+    this.memberStatus.set(id, {status: ['browsing', 'loading', 'buffering', 'ready', 'behind'].includes(payload.status) ? payload.status : 'browsing',
+      media_key: payload.media_key, position_ms: number(payload.position_ms), position_at: number(payload.position_at), playing: payload.playing === true});
+    this.emit('members', this.memberStatus);
+  }
+  positionFields() {
+    const position = this.positionProvider?.();
+    if (!position || !Number.isFinite(position.position_ms)) return {};
+    return {position_ms: Math.max(0, Math.round(position.position_ms)), position_at: Math.round(this.now()), playing: position.playing === true};
+  }
+  // Sparse position report (main calls it about every 10 s); status event only.
+  async reportPosition() {
+    if (!this.room || !this.channel) return;
+    const fields = this.positionFields();
+    if (!('position_ms' in fields)) return;
+    const payload = {...this.presence, member_id: this.room.memberId, media_key: mediaKey(this.room.info.media), ...fields};
+    await this.channel.send({type: 'broadcast', event: 'status', payload}).catch(() => {});
+  }
   async sendPresence(status, behindMs) {
     if (!this.room || !this.channel) return;
     if (status) this.presence = {status, ...(behindMs != null ? {behind_ms: behindMs} : {})};
-    const payload = {...this.presence, member_id: this.room.memberId, media_key: mediaKey(this.room.info.media)};
+    const payload = {...this.presence, member_id: this.room.memberId, media_key: mediaKey(this.room.info.media), ...this.positionFields()};
     const tracked = await this.channel.track(payload);
     if (tracked && tracked !== 'ok') throw new Error('Online-Status nicht bestätigt (' + tracked + '). RPC-Beitritt allein stellt keine Realtime-Verbindung her.');
     const sent = await this.channel.send({type: 'broadcast', event: 'status', payload});
@@ -472,19 +502,24 @@ export class PartySession {
     await this.rpc('watch_party_send_message', {p_party_id: room.info.id, p_device_id: this.deviceId, p_body: body, p_client_id: clientId});
     if (room === this.room) await this.loadMessages();
   }
-  async finish(message) {
+  // reason: 'ended' | 'host_left' | 'removed'. Passed to "closed" and "ended"
+  // so the page can keep an already loaded source locally after a party end;
+  // a removal or an explicit leave/join always stops it.
+  async finish(message, reason = 'ended') {
     if (!this.room) return;
+    this.finishReason = reason;
     const closing = this.close(false), gen = this.generation;
+    this.finishReason = null;
     await closing;
     // An explicit close or a newer join supersedes this end notification.
-    if (gen === this.generation && !this.room) this.emit('ended', message);
+    if (gen === this.generation && !this.room) this.emit('ended', message, reason);
   }
   close(callLeave = true) {
     this.generation++; // Also cancel joins still awaiting authentication/RPC.
     if (this.closing) return this.closing;
     const old = this.room, ch = this.channel;
     this.room = null; this.channel = null; this.playback = null;
-    this.hostCommands = false; this.commands.clear(); this.latestCommand = null;
+    this.hostCommands = false; this.commands.clear(); this.latestCommand = null; this.memberStatus.clear();
     this.commandTimers.forEach(clearTimeout); this.commandTimers.clear();
     if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
     this.reconnectAttempts = 0;
@@ -498,7 +533,7 @@ export class PartySession {
       if (ch) await this.client.removeChannel(ch).catch(() => {});
       if (old && callLeave) await this.rpc('watch_party_leave', {p_party_id: old.info.id, p_device_id: this.deviceId}).catch(() => this.emit('error', new Error('Austritt nicht bestätigt; die Mitgliedschaft läuft serverseitig aus.')));
     }).finally(() => { this.closing = null; });
-    if (old || ch) this.emit('closed');
+    if (old || ch) this.emit('closed', this.finishReason ?? null);
     return this.closing;
   }
 }

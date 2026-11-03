@@ -229,7 +229,13 @@ internal fun PlayerScreenRuntime.currentPartyStream(): PartyStream? {
         badges = stream.badges,
         browserHls = if (stream.torboxPartyFile != null) {
             val prepared = torboxPartyStream?.takeIf { it.mediaKey == partyKey && torboxPreparedFile == stream.torboxPartyFile }
-            com.nuvio.app.features.party.PartyBrowserHls(url = prepared?.url, headers = prepared?.headers.orEmpty())
+            val state = when {
+                prepared != null -> null
+                torboxPartyPhase == com.nuvio.app.features.debrid.TorboxHlsPhase.Denied -> "denied"
+                torboxPartyPhase == com.nuvio.app.features.debrid.TorboxHlsPhase.Failed -> "failed"
+                else -> "preparing"
+            }
+            com.nuvio.app.features.party.PartyBrowserHls(url = prepared?.url, headers = prepared?.headers.orEmpty(), state = state)
         } else null,
     )
     val accountKey = com.nuvio.app.features.debrid.DebridSettingsRepository.snapshot()
@@ -436,6 +442,7 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
         var awaitingApply: PartyPlayback? = null
         var applyRetries = 0
         var lastStatus: Triple<PartyMemberStatus, String, Long?>? = null
+        var lastPositionReport: TimeMark? = null
         var wasInBackground = false
         var publishedInitial = false
         var seekLeadMs = 0L
@@ -480,6 +487,11 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
             if (party.media.key != partyKey || controller == null || errorMessage != null || awayFromPlayback) {
                 clearPartyNudge()
                 continue
+            }
+            // Sparse, informational position report for the members' sync display.
+            if (initialLoadCompleted && lastPositionReport?.let { it.elapsedNow() < POSITION_REPORT_INTERVAL } != true) {
+                lastPositionReport = clock.markNow()
+                PartyRepository.reportPosition(currentPlaybackPositionMs(), snapshot.isPlaying && !snapshot.isLoading)
             }
             val playback = PartyRepository.playback.value
             if (playback == null) {
@@ -801,6 +813,7 @@ private val NOTICE_DURATION = 3_000.milliseconds
 private val BUFFERING_REPORT_DELAY = 1_000.milliseconds
 private val OUTSIDE_TOGGLE_DELAY = 1_200.milliseconds
 private const val MAX_APPLY_RETRIES = 3
+private val POSITION_REPORT_INTERVAL = 10_000.milliseconds
 private val SEEK_SETTLE = 2_500.milliseconds
 private val CORRECTION_INTERVAL = 500.milliseconds
 private const val MAX_SEEK_LEAD_MS = 3_000L

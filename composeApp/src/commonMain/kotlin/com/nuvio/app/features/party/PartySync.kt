@@ -26,6 +26,11 @@ internal enum class PendingApply {
     Applied,
 }
 
+/** Estimated state of a member relative to the party time (display only). */
+internal enum class MemberSync { Synced, CatchingUp, Buffering, Unsynced, Stale, Unknown }
+
+internal data class MemberSyncInfo(val state: MemberSync, val positionMs: Long? = null, val driftMs: Long? = null)
+
 internal object PartySync {
     const val NUDGE_START_MS = 250L
     const val NUDGE_STOP_MS = 80L
@@ -99,6 +104,60 @@ internal object PartySync {
         isPlaying == pendingPaused -> PendingApply.Waiting
         abs(driftMs) > SEEK_THRESHOLD_MS -> PendingApply.Seeking
         else -> PendingApply.Applied
+    }
+
+    const val REPORT_STALE_MS = 30_000L
+    const val MEMBER_SYNCED_MS = 1_000L
+    const val MEMBER_CATCH_UP_MS = 15_000L
+
+    /**
+     * Same rule as browser-site memberSync(): a report older than 30 s is stale;
+     * buffering/loading wins; "behind" (watching alone or catching up alone) is
+     * unsynced; otherwise the extrapolated position decides.
+     */
+    fun memberSync(presence: PartyPresence?, playback: PartyPlayback?, mediaKey: String, nowMs: Long): MemberSyncInfo {
+        if (presence == null || (presence.mediaKey != null && presence.mediaKey != mediaKey)) return MemberSyncInfo(MemberSync.Unknown)
+        if (presence.status == PartyMemberStatus.Loading || presence.status == PartyMemberStatus.Buffering) return MemberSyncInfo(MemberSync.Buffering)
+        val reported = presence.positionMs
+        val at = presence.positionAt
+        if (reported == null || at == null) {
+            return MemberSyncInfo(if (presence.status == PartyMemberStatus.Behind) MemberSync.Unsynced else MemberSync.Unknown)
+        }
+        if (nowMs - at > REPORT_STALE_MS) return MemberSyncInfo(MemberSync.Stale)
+        val position = reported + if (presence.playing == true) (nowMs - at).coerceAtLeast(0L) else 0L
+        val drift = playback?.let { position - expectedPositionMs(it, nowMs) }
+        val state = when {
+            presence.status == PartyMemberStatus.Behind -> MemberSync.Unsynced
+            drift == null -> MemberSync.Unknown
+            abs(drift) <= MEMBER_SYNCED_MS -> MemberSync.Synced
+            abs(drift) <= MEMBER_CATCH_UP_MS -> MemberSync.CatchingUp
+            else -> MemberSync.Unsynced
+        }
+        return MemberSyncInfo(state, position, drift)
+    }
+
+    fun memberSyncLabel(info: MemberSyncInfo): String {
+        val drift = info.driftMs?.let { " (${formatDrift(it)})" }.orEmpty()
+        return when (info.state) {
+            MemberSync.Synced -> "Synchron$drift"
+            MemberSync.CatchingUp -> "Holt auf$drift"
+            MemberSync.Buffering -> "Puffert"
+            MemberSync.Unsynced -> "Unsynchron$drift"
+            MemberSync.Stale -> "Status veraltet"
+            MemberSync.Unknown -> ""
+        }
+    }
+
+    fun formatDrift(driftMs: Long): String {
+        val sign = if (driftMs < 0) "−" else "+"
+        val ms = abs(driftMs)
+        return if (ms < 60_000L) {
+            val tenths = (ms + 50L) / 100L
+            "$sign${tenths / 10},${tenths % 10} s"
+        } else {
+            val seconds = (ms + 500L) / 1_000L
+            "$sign${seconds / 60}:${(seconds % 60).toString().padStart(2, '0')}"
+        }
     }
 
     fun ownSeek(targetMs: Long, partyPositionMs: Long, behind: Boolean): OwnSeek = when {
