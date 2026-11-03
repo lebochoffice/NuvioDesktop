@@ -403,12 +403,24 @@ const buildPartySwitch = (key, title, description, checked, eventType) => {
 
 // NUVIO_BROWSER_PARTY_BRIDGE_V1: Link to the independently hosted browser guest.
 // v2 key: values stored by older builds (e.g. preview URLs) are ignored.
-const partyBrowserDefaultHost = "https://nuvio-watch-friends.pages.dev";
+const partyBrowserProductionHost = "https://nuvio-watch-friends.pages.dev";
+const partyBrowserAllowedPreviewHost = "https://feature-party-premium-ui.nuvio-watch-friends.pages.dev";
+// The build decides the default (production, or the preview in a test build);
+// any other value from the app is ignored.
+let partyBrowserDefaultHost = partyBrowserProductionHost;
+const setPartyBrowserDefaultHost = origin => {
+  partyBrowserDefaultHost = origin === partyBrowserAllowedPreviewHost ? partyBrowserAllowedPreviewHost : partyBrowserProductionHost;
+};
 const partyBrowserHostStorage = "nuvio-browser-party-host-v2";
 // Cloudflare preview deployments (<hash>.<project>.pages.dev) are never
-// used as invitation targets; only production project hosts.
-const partyBrowserPreviewHost = host => /\.pages\.dev$/i.test(host) && host.split(".").length > 3;
+// used as invitation targets, except the one preview this build
+// was explicitly configured for.
+const partyBrowserPreviewHost = host => /\.pages\.dev$/i.test(host) && host.split(".").length > 3 &&
+  !(partyBrowserDefaultHost === partyBrowserAllowedPreviewHost && `https://${host.toLowerCase()}` === partyBrowserAllowedPreviewHost);
 const partyBrowserHost = () => {
+  // A preview test build always invites to its preview (a stored production
+  // address from earlier must not win); production builds keep the stored host.
+  if (partyBrowserDefaultHost === partyBrowserAllowedPreviewHost) return partyBrowserDefaultHost;
   try {
     const stored = window.localStorage.getItem(partyBrowserHostStorage) || "";
     const host = stored ? new URL(stored).hostname : "";
@@ -417,6 +429,7 @@ const partyBrowserHost = () => {
 };
 
 const buildPartyBrowserShare = party => {
+  setPartyBrowserDefaultHost(String(party.browserOrigin || ""));
   const section = partyElement("div", "party-section");
   section.appendChild(partyElement("p", "party-switch-title", "Watch in Browser"));
   section.appendChild(partyElement("p", "party-note", "TorBox HLS is prepared automatically for files resolved by this Nuvio account. See the source status above; enable the existing Share my stream only after consent. Full account keys are never accepted in the prepared HLS URL. Personal HLS remains a fallback. With Host only off, browser guests can play, pause and seek for everyone."));

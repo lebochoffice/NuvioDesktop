@@ -83,3 +83,25 @@ test('0.1.37: old stored hosts and Cloudflare preview URLs never become invitati
   assert.equal(typed.events.length, 0); // Preview hosts are rejected.
 });
 
+
+// Preview origin only when the build chose it (PartyBrowserConfig). Written, not executed here.
+const decode = f => Buffer.from(f.events.at(-1).type.split(':')[1], 'base64url').toString();
+test('production build: "Watch in Browser" defaults to production and rejects the feature preview host', {skip: !source && 'Separate browser repository: desktop source unavailable'}, () => {
+  const f = setup({code: 'UXZ83H', sharing: false, browserOrigin: 'https://nuvio-watch-friends.pages.dev'});
+  assert.equal(f.input.value, 'https://nuvio-watch-friends.pages.dev');
+  f.button.click(); assert.equal(decode(f), 'https://nuvio-watch-friends.pages.dev/party/UXZ83H');
+  f.input.value = 'https://feature-party-premium-ui.nuvio-watch-friends.pages.dev'; f.button.click();
+  assert.equal(f.events.length, 1); // Preview host refused in a production build.
+});
+test('preview test build: the invite uses exactly the configured preview, even over a stored production host', {skip: !source && 'Separate browser repository: desktop source unavailable'}, () => {
+  const f = setup({code: 'UXZ83H', sharing: false, browserOrigin: 'https://feature-party-premium-ui.nuvio-watch-friends.pages.dev'},
+    {'nuvio-browser-party-host-v2': 'https://nuvio-watch-friends.pages.dev'});
+  assert.equal(f.input.value, 'https://feature-party-premium-ui.nuvio-watch-friends.pages.dev');
+  f.button.click(); assert.equal(decode(f), 'https://feature-party-premium-ui.nuvio-watch-friends.pages.dev/party/UXZ83H');
+  f.input.value = 'https://abc123.nuvio-watch-friends.pages.dev'; f.button.click();
+  assert.equal(f.events.length, 1); // Other preview hosts stay refused.
+});
+test('an unexpected origin from the app falls back to production', {skip: !source && 'Separate browser repository: desktop source unavailable'}, () => {
+  const f = setup({code: 'UXZ83H', sharing: false, browserOrigin: 'https://evil.example'});
+  assert.equal(f.input.value, 'https://nuvio-watch-friends.pages.dev');
+});

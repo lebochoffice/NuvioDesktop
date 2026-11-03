@@ -22,6 +22,8 @@ data class PlayerControlPartyState(
     val hlsAvailable: Boolean = false,
     val hlsBusy: Boolean = false,
     val hlsStatus: String = "",
+    // Default origin of "Watch in Browser" (production, or the preview in a test build).
+    val browserOrigin: String = "",
     val canEnd: Boolean = false,
     val seatsLabel: String = "",
     val maxMembers: Int = 0,

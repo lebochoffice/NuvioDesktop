@@ -206,12 +206,55 @@ internal fun PlayerScreenRuntime.currentPartyMedia(): PartyMedia = PartyMedia(
     ),
 )
 
+/** TorBox file of the current source: its own identity or a unique cloud match. */
+internal val PlayerScreenRuntime.effectiveTorboxFile: com.nuvio.app.features.debrid.TorboxPartyFile?
+    get() = activeStream?.torboxPartyFile ?: torboxMappedFile?.takeIf { torboxMappedFor == torboxMappingKey() }
+
+/** Identity of the addon stream a cloud match was made for (hash + filename + media). */
+internal fun PlayerScreenRuntime.torboxMappingKey(): String? =
+    activeTorrentInfoHash?.takeIf { it.isNotBlank() }?.let { hash -> "$partyKey|${hash.lowercase()}|${activeSourceFilename ?: activeStream?.behaviorHints?.filename.orEmpty()}" }
+
 internal fun PlayerScreenRuntime.currentPartyStream(): PartyStream? {
     val stream = activeStream ?: return null
-    if (stream.torboxPartyFile != null) {
+    val torboxFile = effectiveTorboxFile
+    if (torboxFile != null) {
         if (PartyRepository.state.value.party?.media?.key != partyKey) return null
     }
-    if (!isShareableStreamUrl(activeSourceUrl) || activeSourceAudioUrl != null) return null
+    val accountKey = com.nuvio.app.features.debrid.DebridSettingsRepository.snapshot()
+        .apiKeyFor(com.nuvio.app.features.debrid.DebridProviders.TORBOX_ID)
+    if (torboxFile != null && torboxFile.accountFingerprint != com.nuvio.app.features.debrid.torboxAccountFingerprint(accountKey)) return null
+    val prepared = torboxPartyStream?.takeIf { torboxFile != null && it.mediaKey == partyKey && torboxPreparedFile == torboxFile }
+    val browserHls = if (torboxFile != null) {
+        com.nuvio.app.features.party.PartyBrowserHls(
+            url = prepared?.url,
+            headers = prepared?.headers.orEmpty(),
+            state = if (prepared != null) null else com.nuvio.app.features.debrid.torboxBrowserState(torboxPartyPhase),
+        )
+    } else null
+    // The original cannot be shared (local proxy, separate audio, or a TorBox
+    // download link carrying the account key): share only the prepared,
+    // checked HLS, which desktop guests can play as well. Before it is ready
+    // nothing is shared.
+    val originalShareable = isShareableStreamUrl(activeSourceUrl) && activeSourceAudioUrl == null
+    if (!originalShareable || (accountKey.isNotBlank() && hlsOnlyNeeded(accountKey))) {
+        prepared ?: return null
+        return PartyStream(
+            mediaKey = partyKey,
+            url = prepared.url,
+            headers = prepared.headers,
+            name = stream.name,
+            description = stream.description,
+            addonName = stream.addonName,
+            addonId = stream.addonId,
+            addonLogo = stream.addonLogo,
+            filename = activeSourceFilename ?: stream.behaviorHints.filename,
+            videoSize = stream.behaviorHints.videoSize,
+            bingeGroup = stream.behaviorHints.bingeGroup,
+            streamType = "hls",
+            badges = stream.badges,
+            browserHls = browserHls,
+        ).takeUnless { it.containsAccountKey(accountKey) }
+    }
     val original = PartyStream(
         mediaKey = partyKey,
         url = activeSourceUrl,
@@ -227,23 +270,15 @@ internal fun PlayerScreenRuntime.currentPartyStream(): PartyStream? {
         bingeGroup = stream.behaviorHints.bingeGroup,
         streamType = activeStreamType,
         badges = stream.badges,
-        browserHls = if (stream.torboxPartyFile != null) {
-            val prepared = torboxPartyStream?.takeIf { it.mediaKey == partyKey && torboxPreparedFile == stream.torboxPartyFile }
-            val state = when {
-                prepared != null -> null
-                torboxPartyPhase == com.nuvio.app.features.debrid.TorboxHlsPhase.Denied -> "denied"
-                torboxPartyPhase == com.nuvio.app.features.debrid.TorboxHlsPhase.Failed -> "failed"
-                else -> "preparing"
-            }
-            com.nuvio.app.features.party.PartyBrowserHls(url = prepared?.url, headers = prepared?.headers.orEmpty(), state = state)
-        } else null,
+        browserHls = browserHls,
     )
-    val accountKey = com.nuvio.app.features.debrid.DebridSettingsRepository.snapshot()
-        .apiKeyFor(com.nuvio.app.features.debrid.DebridProviders.TORBOX_ID)
-    if (stream.torboxPartyFile != null && stream.torboxPartyFile.accountFingerprint !=
-        com.nuvio.app.features.debrid.torboxAccountFingerprint(accountKey)) return null
     return original.takeUnless { it.containsAccountKey(accountKey) }
 }
+
+// Same key check as containsAccountKey, applied to the original source only.
+private fun PlayerScreenRuntime.hlsOnlyNeeded(accountKey: String): Boolean =
+    PartyStream(mediaKey = partyKey, url = activeSourceUrl, headers = activeSourceHeaders, responseHeaders = activeSourceResponseHeaders)
+        .containsAccountKey(accountKey)
 
 internal fun PlayerScreenRuntime.partyBaseRate(): Float =
     PartyRepository.playback.value?.rate ?: playbackSnapshot.playbackSpeed
@@ -308,9 +343,22 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
     val key = partyKey
     val sharing = partyState.party?.let { it.isHost && it.sharing } == true
     val sharedStream = if (sharing) currentPartyStream() else null
-    val torboxFile = activeStream?.torboxPartyFile
     val debridSettings by com.nuvio.app.features.debrid.DebridSettingsRepository.uiState.collectAsState()
     val torboxKey = debridSettings.apiKeyFor(com.nuvio.app.features.debrid.DebridProviders.Torbox.id)
+    // Addon stream without TorBox identity: look for exactly one matching file
+    // in the user's own TorBox cloud (by info hash), once per stream. Host only.
+    val mappingKey = if (activeStream?.torboxPartyFile == null && partyState.party?.isHost == true) torboxMappingKey() else null
+    LaunchedEffect(mappingKey, torboxKey) {
+        if (mappingKey == null || torboxKey.isBlank() || torboxMappedFor == mappingKey) return@LaunchedEffect
+        val hash = activeTorrentInfoHash ?: return@LaunchedEffect
+        val filename = activeSourceFilename ?: activeStream?.behaviorHints?.filename
+        val found = try { com.nuvio.app.features.debrid.findTorboxCloudFile(torboxKey, hash, filename) }
+            catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+            catch (_: Exception) { null }
+        torboxMappedFile = found
+        torboxMappedFor = mappingKey
+    }
+    val torboxFile = effectiveTorboxFile
     // torboxPartyRefresh restarts this single producer (button); the previous
     // run is cancelled first, so a click never runs two TorBox sessions at once.
     LaunchedEffect(partyId, key, torboxFile, torboxKey, partyState.party?.isHost, partyState.party?.media?.key, torboxPartyRefresh) {
@@ -324,12 +372,20 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
         var renewals = 0
         // One producer per player/file; cancellation on media, account or party change.
         while (isActive) {
-            val result = com.nuvio.app.features.debrid.prepareTorboxPartyHls(torboxFile, torboxKey)
+            val result = com.nuvio.app.features.debrid.prepareTorboxPartyHls(torboxFile, torboxKey) {
+                torboxPartyPhase = com.nuvio.app.features.debrid.TorboxHlsPhase.Processing
+                torboxPartyStatus = "TorBox verarbeitet den Stream. Die Playlist ist noch nicht fertig; es wird bis zu etwa 10 Minuten geprüft."
+            }
             when (result) {
                 is com.nuvio.app.features.debrid.TorboxPartyHlsResult.Failed -> {
                     torboxPartyStream = null
                     torboxPartyStatus = result.message
-                    torboxPartyPhase = if (result.denied) com.nuvio.app.features.debrid.TorboxHlsPhase.Denied else com.nuvio.app.features.debrid.TorboxHlsPhase.Failed
+                    torboxPartyPhase = when (result.reason) {
+                        com.nuvio.app.features.debrid.TorboxHlsFailure.Denied -> com.nuvio.app.features.debrid.TorboxHlsPhase.Denied
+                        com.nuvio.app.features.debrid.TorboxHlsFailure.Unsupported -> com.nuvio.app.features.debrid.TorboxHlsPhase.Unsupported
+                        com.nuvio.app.features.debrid.TorboxHlsFailure.NotReady -> com.nuvio.app.features.debrid.TorboxHlsPhase.NotReady
+                        com.nuvio.app.features.debrid.TorboxHlsFailure.RequestFailed -> com.nuvio.app.features.debrid.TorboxHlsPhase.Failed
+                    }
                     return@LaunchedEffect
                 }
                 is com.nuvio.app.features.debrid.TorboxPartyHlsResult.Ready -> {
@@ -347,7 +403,7 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
                         if (code == 498) {
                             torboxPartyStream = null
                             torboxPartyStatus = "TorBox: Manifest enthält Account-Zugangsdaten. Browserfreigabe gestoppt."
-                            torboxPartyPhase = com.nuvio.app.features.debrid.TorboxHlsPhase.Denied
+                            torboxPartyPhase = com.nuvio.app.features.debrid.TorboxHlsPhase.Unsupported
                             return@LaunchedEffect
                         }
                         if (code in listOf(401, 403, 404, 410)) break

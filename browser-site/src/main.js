@@ -129,8 +129,10 @@ const session = client ? new PartySession(client, deviceId, {
       $('streamInfo').textContent = !browserPending ? 'Keine aktive Streamfreigabe. Der Desktop-Host muss „Share my stream“ aktivieren.'
         : browserState === 'denied' ? 'Browser-HLS nicht möglich: TorBox hat den Zugriff verweigert (Tarif oder Berechtigung). Eigenen Video-Link verwenden.'
         : browserState === 'failed' ? 'Browser-HLS konnte am Desktop nicht vorbereitet werden. Der Host kann „HLS erstellen / aktualisieren“ drücken, oder du lädst einen eigenen Video-Link.'
+        : browserState === 'unsupported' ? 'Browser-HLS ist für diese Host-Quelle nicht möglich (TorBox stellt sie nicht sicher teilbar bereit). Eigenen Video-Link verwenden.'
+        : browserState === 'processing' ? 'TorBox verarbeitet den Stream noch. Sobald die Playlist fertig ist, startet sie bei automatischem Laden von selbst.'
         : 'Desktop-Quelle freigegeben. Browser-HLS wird vorbereitet; bei automatischem Laden startet sie danach von selbst.';
-      if (browserPending) $('noStream').textContent = browserState === 'preparing' ? 'Browser-HLS wird am Desktop vorbereitet …' : 'Keine abspielbare Browserquelle vom Host.';
+      if (browserPending) $('noStream').textContent = browserState === 'preparing' || browserState === 'processing' ? 'Browser-HLS wird am Desktop vorbereitet …' : 'Keine abspielbare Browserquelle vom Host.';
       return;
     }
     if (stream.media_key !== mediaKey(session.room?.info.media)) return;
@@ -848,9 +850,22 @@ $('playerWrap').addEventListener('keydown', e => {
   else if (e.key === 'm' || e.key === 'M') { player.muted = !player.muted; renderPlayerUi(); }
 });
 window.addEventListener('keydown', e => { if (e.key === 'Escape' && !$('infoDrawer').hidden) closeDrawer(); });
-player.addEventListener('click', () => {
-  if (lastPointerType === 'mouse') togglePlay();
-  else if (controlsShownAtPointer) hideControls(); else revealControls();
+// Mouse: single click = play/pause, double click = fullscreen. The single
+// click waits briefly, so a double click never sends two play/pause commands.
+// Touch keeps tap = show/hide controls (fullscreen via its button).
+const DOUBLE_CLICK_MS = 250;
+let singleClickTimer = null;
+player.addEventListener('click', e => {
+  if (lastPointerType !== 'mouse') { if (controlsShownAtPointer) hideControls(); else revealControls(); return; }
+  if ((e?.detail ?? 1) > 1) return; // Second click of a double click.
+  globalThis.clearTimeout?.(singleClickTimer);
+  singleClickTimer = setTimeout(() => { singleClickTimer = null; togglePlay(); }, DOUBLE_CLICK_MS);
+});
+player.addEventListener('dblclick', e => {
+  if (lastPointerType !== 'mouse') return;
+  e?.preventDefault?.();
+  globalThis.clearTimeout?.(singleClickTimer); singleClickTimer = null;
+  toggleFullscreen();
 });
 for (const event of ['timeupdate', 'play', 'pause', 'durationchange', 'volumechange', 'emptied']) player.addEventListener(event, () => renderPlayerUi());
 // Host-sequenced (Nuvio Desktop fork ≥ 0.1.39): every gesture is one command
@@ -1084,7 +1099,14 @@ async function joinParty({auto = false} = {}) {
     $('joinButton').textContent = 'Party wird betreten …';
     const name = await accountDisplayName(auth.user, profileIndex);
     await session.join(code, name, profileIndex);
-    if (session.room) rememberJoinedParty(code);
+    if (session.room) {
+      rememberJoinedParty(code);
+      // Joined via "/" or a typed code: make the URL /party/<CODE>, so a reload
+      // finds the same party (the code is not secret; no source is added).
+      if (partyCodeFromPath(location.pathname) !== code) {
+        try { globalThis.history?.replaceState?.(null, '', `/party/${code}`); } catch { /* URL unchanged. */ }
+      }
+    }
     status(auto ? 'Party nach dem Neuladen wieder betreten. Host-Freigabe und Party-Zeit werden übernommen …' : 'Beigetreten. Warte auf die Streamfreigabe durch den Desktop-Host.');
   } catch (err) {
     showPanel('join');

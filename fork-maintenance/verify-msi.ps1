@@ -2,7 +2,9 @@
 [CmdletBinding()]
 param(
     [string]$RepoPath = (Split-Path -Parent $PSScriptRoot),
-    [string]$MsiPath
+    [string]$MsiPath,
+    # Test builds only: accept the feature-preview invitation origin.
+    [switch]$AllowPreviewOrigin
 )
 $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path -LiteralPath $RepoPath).Path
@@ -67,6 +69,14 @@ try {
     $reader = New-Object IO.StreamReader($partyClass.Open(), [Text.Encoding]::UTF8)
     try { $partyText = $reader.ReadToEnd() } finally { $reader.Dispose() }
     if (-not $partyText.Contains('https://nuvio-watch-friends.pages.dev')) { throw 'Browser watch party invite origin missing from packaged application' }
+    # The origin actually used for invitations (generated PartyBrowserConfig).
+    $originEntry = $zip.GetEntry('com/nuvio/app/features/party/PartyBrowserConfig.class')
+    if (-not $originEntry) { throw 'PartyBrowserConfig missing from packaged application' }
+    $reader = New-Object IO.StreamReader($originEntry.Open(), [Text.Encoding]::UTF8)
+    try { $originText = $reader.ReadToEnd() } finally { $reader.Dispose() }
+    $previewOrigin = 'https://feature-party-premium-ui.nuvio-watch-friends.pages.dev'
+    $inviteOrigin = if ($originText.Contains($previewOrigin)) { $previewOrigin } elseif ($originText.Contains('https://nuvio-watch-friends.pages.dev')) { 'https://nuvio-watch-friends.pages.dev' } else { throw 'Unknown browser invite origin in PartyBrowserConfig' }
+    if ($inviteOrigin -eq $previewOrigin -and -not $AllowPreviewOrigin) { throw 'Packaged invite origin is the feature preview; only test builds may use it (-AllowPreviewOrigin).' }
     # 0.1.39: the host sequences browser commands (command ID + ack).
     foreach ($entry in @('com/nuvio/app/features/party/PartyCommandLedger.class', 'com/nuvio/app/features/party/PartyCommand.class')) {
         if (-not $zip.GetEntry($entry)) { throw "Guest command sequencer missing from packaged application: $entry" }
@@ -90,7 +100,7 @@ $manifest = [ordered]@{
     file = $msi.Name; bytes = $msi.Length; sha256 = (Get-FileHash -LiteralPath $msi.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
     product = $properties['ProductName']; productVersion = $properties['ProductVersion']; signature = [string](Get-AuthenticodeSignature -LiteralPath $msi.FullName).Status
     appJar = $jars[0].Name; requiredNativeEntries = $required; watchInBrowser = $true; javaRuntimePresent = $true
-    installedOrLaunched = $false; msiInspectedReadOnly = $true; stagedAppInspected = $true; msiJarMetadataMatchesStage = $true; publicBackendConfigured = $true; introDbConfigured = $true; browserInviteOrigin = 'https://nuvio-watch-friends.pages.dev'; guestCommandSequencer = $true; exactPausedSeek = $true; sourceCommit = $env:GITHUB_SHA
+    installedOrLaunched = $false; msiInspectedReadOnly = $true; stagedAppInspected = $true; msiJarMetadataMatchesStage = $true; publicBackendConfigured = $true; introDbConfigured = $true; browserInviteOrigin = $inviteOrigin; guestCommandSequencer = $true; exactPausedSeek = $true; sourceCommit = $env:GITHUB_SHA
 }
 $path = Join-Path $msi.DirectoryName ($msi.BaseName + '-verification.json')
 $manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $path -Encoding utf8

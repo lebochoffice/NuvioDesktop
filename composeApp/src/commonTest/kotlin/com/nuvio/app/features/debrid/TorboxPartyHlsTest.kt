@@ -1,9 +1,11 @@
 package com.nuvio.app.features.debrid
 
+import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.Json
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
 
 class TorboxPartyHlsTest {
     private fun response(url: String) = Json.parseToJsonElement("""{"success":true,"data":{"hls_url":"$url","user_token":"account-secret"}}""")
@@ -30,6 +32,52 @@ class TorboxPartyHlsTest {
         assertEquals("HLS bereit (Share my stream ist aus)", torboxHlsStatusLabel(TorboxHlsPhase.Ready, sharing = false))
         assertEquals("Zugriff verweigert", torboxHlsStatusLabel(TorboxHlsPhase.Denied, sharing = true))
         assertEquals("Link abgelaufen – wird erneuert …", torboxHlsStatusLabel(TorboxHlsPhase.Expired, sharing = true))
-        assertEquals("Fehlgeschlagen", torboxHlsStatusLabel(TorboxHlsPhase.Failed, sharing = false))
+        assertEquals("API-Anfrage fehlgeschlagen", torboxHlsStatusLabel(TorboxHlsPhase.Failed, sharing = false))
+        assertEquals("TorBox verarbeitet den Stream, Playlist noch nicht fertig …", torboxHlsStatusLabel(TorboxHlsPhase.Processing, sharing = true))
+        assertEquals("Playlist nicht rechtzeitig fertig", torboxHlsStatusLabel(TorboxHlsPhase.NotReady, sharing = true))
+        assertEquals("Quelle nicht unterstützt", torboxHlsStatusLabel(TorboxHlsPhase.Unsupported, sharing = true))
+    }
+    @Test fun `createstream results are told apart without guessing fields or keeping values`() {
+        val missing = torboxHlsCandidate(Json.parseToJsonElement("""{"success":true,"data":{"presigned_token":"SECRET_VALUE","user_token":"account-secret","stream_id":1}}"""), "account-secret")
+        assertEquals(TorboxHlsCandidate.Missing(listOf("presigned_token", "stream_id", "user_token")), missing)
+        assertTrue("SECRET_VALUE" !in missing.toString() && "account-secret" !in missing.toString())
+        assertEquals(TorboxHlsCandidate.UnsafeHost("cdn.example.net"), torboxHlsCandidate(response("https://cdn.example.net/a.m3u8"), "account-secret"))
+        assertEquals(TorboxHlsCandidate.ContainsAccountKey, torboxHlsCandidate(response("https://stream.torbox.app/a?token=account-secret"), "account-secret"))
+        assertEquals(TorboxHlsCandidate.Url("https://stream.torbox.app/a.m3u8"), torboxHlsCandidate(response("https://stream.torbox.app/a.m3u8"), "account-secret"))
+        assertEquals(TorboxHlsCandidate.Invalid, torboxHlsCandidate(Json.parseToJsonElement("""{"success":false}"""), "account-secret"))
+    }
+    @Test fun `playlist polling waits for long transcodes but stays bounded`() {
+        assertEquals(2_000L, TORBOX_PLAYLIST_POLL_DELAYS_MS.first())
+        val total = TORBOX_PLAYLIST_POLL_DELAYS_MS.sum()
+        assertTrue(total in 9 * 60_000L..10 * 60_000L + 30_000L, "total=$total")
+        assertTrue(TORBOX_PLAYLIST_POLL_DELAYS_MS.all { it <= 15_000L })
+    }
+    @Test fun `browser state names follow the panel phase`() {
+        assertEquals("preparing", torboxBrowserState(TorboxHlsPhase.Preparing))
+        assertEquals("preparing", torboxBrowserState(TorboxHlsPhase.Expired))
+        assertEquals("processing", torboxBrowserState(TorboxHlsPhase.Processing))
+        assertEquals("denied", torboxBrowserState(TorboxHlsPhase.Denied))
+        assertEquals("failed", torboxBrowserState(TorboxHlsPhase.Failed))
+        assertEquals("failed", torboxBrowserState(TorboxHlsPhase.NotReady))
+        assertEquals("unsupported", torboxBrowserState(TorboxHlsPhase.Unsupported))
+    }
+    private fun cloud(json: String) = Json { ignoreUnknownKeys = true }.decodeFromString<List<TorboxCloudItemDto>>(json)
+    @Test fun `an addon stream maps only to a unique file of the user's own TorBox cloud`() {
+        val items = cloud("""[
+            {"id":11,"hash":"ABCDEF","files":[{"id":0,"name":"Film.2024.2160p.mkv"},{"id":1,"name":"sample.mkv"},{"id":2,"name":"info.nfo"}]},
+            {"id":12,"hash":"123456","files":[{"id":5,"name":"Only.Video.mp4","mimetype":"video/mp4"},{"id":6,"name":"cover.jpg"}]},
+            {"id":13,"hash":"dup","files":[{"id":1,"name":"a.mkv"}]},
+            {"id":14,"hash":"DUP","files":[{"id":1,"name":"a.mkv"}]},
+            {"id":"x","hash":"badid","files":[{"id":1,"name":"a.mkv"}]}
+        ]""")
+        assertEquals(11 to 0, matchTorboxCloudFile(items, "abcdef", "Film.2024.2160p.mkv"))
+        assertEquals(11 to 0, matchTorboxCloudFile(items, "abcdef", "/some/dir/film.2024.2160P.MKV")) // Case and path insensitive.
+        assertNull(matchTorboxCloudFile(items, "abcdef", null)) // Two video files: not unique.
+        assertEquals(12 to 5, matchTorboxCloudFile(items, "123456", null)) // The only video file.
+        assertNull(matchTorboxCloudFile(items, "abcdef", "other.mkv")) // No file with that name.
+        assertNull(matchTorboxCloudFile(items, "dup", "a.mkv")) // Hash not unique.
+        assertNull(matchTorboxCloudFile(items, "badid", "a.mkv")) // No valid id.
+        assertNull(matchTorboxCloudFile(items, "ffff", "a.mkv")) // Not in the cloud.
+        assertNull(matchTorboxCloudFile(items, " ", "a.mkv"))
     }
 }

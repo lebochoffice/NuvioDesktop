@@ -66,6 +66,9 @@ abstract class GenerateRuntimeConfigsTask : DefaultTask() {
     @get:Input
     abstract val tmdbApiKey: Property<String>
 
+    @get:Input
+    abstract val partyBrowserOrigin: Property<String>
+
     @TaskAction
     fun generate() {
         val props = Properties()
@@ -153,6 +156,21 @@ abstract class GenerateRuntimeConfigsTask : DefaultTask() {
                 |
                 |object DiscordConfig {
                 |    const val CLIENT_ID = "${props.getProperty("NUVIO_DISCORD_CLIENT_ID", "1538974392376369212")}" 
+                |}
+                """.trimMargin()
+            )
+        }
+
+        // Browser watch party origin for invitation links; validated at
+        // configuration time (production by default, the preview only on request).
+        outDir.resolve("com/nuvio/app/features/party").apply {
+            mkdirs()
+            resolve("PartyBrowserConfig.kt").writeText(
+                """
+                |package com.nuvio.app.features.party
+                |
+                |object PartyBrowserConfig {
+                |    const val ORIGIN = "${partyBrowserOrigin.get()}"
                 |}
                 """.trimMargin()
             )
@@ -555,6 +573,18 @@ fun runtimeConfigBoolean(key: String, default: Boolean): Boolean =
         else -> default
     }
 
+// Invitation links of the browser watch party. Only these two exact origins
+// are accepted: production (default) and the feature preview for test builds
+// (-Pnuvio.party.browserOrigin=preview or the full preview URL). Anything else
+// fails the build; official releases never pass the property.
+val partyBrowserProductionOrigin = "https://nuvio-watch-friends.pages.dev"
+val partyBrowserPreviewOrigin = "https://feature-party-premium-ui.nuvio-watch-friends.pages.dev"
+val partyBrowserOriginValue: String = when (val requested = providers.gradleProperty("nuvio.party.browserOrigin").orNull?.trim()?.trimEnd('/')) {
+    null, "", "production", partyBrowserProductionOrigin -> partyBrowserProductionOrigin
+    "preview", partyBrowserPreviewOrigin -> partyBrowserPreviewOrigin
+    else -> throw GradleException("nuvio.party.browserOrigin must be 'production', 'preview', $partyBrowserProductionOrigin or $partyBrowserPreviewOrigin (got '$requested').")
+}
+
 val generateRuntimeConfigs = tasks.register<GenerateRuntimeConfigsTask>("generateRuntimeConfigs") {
     outputDir.set(generatedRuntimeConfigDir)
     // NUVIO_BROWSER_PARTY_BRIDGE_V1: optional file must be unset if absent.
@@ -571,6 +601,7 @@ val generateRuntimeConfigs = tasks.register<GenerateRuntimeConfigsTask>("generat
     sentryDsn.set(runtimeConfigValue("SENTRY_DSN"))
     sentryDesktopDsn.set(runtimeConfigValue("SENTRY_DESKTOP_DSN"))
     tmdbApiKey.set(runtimeConfigValue("TMDB_API_KEY"))
+    partyBrowserOrigin.set(partyBrowserOriginValue)
     sentryEnvironment.set(
         when {
             requestedGradleTasks.any { "benchmark" in it } -> "benchmark"

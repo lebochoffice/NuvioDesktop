@@ -818,10 +818,17 @@ fun formatPartyCode(code: String): String =
 /** Browser watch party of this fork (Cloudflare Pages). Opens /party/<CODE>. */
 const val WATCH_PARTY_BROWSER_ORIGIN = "https://nuvio-watch-friends.pages.dev"
 
+/** The feature preview; only selectable at build time (see build.gradle.kts). */
+const val WATCH_PARTY_BROWSER_PREVIEW_ORIGIN = "https://feature-party-premium-ui.nuvio-watch-friends.pages.dev"
+
+/** Origin of this build: production unless a test build chose the preview. */
+val watchPartyBrowserOrigin: String
+    get() = PartyBrowserConfig.ORIGIN.takeIf { it == WATCH_PARTY_BROWSER_PREVIEW_ORIGIN } ?: WATCH_PARTY_BROWSER_ORIGIN
+
 fun partyInviteLink(code: String): String = partyInviteLink(code, ServerConfigurationRepository.active.value.isCustom)
 
-internal fun partyInviteLink(code: String, customBackend: Boolean): String =
-    if (customBackend) "nuvio://party/$code" else "$WATCH_PARTY_BROWSER_ORIGIN/party/$code"
+internal fun partyInviteLink(code: String, customBackend: Boolean, origin: String = watchPartyBrowserOrigin): String =
+    if (customBackend) "nuvio://party/$code" else "$origin/party/$code"
 
 const val PARTY_CODE_LENGTH = 6
 private const val PARTY_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"

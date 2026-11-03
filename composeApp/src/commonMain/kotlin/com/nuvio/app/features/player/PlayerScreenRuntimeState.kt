@@ -292,6 +292,10 @@ internal class PlayerScreenRuntime(
     var torboxPartyStatus by mutableStateOf("")
     var torboxPreparedFile by mutableStateOf<com.nuvio.app.features.debrid.TorboxPartyFile?>(null)
     var torboxPartyPhase by mutableStateOf(com.nuvio.app.features.debrid.TorboxHlsPhase.Unavailable)
+    // TorBox file identity found for an addon stream in the user's own TorBox
+    // cloud (exact info hash + unique file). Null when none or not unique.
+    var torboxMappedFile by mutableStateOf<com.nuvio.app.features.debrid.TorboxPartyFile?>(null)
+    var torboxMappedFor by mutableStateOf<String?>(null)
     // Incremented by "HLS erstellen / aktualisieren": restarts the single producer.
     var torboxPartyRefresh by mutableStateOf(0)
     var partyBehindMs by mutableStateOf<Long?>(null)

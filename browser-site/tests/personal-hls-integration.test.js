@@ -39,7 +39,8 @@ class FakeHls {
 // joined: party code remembered in this tab (reload rejoin); fakeJoin records
 // joins instead of calling the backend and leaves the room empty until then.
 async function harness({debug = false, guestControl = false, guestJoin = false, rpc = null, path = '/', autoHost = false, joined = null, fakeJoin = false} = {}) {
-  const elements = new Map(), storageWrites = [], sent = [];
+  const elements = new Map(), storageWrites = [], sent = [], timers = [], historyCalls = [];
+  const location = {pathname: path, origin: 'https://watch.example.test'};
   let clock = 0, tick = () => {};
   const get = id => { if (!elements.has(id)) elements.set(id, new Element()); return elements.get(id); };
   const player = get('player');
@@ -77,12 +78,14 @@ async function harness({debug = false, guestControl = false, guestJoin = false, 
     ...protocol, ...syncPolicy, PersonalHlsSource, personalHlsUrlProblem, Hls: FakeHls, PartySession: FakeSession,
     createClient: () => client, callRpc: (_client, name, args) => { if (rpc?.[name]) return rpc[name](args); throw Error('Unexpected RPC'); }, URL, Blob,
     env: {VITE_SUPABASE_URL: 'https://backend.example.test', VITE_SUPABASE_ANON_KEY: 'sb_publishable_TEST', ...(guestControl === true ? {VITE_PARTY_GUEST_CONTROL: '1'} : typeof guestControl === 'string' ? {VITE_PARTY_GUEST_CONTROL: guestControl} : {}), ...(guestJoin ? {VITE_PARTY_GUEST_JOIN: '1'} : {})},
-    document: {getElementById: get, createElement: () => new Element()}, location: {pathname: path, origin: 'https://watch.example.test'},
+    document: {getElementById: get, createElement: () => new Element()}, location, history: {replaceState: (_state, _title, url) => { historyCalls.push(url); location.pathname = url; }},
     window: {addEventListener: (event, callback) => windowEvents.set(event, callback)},
     sessionStorage: {getItem: key => key === 'nuvio-party-debug' ? (debug ? '1' : null) : key === 'nuvio-party-joined' ? joined : 'test-device', setItem: (...args) => storageWrites.push(args)},
     localStorage: {getItem: key => key === 'nuvio-party-auto-host-stream' && autoHost !== null ? (autoHost ? '1' : '0') : null, setItem: (...args) => storageWrites.push(args)},
     crypto: {randomUUID: () => 'test-id'}, performance: {now: () => clock},
-    setInterval: callback => { tick = callback; return 1; }, clearInterval() {}, setTimeout: () => 1,
+    // Timeouts are collected and only run via runTimers().
+    setInterval: callback => { tick = callback; return 1; }, clearInterval() {},
+    setTimeout: callback => { timers.push(callback); return timers.length; }, clearTimeout: id => { if (id) timers[id - 1] = null; },
   });
   const code = readFileSync(new URL('../src/main.js', import.meta.url), 'utf8')
     .replace(/^import[\s\S]*?;\r?\n/gm, '').replaceAll('import.meta.env', 'env');
@@ -95,7 +98,8 @@ async function harness({debug = false, guestControl = false, guestJoin = false, 
   const source = () => vm.runInContext('personalHls', context);
   const enter = () => { get('personalHlsUrl').value = privateUrl; get('personalHlsForm').fire('submit'); };
   const metadata = () => { player.readyState = 1; player.duration = 120; player.currentSrc = 'blob:local-test'; player.fire('loadedmetadata'); };
-  return {get, player, session, source, enter, metadata, sent, storageWrites, windowEvents, anonymousSignIns, logins, joins,
+  return {get, player, session, source, enter, metadata, sent, storageWrites, windowEvents, anonymousSignIns, logins, joins, historyCalls,
+    runTimers: () => { const due = timers.splice(0); due.forEach(callback => callback?.()); },
     tick: () => tick(),
     advance: ms => { clock += ms; }, sync: () => vm.runInContext('syncEnabled', context),
     desktopHls: () => vm.runInContext('hls', context), run: code => vm.runInContext(code, context)};
@@ -1540,4 +1544,54 @@ test('Video-Link: its own drawer block with input, "Video laden", status and "Zu
   assert.match(block, /id="personalHlsStatus"/); assert.match(block, /HLS-Playlists \(\.m3u8\) über HTTPS[\s\S]*Keine Webseiten-Links[\s\S]*kein DRM/);
   assert.ok(!html.includes('Eigene HLS-URL (Beta)'));
   assert.ok(html.indexOf('id="personalHlsPanel"') < html.indexOf('<summary>Technik</summary>')); // Not nested in "Technik".
+});
+
+// --- Double click, URL after join, rejoin + host source. Written, not executed here. ---
+test('mouse: a single click toggles play/pause once (after the double-click window); a double click only toggles fullscreen', async () => {
+  const h = await playingGuest(), c = controllable(h, {confirm: false});
+  let fullscreen = 0; h.get('playerWrap').requestFullscreen = () => { fullscreen++; return Promise.resolve(); };
+  h.get('playerWrap').fire('pointerdown', {pointerType: 'mouse', target: {closest: () => null}});
+  h.player.fire('click', {detail: 1}); h.player.fire('click', {detail: 2}); h.player.fire('dblclick');
+  h.runTimers(); await settlePlayback();
+  assert.equal(fullscreen, 1); assert.equal(h.player.paused, false); assert.equal(c.sends.length, 0); // No play/pause command.
+  h.player.fire('click', {detail: 1});
+  assert.equal(h.player.paused, false); // Waits for a possible second click.
+  h.runTimers(); await settlePlayback();
+  assert.equal(h.player.paused, true); assert.equal(c.sends.length, 1); assert.equal(c.sends[0].payload.paused, true);
+});
+
+test('touch: a tap shows or hides the controls and never toggles playback', async () => {
+  const h = await playingGuest(), c = controllable(h, {confirm: false});
+  h.get('playerWrap').fire('pointerdown', {pointerType: 'touch', target: {closest: () => null}});
+  h.player.fire('click', {detail: 1}); h.runTimers(); await settlePlayback();
+  assert.equal(h.player.paused, false); assert.equal(c.sends.length, 0);
+});
+
+test('a manual join on "/" puts /party/<CODE> into the URL, so a reload finds the same party', async () => {
+  const h = await harness({path: '/', rpc: signedIn, joined: '', fakeJoin: true}); await settlePlayback();
+  h.get('partyCode').value = 'UXZ83H';
+  h.get('invitePlay').fire('click'); await settlePlayback();
+  assert.deepEqual(h.historyCalls, ['/party/UXZ83H']); assert.deepEqual(joinedWrites(h), ['UXZ83H']);
+  const again = await harness({path: '/party/UXZ83H', rpc: signedIn, joined: 'UXZ83H', fakeJoin: true}); await settlePlayback();
+  assert.equal(again.joins.length, 1); assert.deepEqual(again.historyCalls, []); // Already on the party URL.
+});
+
+test('after the reload rejoin the host source is loaded automatically again and follows the party time', async () => {
+  const h = await harness({path: '/party/UXZ83H', rpc: signedIn, joined: 'UXZ83H', fakeJoin: true, autoHost: null}); await settlePlayback();
+  assert.equal(h.joins.length, 1);
+  h.session.playback = {...playback, paused: false, position_ms: 42000};
+  h.session.handlers.stream({media_key: 'movie|tt1||', url: 'https://desktop.example.test/film.mkv', browser_hls: {url: 'https://stream.example.test/again.m3u8'}});
+  assert.equal(h.desktopHls().source, 'https://stream.example.test/again.m3u8');
+  h.metadata(); await settlePlayback();
+  assert.equal(h.sync(), true); assert.equal(h.player.currentTime, 42);
+});
+
+test('browser HLS processing and unsupported states are shown separately', async () => {
+  const h = await harness({autoHost: true});
+  const offer = state => ({media_key: 'movie|tt1||', url: 'https://desktop.example.test/film.mkv', browser_hls: {url: null, state}});
+  h.session.handlers.stream(offer('processing'));
+  assert.match(h.get('streamInfo').textContent, /verarbeitet den Stream/); assert.match(h.get('noStream').textContent, /vorbereitet/);
+  h.session.handlers.stream(offer('unsupported'));
+  assert.match(h.get('streamInfo').textContent, /nicht möglich/);
+  assert.equal(h.desktopHls(), null);
 });

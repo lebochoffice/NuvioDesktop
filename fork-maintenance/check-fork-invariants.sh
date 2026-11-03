@@ -27,6 +27,9 @@ need_text composeApp/src/desktopMain/native/windows/player_bridge.cpp 'exact ? "
 need_text composeApp/src/desktopMain/native/windows/player_bridge.cpp 'NativePlayerBridge_seekToExact'
 need_text composeApp/src/commonMain/kotlin/com/nuvio/app/features/player/PlayerScreenRuntimeParty.kt 'controller.seekToExact('
 need_text composeApp/build.gradle.kts 'windowsPlayerBridgeSource.asFile.lastModified() > output.lastModified()'
+# Invitation origin: production by default, the preview only via the checked build property.
+need_text composeApp/build.gradle.kts 'nuvio.party.browserOrigin must be'
+need_text fork-maintenance/verify-msi.ps1 'AllowPreviewOrigin'
 need_text browser-site/src/session.js 'export const COMMAND_PROTOCOL = 1;'
 # TorBox HLS for browser guests.
 need_file composeApp/src/commonMain/kotlin/com/nuvio/app/features/debrid/TorboxPartyHls.kt

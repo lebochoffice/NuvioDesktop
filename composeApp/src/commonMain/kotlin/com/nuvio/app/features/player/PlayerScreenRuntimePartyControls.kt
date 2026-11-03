@@ -210,14 +210,22 @@ internal fun PlayerScreenRuntime.rememberPartyControlsState(): PlayerControlPart
         isHost = party.isHost,
         hostOnly = party.hostOnly,
         sharing = party.sharing,
-        shareNote = if (party.sharing && currentPartyStream() == null) stringResource(Res.string.party_share_unavailable) else torboxPartyStatus,
-        hlsAvailable = party.isHost && !elsewhere && activeStream?.torboxPartyFile != null,
+        // The TorBox status stays visible: "can't be shared" alone hid the reason.
+        shareNote = if (party.sharing && currentPartyStream() == null) {
+            listOf(stringResource(Res.string.party_share_unavailable), torboxPartyStatus).filter { it.isNotBlank() }.joinToString(" ")
+        } else torboxPartyStatus,
+        hlsAvailable = party.isHost && !elsewhere && effectiveTorboxFile != null,
         hlsBusy = torboxPartyPhase == com.nuvio.app.features.debrid.TorboxHlsPhase.Preparing,
+        browserOrigin = com.nuvio.app.features.party.watchPartyBrowserOrigin,
         hlsStatus = when {
             !party.isHost || elsewhere -> ""
-            activeStream?.torboxPartyFile != null -> com.nuvio.app.features.debrid.torboxHlsStatusLabel(torboxPartyPhase, party.sharing)
+            effectiveTorboxFile != null -> com.nuvio.app.features.debrid.torboxHlsStatusLabel(torboxPartyPhase, party.sharing) +
+                if (activeStream?.torboxPartyFile == null) " (Datei per Infohash in deiner TorBox-Cloud gefunden)" else ""
             // A provider name such as "[TB+] …" is no TorBox file identity.
-            party.sharing && activeStream != null -> "Nicht verfügbar: Diese Quelle stammt nicht aus der integrierten TorBox-Auflösung (z. B. ein Addon-Stream). Browser-Gäste erhalten die Originalquelle; für Browser-HLS die Quelle über TorBox-Debrid wählen."
+            party.sharing && activeStream != null -> if (activeTorrentInfoHash.isNullOrBlank())
+                "Nicht verfügbar: Addon-Stream ohne Infohash und ohne TorBox-Dateikennung. Für Browser-HLS die Quelle über die TorBox-Cloud oder TorBox-Debrid wählen."
+            else
+                "Nicht verfügbar: Kein eindeutiger passender Eintrag in deiner TorBox-Cloud (Infohash und Dateiname). Datei zuerst in TorBox hinzufügen oder über die TorBox-Cloud starten."
             else -> ""
         },
         canEnd = party.isHost && party.members.size > 1,
@@ -285,7 +293,7 @@ internal fun PlayerScreenRuntime.handlePartyControlsEvent(type: String, value: D
         // Never changes the sharing consent.
         "partyHlsRefresh" -> {
             val party = PartyRepository.state.value.party
-            if (party?.isHost == true && activeStream?.torboxPartyFile != null &&
+            if (party?.isHost == true && effectiveTorboxFile != null &&
                 torboxPartyPhase != com.nuvio.app.features.debrid.TorboxHlsPhase.Preparing) torboxPartyRefresh += 1
         }
         "partyWatch" -> watchWithParty()
