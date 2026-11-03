@@ -125,7 +125,7 @@ function status(message, error = false) {
   toastTimer = setTimeout(() => { $('message').hidden = true; }, error ? 9000 : 4500);
 }
 function showPanel(name) {
-  for (const panel of ['auth', 'join', 'watch']) $(panel + 'Section').hidden = panel !== name;
+  for (const panel of ['join', 'watch']) $(panel + 'Section').hidden = panel !== name;
   // The invitation card frames both pre-join steps (sign-in and name);
   // the cinema view hides the brand bar.
   $('inviteView').hidden = name === 'watch';
@@ -800,21 +800,6 @@ window.addEventListener('pagehide', () => {
 // a visible fallback solely when the link carries no valid code.
 $('partyCode').value = partyCodeFromPath(location.pathname);
 $('codeFallback').hidden = validCode($('partyCode').value);
-$('authBack').addEventListener('click', () => { pendingJoin = false; showPanel('join'); });
-$('loginForm').addEventListener('submit', async e => {
-  e.preventDefault(); if (!client) return status(configProblem, true);
-  $('loginButton').disabled = true;
-  try {
-    const {data, error} = await client.auth.signInWithPassword({email: $('email').value.trim(), password: $('password').value});
-    if (error) throw error;
-    if (!data.user || data.user.is_anonymous) throw new Error('Ein nicht anonymes Konto ist erforderlich.');
-    showPanel('join'); preview();
-    // Signed in from the invitation: continue straight into the party.
-    if (pendingJoin) { pendingJoin = false; status('Angemeldet. Party wird betreten …'); await joinParty(); }
-    else status('Angemeldet. Gib deinen Namen ein und klicke auf „Jetzt ansehen“.');
-  } catch (err) { status('Anmeldung fehlgeschlagen: ' + friendlyError(err), true); }
-  finally { $('password').value = ''; $('loginButton').disabled = false; }
-});
 function updateInviteLinks() {
   const code = normalizeCode($('partyCode').value), valid = validCode(code);
   $('openInNuvio').hidden = !valid;
@@ -837,12 +822,40 @@ async function preview() {
   }
 }
 $('partyCode').addEventListener('change', preview);
-// Name-only join with an anonymous Supabase identity is OFF unless a build
-// opts in (VITE_PARTY_GUEST_JOIN=1) after the backend has confirmed that its
-// party RPCs/RLS authorize anonymous members. Nuvio Desktop itself requires a
-// real account for parties; without confirmation the account login remains.
-const guestJoinEnabled = import.meta.env.VITE_PARTY_GUEST_JOIN === '1';
-let pendingJoin = false;
+// Sign-in and join are one flow: the existing Nuvio account (Supabase
+// signInWithPassword) is used only when no valid session exists; anonymous
+// sign-in is never used. The display name comes from the account.
+const cleanName = value => {
+  const name = String(value ?? '').trim().replace(/\s+/g, ' ').slice(0, 36);
+  return name && !name.includes('@') ? name : ''; // Never publish an e-mail address.
+};
+// 1. Nuvio profile name (sync_pull_profiles, the same authorized RPC as
+// Desktop), 2. account metadata name, 3. neutral fallback.
+async function accountDisplayName(user, profileIndex) {
+  try {
+    const profiles = await callRpc(client, 'sync_pull_profiles');
+    if (Array.isArray(profiles) && profiles.length) {
+      const sorted = [...profiles].sort((a, b) => (a?.profile_index ?? 0) - (b?.profile_index ?? 0));
+      const profile = (profileIndex != null && sorted.find(item => item?.profile_index === profileIndex)) || sorted[0];
+      const name = cleanName(profile?.name);
+      if (name) return name;
+    }
+  } catch { /* Fall back to account metadata. */ }
+  const metadata = user?.user_metadata || {};
+  for (const key of ['display_name', 'full_name', 'name', 'username', 'preferred_username']) {
+    const name = cleanName(metadata[key]);
+    if (name) return name;
+  }
+  return 'Nuvio-Mitglied';
+}
+const usableSession = auth => !!auth?.user && !auth.user.is_anonymous;
+// Credentials only without a valid session; otherwise just "Jetzt ansehen".
+function renderAuthState(signedIn) {
+  $('credentials').hidden = signedIn;
+  $('accountLine').hidden = !signedIn;
+  $('logoutButton').hidden = !signedIn;
+}
+let joining = false;
 async function joinParty() {
   if (!session) return status(configProblem, true);
   // Already a member (came back via the back arrow): return without re-joining.
@@ -851,37 +864,51 @@ async function joinParty() {
     if (loadedStream && !$('resync').disabled) resyncNow();
     return;
   }
+  if (joining) return; // No double sign-in or join.
   const code = normalizeCode($('partyCode').value);
   if (!validCode(code)) return status('Bitte den sechsstelligen Party-Code aus der Einladung eingeben.', true);
   const rawIndex = $('profileIndex').value.trim();
   const profileIndex = rawIndex === '' ? null : Number(rawIndex);
   if (profileIndex != null && (!Number.isInteger(profileIndex) || profileIndex < 0 || profileIndex > 20)) return status('Ungültiger Profilindex.', true);
-  const name = $('displayName').value.trim().slice(0, 36) || 'Browser-Gast';
-  try { localStorage.setItem('nuvio-party-name', name); } catch { /* Optional convenience only. */ }
+  joining = true;
   $('joinButton').disabled = true;
   try {
-    const {data: {session: auth} = {}} = await client.auth.getSession();
-    if (!auth?.user || (auth.user.is_anonymous && !guestJoinEnabled)) {
-      if (!guestJoinEnabled) {
-        pendingJoin = true; showPanel('auth');
-        status('Bitte einmalig mit deinem Nuvio-Konto anmelden. Danach geht es direkt weiter.');
+    let {data: {session: auth} = {}} = await client.auth.getSession();
+    if (!usableSession(auth)) {
+      renderAuthState(false);
+      const email = $('email').value.trim(), password = $('password').value;
+      if (!email || !password) { status('Bitte mit deinem Nuvio-Konto anmelden: E-Mail und Passwort eingeben.', true); $(email ? 'password' : 'email').focus?.(); return; }
+      $('joinButton').textContent = 'Anmeldung …';
+      const {data, error} = await client.auth.signInWithPassword({email, password});
+      $('password').value = ''; // Never kept or logged.
+      if (error || !usableSession(data?.session ? data.session : {user: data?.user})) {
+        status('Anmeldung fehlgeschlagen. Bitte E-Mail und Passwort deines Nuvio-Kontos prüfen.', true);
         return;
       }
-      status('Gastzugang wird eingerichtet …');
-      const {error} = await client.auth.signInAnonymously();
-      if (error) { pendingJoin = true; showPanel('auth'); status('Gastzugang ist nicht freigegeben. Bitte mit einem Nuvio-Konto anmelden.', true); return; }
+      auth = data.session || {user: data.user};
+      renderAuthState(true);
     }
-    status('Party wird betreten …');
-    await session.join(code, name, profileIndex, {allowAnonymous: guestJoinEnabled});
+    $('joinButton').textContent = 'Party wird betreten …';
+    const name = await accountDisplayName(auth.user, profileIndex);
+    await session.join(code, name, profileIndex);
     status('Beigetreten. Warte auf die Streamfreigabe durch den Desktop-Host.');
-  } catch (err) { showPanel('join'); status('Beitritt fehlgeschlagen: ' + friendlyError(err), true); }
-  finally { $('joinButton').disabled = false; }
+  } catch (err) {
+    showPanel('join');
+    // Expired or revoked session: show the sign-in fields again.
+    if (err?.code === 'PGRST301' || err?.status === 401 || /jwt|expired|not authenticated/i.test(String(err?.message || ''))) {
+      renderAuthState(false); status('Deine Sitzung ist abgelaufen. Bitte erneut mit deinem Nuvio-Konto anmelden.', true);
+    } else status('Beitritt fehlgeschlagen: ' + friendlyError(err), true);
+  }
+  finally { joining = false; $('joinButton').disabled = false; $('joinButton').textContent = session.room ? 'Zurück zur Party' : 'Jetzt ansehen'; }
 }
 $('joinForm').addEventListener('submit', e => { e.preventDefault(); joinParty(); });
-$('invitePlay').addEventListener('click', () => {
-  if (!$('authSection').hidden) { pendingJoin = true; $('email').focus?.(); return; }
-  if (!$('displayName').value.trim()) { $('displayName').focus?.(); status('Gib deinen Namen ein, dann geht es los.'); return; }
-  joinParty();
+$('invitePlay').addEventListener('click', () => joinParty());
+$('passwordToggle').addEventListener('click', () => {
+  const show = $('password').type === 'password';
+  $('password').type = show ? 'text' : 'password';
+  $('passwordToggle').textContent = show ? 'Verbergen' : 'Anzeigen';
+  $('passwordToggle').setAttribute?.('aria-pressed', String(show));
+  $('passwordToggle').setAttribute?.('aria-label', show ? 'Passwort verbergen' : 'Passwort anzeigen');
 });
 $('copyLink').addEventListener('click', () => {
   const code = normalizeCode($('partyCode').value);
@@ -1024,7 +1051,7 @@ function renderSyncDebug() {
 }
 setInterval(() => { applySync(); presence(); renderControlInfo(); renderSyncDebug(); }, 1000);
 $('leaveButton').addEventListener('click', async () => { await session?.close(); showPanel('join'); status('Party verlassen.'); });
-$('logoutButton').addEventListener('click', async () => { await session?.close(); await client?.auth.signOut(); showPanel('auth'); status('Abgemeldet.'); });
+$('logoutButton').addEventListener('click', async () => { await session?.close(); await client?.auth.signOut(); renderAuthState(false); showPanel('join'); status('Abgemeldet.'); });
 $('chatForm').addEventListener('submit', async e => {
   e.preventDefault(); const body = $('chatText').value.trim();
   if (!session?.room || !body) return;
@@ -1039,17 +1066,16 @@ $('chatForm').addEventListener('submit', async e => {
 });
 client?.auth.onAuthStateChange((event, authSession) => {
   // Avoid awaited Supabase calls inside the auth callback (SDK lock).
-  if (event === 'SIGNED_OUT') setTimeout(async () => { await session.close(false); showPanel('auth'); status('Sitzung beendet. Bitte erneut anmelden.'); }, 0);
+  if (event === 'SIGNED_OUT') setTimeout(async () => { await session.close(false); renderAuthState(false); showPanel('join'); status('Sitzung beendet. Bitte erneut mit deinem Nuvio-Konto anmelden.'); }, 0);
 });
 (async () => {
-  if (!client) { showPanel('auth'); $('loginButton').disabled = true; status(configProblem, true); return; }
+  if (!client) { showPanel('join'); $('joinButton').disabled = true; status(configProblem, true); return; }
   try {
-    try { $('displayName').value = localStorage.getItem('nuvio-party-name') || ''; } catch { /* Optional. */ }
-    const {error} = await client.auth.getSession();
+    const {data: {session: auth} = {}, error} = await client.auth.getSession();
     if (error) throw error;
-    // Name + "Jetzt ansehen" first; joinParty() opens the one-time account
-    // step only when no usable session exists.
+    // Valid session: only "Jetzt ansehen". Otherwise e-mail + password inline.
+    renderAuthState(usableSession(auth));
     showPanel('join');
     await preview();
-  } catch (e) { showPanel('auth'); status(friendlyError(e), true); }
+  } catch (e) { renderAuthState(false); showPanel('join'); status(friendlyError(e), true); }
 })();

@@ -57,11 +57,9 @@ try {
   // Invite first: name + "Jetzt ansehen"; the account step opens only without a session.
   assert.equal(await page.locator('#partyCode').inputValue(),'UXZ83H');
   assert.equal(await page.locator('#partyCode').isVisible(), false); // Code comes from the link.
-  await page.locator('#displayName').fill('Smoke-Gast');
-  await page.locator('#joinButton').click();
-  await page.locator('#authSection').waitFor({state:'visible'});
+  assert.equal(await page.locator('#displayName').count(), 0); // No name field any more.
   await page.locator('#email').fill('test@example.invalid'); await page.locator('#password').fill('synthetic-password');
-  await page.locator('#loginButton').click(); // Continues straight into the party.
+  await page.locator('#joinButton').click(); // Sign-in and join in one flow.
   await page.locator('#watchSection').waitFor({state:'visible'});
   await page.waitForFunction(() => document.getElementById('connection').textContent === 'Verbunden');
   assert.ok(requests.some(r => r.name === 'watch_party_join' && r.body.p_code === 'UXZ83H'));

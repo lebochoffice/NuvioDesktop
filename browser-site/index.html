@@ -42,22 +42,18 @@
           <p id="preview" class="notice" role="status"></p>
 
           <div id="joinSection" class="step">
-            <form id="joinForm" class="join-form">
-              <label class="field"><span>Name</span><input required id="displayName" maxlength="36" autocomplete="nickname" enterkeyhint="go" placeholder="Wie sollen dich die anderen sehen?"></label>
+            <!-- One flow: Nuvio sign-in (only without a valid session) + join. -->
+            <form id="joinForm" class="join-form" autocomplete="on">
+              <div id="credentials" class="credentials">
+                <label class="field"><span>E-Mail (Nuvio-Konto)</span><input id="email" type="email" autocomplete="username" inputmode="email" placeholder="name@example.com"></label>
+                <label class="field"><span>Passwort</span><span class="password-wrap"><input id="password" type="password" autocomplete="current-password"><button id="passwordToggle" type="button" class="pw-toggle" aria-label="Passwort anzeigen" aria-pressed="false">Anzeigen</button></span></label>
+              </div>
+              <p id="accountLine" class="account-line" hidden>Angemeldet mit deinem Nuvio-Konto.</p>
               <button type="submit" id="joinButton" class="btn primary large">Jetzt ansehen</button>
               <!-- The code comes from the invitation link; manual entry only as fallback. -->
               <label id="codeFallback" class="field" hidden><span>Party-Code</span><input id="partyCode" maxlength="7" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="z. B. UXZ83H"></label>
               <details class="advanced"><summary>Erweitert</summary><label class="field"><span>Nuvio-Profilindex (optional)</span><input id="profileIndex" type="number" min="0" max="20" placeholder="z. B. 0"></label></details>
             </form>
-          </div>
-
-          <div id="authSection" class="step compact" hidden>
-            <p class="step-title">Einmalig mit Nuvio anmelden</p>
-            <p class="muted small">Diese Party verlangt ein Nuvio-Konto. Die Sitzung bleibt in diesem Browser gespeichert, danach reichen Name und „Jetzt ansehen“.</p>
-            <form id="loginForm" class="stack"><label class="field"><span>E-Mail</span><input required autocomplete="email" id="email" type="email" placeholder="name@example.com"></label>
-              <label class="field"><span>Passwort</span><input required autocomplete="current-password" id="password" type="password"></label>
-              <button id="loginButton" class="btn primary" type="submit">Anmelden und ansehen</button></form>
-            <button type="button" id="authBack" class="linklike">Zurück</button>
           </div>
           <p class="foot-links"><a id="openInNuvio" href="https://nuvio.tv" rel="noopener noreferrer" target="_blank" hidden>In Nuvio öffnen</a><button type="button" id="copyLink" class="linklike">Link kopieren</button><button type="button" id="logoutButton" class="linklike">Abmelden</button></p>
         </div>

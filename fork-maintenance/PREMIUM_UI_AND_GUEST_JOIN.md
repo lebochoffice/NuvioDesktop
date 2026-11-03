@@ -61,6 +61,20 @@ Die Teilnehmerleiste liegt unter dem Player und verkleinert ihn nicht. Bei volle
   Ein separater eigener Server oder ein eigenes Supabase-Projekt kann keine Mitgliedschaft in Nuvio-Parties erteilen und würde Realtime nicht autorisieren; diese Variante ist nicht tragfähig.
 - **Status:** UI vorbereitet; echter passwortloser Beitritt funktioniert **nicht**.
 
+## Entscheidung: Nuvio-Login direkt in der Einladung (kein Gastzugang)
+
+- Kein anonymer Gastzugang und kein eigener Server; das Namensfeld ist entfernt.
+- Die Einladung zeigt ohne gültige Sitzung **E-Mail + Passwort** (mit Anzeigen-Schalter) und einen Button **„Jetzt ansehen“**. Ein Klick (auch auf den Play-Button im Cover) führt `signInWithPassword` und danach `session.join` aus. Ein zweiter Klick ist nicht nötig, doppelte Klicks sind gesperrt.
+- Mit gültiger Sitzung sind die Felder ausgeblendet, „Jetzt ansehen“ tritt sofort bei. Abmelden bleibt möglich.
+- Bei abgelaufener Sitzung (Fehler `PGRST301` bzw. `JWT expired`) oder `SIGNED_OUT` erscheinen die Felder wieder.
+- **Anzeigename:**
+  1. Nuvio-Profilname über `sync_pull_profiles`, dieselbe autorisierte RPC wie am Desktop; ist ein Profilindex gesetzt, dessen Profil, sonst das mit dem niedrigsten Index.
+  2. Sonst ein Name aus den Supabase-Metadaten (`display_name`, `full_name`, `name`, `username`, `preferred_username`).
+  3. Sonst „Nuvio-Mitglied“.
+
+  Werte mit „@“ werden nie verwendet, höchstens 36 Zeichen.
+- `VITE_PARTY_GUEST_JOIN` hat keine Wirkung mehr; der Browser nutzt keine anonyme Anmeldung.
+
 ## Sicherheitsbefund: Streamfreigabe
 
 - **Bestätigt (Code):** Der Desktop sendet ein einziges `stream`-Broadcast an **alle** Kanalmitglieder: Original-URL, Original-Header, Dateiname und zusätzlich `browser_hls`. Browser-Gäste erhalten damit auch die Desktop-Originalquelle (z. B. Debrid-/CDN-Link mit Token) und deren Header, obwohl sie nur HLS nutzen. Der vollständige TorBox-Account-Key wird ausgeschlossen (`containsAccountKey`), zeitlich begrenzte Stream-Tokens aber nicht.

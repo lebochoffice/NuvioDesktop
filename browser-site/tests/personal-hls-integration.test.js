@@ -54,9 +54,17 @@ async function harness({debug = false, guestControl = false, guestJoin = false, 
     sendPresence(...args) { sent.push(args); return Promise.resolve(); }
     requestState() { return Promise.resolve(); }
   }
-  const anonymousSignIns = [];
-  const client = {auth: {onAuthStateChange() {}, getSession: async () => ({data: {session: null}}),
-    signInAnonymously: async () => { anonymousSignIns.push(1); return rpc?.anonymousError ? {error: {message: 'Anonymous sign-ins are disabled'}} : {data: {}}; }}};
+  const anonymousSignIns = [], logins = [];
+  let authSession = rpc?.session ?? null;
+  const client = {auth: {onAuthStateChange() {}, getSession: async () => ({data: {session: authSession}}),
+    signInWithPassword: async ({email, password}) => {
+      logins.push({email, hasPassword: !!password});
+      if (rpc?.loginError) return {data: {user: null, session: null}, error: {message: 'Invalid login credentials'}};
+      authSession = {access_token: 'test', user: {id: 'u1', is_anonymous: false, email, user_metadata: rpc?.metadata || {}}};
+      return {data: {user: authSession.user, session: authSession}, error: null};
+    },
+    signOut: async () => { authSession = null; },
+    signInAnonymously: async () => { anonymousSignIns.push(1); return {data: {}}; }}};
   const windowEvents = new Map();
   const context = vm.createContext({
     ...protocol, ...syncPolicy, PersonalHlsSource, personalHlsUrlProblem, Hls: FakeHls, PartySession: FakeSession,
@@ -77,7 +85,7 @@ async function harness({debug = false, guestControl = false, guestJoin = false, 
   const source = () => vm.runInContext('personalHls', context);
   const enter = () => { get('personalHlsUrl').value = privateUrl; get('personalHlsForm').fire('submit'); };
   const metadata = () => { player.readyState = 1; player.duration = 120; player.currentSrc = 'blob:local-test'; player.fire('loadedmetadata'); };
-  return {get, player, session, source, enter, metadata, sent, storageWrites, windowEvents, anonymousSignIns,
+  return {get, player, session, source, enter, metadata, sent, storageWrites, windowEvents, anonymousSignIns, logins,
     tick: () => tick(),
     advance: ms => { clock += ms; }, sync: () => vm.runInContext('syncEnabled', context),
     desktopHls: () => vm.runInContext('hls', context), run: code => vm.runInContext(code, context)};
@@ -503,7 +511,7 @@ test('playback-rate nudging uses hysteresis instead of flapping every tick', asy
 test('hostOnly=false: browser pause, seek and play become server-confirmed party commands without echo loops', async () => {
   const h = await playingGuest({guestControl: true}), c = controllable(h);
   h.session.handlers.room(h.session.room);
-  assert.match(h.get('controlInfo').textContent, /Gäste dürfen/);
+  assert.match(h.get('controlInfo').textContent, /Play, Pause und Springen.*für alle.*vom Host erlaubt/);
   h.player.fire('pointerdown'); h.player.paused = true; h.player.fire('pause'); await settlePlayback();
   assert.equal(h.sync(), true);
   assert.equal(c.rpcs[0][0], 'watch_party_update');
@@ -674,7 +682,7 @@ const allText = element => [element.textContent || '', ...(element.children || [
 test('invite renders party metadata safely, rejects unsafe images and never shows the stream source', async () => {
   let asked;
   const h = await invite(args => { asked = args; return preview(); });
-  assert.deepEqual(asked, {p_code: '8SZ4CM'});
+  assert.deepEqual({...asked}, {p_code: '8SZ4CM'});
   assert.equal(h.get('inviteHostLine').textContent, 'Alan lädt dich ein'); assert.equal(h.get('inviteTitle').textContent, 'Snowfall');
   assert.equal(h.get('inviteEpisode').textContent, 'S2 E10 · Lehrgeld'); assert.equal(h.get('inviteEpisode').hidden, false);
   assert.equal(h.get('inviteDescription').textContent, '<img src=x onerror=alert(1)>'); // Plain text, never HTML.
@@ -704,30 +712,88 @@ test('invite fallbacks: missing metadata, full party, unknown or ended party and
   assert.match(h.get('preview').textContent, /Party-Code/); assert.equal(h.get('openInNuvio').hidden, true);
 });
 
-test('without guest-join approval, "Jetzt ansehen" asks for the one-time account login instead of faking a guest', async () => {
-  const h = await harness(); h.session.room = null; h.session.join = async () => assert.fail('must not join without a session');
-  h.get('partyCode').value = 'UXZ83H'; h.get('displayName').value = 'Sam';
+// Integrated Nuvio sign-in: e-mail/password only without a valid session.
+async function signedOutInvite(options = {}) {
+  const h = await harness({path: '/party/UXZ83H', ...options}); await settlePlayback();
+  h.session.room = null;
+  return h;
+}
+
+test('no name field: signed-out visitors see e-mail and password; "Jetzt ansehen" signs in and joins in one flow', async () => {
+  const h = await signedOutInvite({rpc: {sync_pull_profiles: () => [{profile_index: 2, name: 'Zweit'}, {profile_index: 1, name: '  Alan  '}]}});
+  assert.equal(h.get('credentials').hidden, false); assert.equal(h.get('accountLine').hidden, true);
+  const joins = []; h.session.join = async (...args) => { joins.push(args); };
+  h.get('email').value = 'friend@example.test'; h.get('password').value = 'secret-pw';
   h.get('joinForm').fire('submit'); await settlePlayback();
+  assert.deepEqual(h.logins.map(l => ({...l})), [{email: 'friend@example.test', hasPassword: true}]);
+  assert.equal(joins.length, 1); assert.deepEqual(joins[0].slice(0, 3), ['UXZ83H', 'Alan', null]); // Lowest profile index.
+  assert.equal(joins[0][3], undefined); // No anonymous option is ever passed.
+  assert.equal(h.get('password').value, ''); // Not kept.
   assert.equal(h.anonymousSignIns.length, 0);
-  assert.equal(h.get('authSection').hidden, false); assert.equal(h.get('joinSection').hidden, true);
-  assert.equal(h.get('inviteView').hidden, false);
-  assert.match(h.get('message').textContent, /einmalig mit deinem Nuvio-Konto/);
+  assert.equal(h.get('credentials').hidden, true); assert.equal(h.get('accountLine').hidden, false);
 });
 
-test('opt-in guest build: name-only join signs in anonymously and lets the server decide; refusal falls back to login', async () => {
-  const h = await harness({guestJoin: true}); const joins = []; h.session.room = null;
-  h.session.join = async (...args) => { joins.push(args); };
-  h.get('partyCode').value = 'UXZ83H'; h.get('displayName').value = '  <b>Sam</b>  ';
+test('an existing session joins directly without credentials; the cover play button uses the same flow', async () => {
+  const session = {user: {id: 'u1', is_anonymous: false, email: 'me@example.test', user_metadata: {}}};
+  const h = await signedOutInvite({rpc: {session}});
+  assert.equal(h.get('credentials').hidden, true); assert.equal(h.get('accountLine').hidden, false);
+  const joins = []; h.session.join = async (...args) => { joins.push(args); };
+  h.get('invitePlay').fire('click'); await settlePlayback();
+  assert.equal(h.logins.length, 0); assert.equal(joins.length, 1);
+  assert.equal(joins[0][1], 'Nuvio-Mitglied'); // No profile, no metadata name → neutral, never the e-mail.
+});
+
+test('wrong password: clear message, no join; missing fields ask for credentials without any request', async () => {
+  const h = await signedOutInvite({rpc: {loginError: true}});
+  h.session.join = async () => assert.fail('must not join after a failed sign-in');
   h.get('joinForm').fire('submit'); await settlePlayback();
-  assert.equal(h.anonymousSignIns.length, 1);
-  assert.deepEqual(joins[0].slice(0, 3), ['UXZ83H', '<b>Sam</b>', null]); // Name is data, rendered as text elsewhere.
-  assert.equal(joins[0][3].allowAnonymous, true);
-  const refused = await harness({guestJoin: true, rpc: {anonymousError: true}});
-  refused.session.room = null; refused.session.join = async () => assert.fail('must not join after a refused anonymous sign-in');
-  refused.get('partyCode').value = 'UXZ83H'; refused.get('displayName').value = 'Sam';
-  refused.get('joinForm').fire('submit'); await settlePlayback();
-  assert.equal(refused.get('authSection').hidden, false);
-  assert.match(refused.get('message').textContent, /nicht freigegeben/);
+  assert.equal(h.logins.length, 0); assert.match(h.get('message').textContent, /E-Mail und Passwort eingeben/);
+  h.get('email').value = 'friend@example.test'; h.get('password').value = 'wrong';
+  h.get('joinForm').fire('submit'); await settlePlayback();
+  assert.equal(h.logins.length, 1); assert.match(h.get('message').textContent, /Anmeldung fehlgeschlagen/);
+  assert.ok(!h.get('message').textContent.includes('wrong')); assert.equal(h.get('password').value, '');
+  assert.equal(h.get('joinButton').disabled, false); assert.equal(h.get('joinButton').textContent, 'Jetzt ansehen');
+});
+
+test('double clicks cannot sign in or join twice', async () => {
+  const h = await signedOutInvite();
+  let release; const joins = [];
+  h.session.join = (...args) => { joins.push(args); return new Promise(resolve => { release = resolve; }); };
+  h.get('email').value = 'friend@example.test'; h.get('password').value = 'pw';
+  h.get('joinForm').fire('submit'); h.get('invitePlay').fire('click'); h.get('joinForm').fire('submit');
+  await settlePlayback();
+  assert.equal(h.logins.length, 1); assert.equal(joins.length, 1); assert.equal(h.get('joinButton').disabled, true);
+  release(); await settlePlayback(); assert.equal(h.get('joinButton').disabled, false);
+});
+
+test('display name: profile name, then account metadata; e-mail addresses are never published', async () => {
+  const pick = async (rpc, user = {}) => {
+    const h = await signedOutInvite({rpc: {session: {user: {id: 'u1', is_anonymous: false, email: 'me@example.test', ...user}}, ...rpc}});
+    let name; h.session.join = async (_code, value) => { name = value; };
+    h.get('joinForm').fire('submit'); await settlePlayback(); return name;
+  };
+  assert.equal(await pick({sync_pull_profiles: () => [{profile_index: 1, name: 'me@example.test'}]}, {user_metadata: {full_name: 'Alan P'}}), 'Alan P');
+  assert.equal(await pick({sync_pull_profiles: () => { throw Error('offline'); }}, {user_metadata: {name: 'friend@mail.test', username: 'Sam'}}), 'Sam');
+  assert.equal(await pick({}, {user_metadata: {display_name: 'x'.repeat(80)}}), 'x'.repeat(36));
+  assert.equal(await pick({}, {user_metadata: {email: 'me@example.test'}}), 'Nuvio-Mitglied');
+});
+
+test('an expired session shows the sign-in fields again; the guest-join flag never signs in anonymously', async () => {
+  const session = {user: {id: 'u1', is_anonymous: false, user_metadata: {}}};
+  const h = await signedOutInvite({rpc: {session}, guestJoin: true});
+  h.session.join = async () => { throw Object.assign(new Error('JWT expired'), {code: 'PGRST301'}); };
+  h.get('joinForm').fire('submit'); await settlePlayback();
+  assert.equal(h.get('credentials').hidden, false); assert.match(h.get('message').textContent, /Sitzung ist abgelaufen/);
+  const anon = await signedOutInvite({rpc: {session: {user: {id: 'a', is_anonymous: true}}}, guestJoin: true});
+  anon.session.join = async () => assert.fail('anonymous sessions must not join');
+  anon.get('joinForm').fire('submit'); await settlePlayback();
+  assert.equal(anon.anonymousSignIns.length, 0); assert.equal(anon.get('credentials').hidden, false);
+});
+
+test('password visibility toggle', async () => {
+  const h = await signedOutInvite(); h.get('password').type = 'password';
+  h.get('passwordToggle').fire('click'); assert.equal(h.get('password').type, 'text'); assert.equal(h.get('passwordToggle').textContent, 'Verbergen');
+  h.get('passwordToggle').fire('click'); assert.equal(h.get('password').type, 'password');
 });
 
 test('participant list renders names as text with host and own badges', async () => {
@@ -777,7 +843,8 @@ test('page markup: no banner headline, no hint bar, no permanent side column; co
   assert.match(html, /<aside id="infoDrawer"[^>]*hidden/);
   for (const id of ['ctlPlay', 'ctlBack10', 'ctlFwd10', 'ctlMute', 'ctlSeek', 'ctlFullscreen', 'ctlSubtitles', 'ctlChat', 'ctlBack', 'syncChip', 'resync', 'membersButton']) assert.match(html, new RegExp(`id="${id}"`));
   assert.match(html, /id="resync"[^>]*aria-label="Party-Zeit aktualisieren"[^>]*title="Party-Zeit aktualisieren"[^>]*disabled><svg/); // Refresh icon.
-  assert.ok(html.indexOf('id="displayName"') < html.indexOf('id="email"')); // Name first, account only on demand.
+  assert.ok(!html.includes('id="displayName"') && !html.includes('id="authSection"') && !html.includes('id="loginButton"'));
+  assert.ok(html.indexOf('id="email"') < html.indexOf('id="password"') && html.indexOf('id="password"') < html.indexOf('id="joinButton"')); // Sign-in inline in the invitation.
 });
 
 test('the party code is read from the link; without one the fallback field and a clear notice appear', async () => {
@@ -787,20 +854,8 @@ test('the party code is read from the link; without one the fallback field and a
   assert.equal(bare.get('codeFallback').hidden, false);
   assert.match(bare.get('preview').textContent, /keinen gültigen Party-Code/);
   bare.session.room = null; bare.session.join = async () => assert.fail('no join without a valid code');
-  bare.get('displayName').value = 'Sam'; bare.get('joinForm').fire('submit'); await settlePlayback();
+  bare.get('joinForm').fire('submit'); await settlePlayback();
   assert.match(bare.get('message').textContent, /Party-Code/);
-});
-
-test('start page shows name + "Jetzt ansehen"; the login opens only after clicking without a session and can be dismissed', async () => {
-  const h = await harness({path: '/party/UXZ83H'}); await settlePlayback();
-  h.session.room = null; h.session.handlers.closed();
-  // Re-run the start logic outcome: name step visible, account step hidden.
-  assert.equal(h.get('joinSection').hidden, false); assert.equal(h.get('authSection').hidden, true);
-  h.get('invitePlay').fire('click'); // Empty name: focus/notice, no join.
-  assert.match(h.get('message').textContent, /Namen/);
-  h.get('displayName').value = 'Sam'; h.get('invitePlay').fire('click'); await settlePlayback();
-  assert.equal(h.get('authSection').hidden, false);
-  h.get('authBack').fire('click'); assert.equal(h.get('joinSection').hidden, false); assert.equal(h.get('authSection').hidden, true);
 });
 
 test('own controls: ±10 s, fullscreen, drawer, participants strip and connection badge', async () => {
@@ -987,6 +1042,6 @@ test('legal footer is gone and the invitation is sized to fit one desktop screen
   assert.match(css, /\.invite-media \{[^}]*height: min\(calc\(min\(780px, 100vw - 32px\) \* 9 \/ 16\), 42vh\)/);
   assert.ok(!/\.(invite|invite-body|step|join-form) \{[^}]*overflow: hidden/.test(css)); // No clipping of the form.
   assert.ok(!/html, body \{[^}]*overflow: hidden/.test(css));
-  for (const id of ['displayName', 'joinButton', 'email', 'password', 'loginButton']) assert.match(html, new RegExp(`id="${id}"`));
+  for (const id of ['email', 'password', 'passwordToggle', 'joinButton']) assert.match(html, new RegExp(`id="${id}"`));
 });
 
