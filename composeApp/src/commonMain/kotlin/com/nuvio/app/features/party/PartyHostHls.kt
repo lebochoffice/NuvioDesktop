@@ -19,7 +19,8 @@ data class PartyHostHls(val url: String, val mediaKey: String, val label: String
 data class PartyHlsSuggestion(val memberId: String, val name: String, val url: String, val mediaKey: String)
 
 internal sealed interface PartyHostHlsCheck {
-    data class Ok(val url: String) : PartyHostHlsCheck
+    /** keyRemoved: the TorBox account key was stripped from the shared address. */
+    data class Ok(val url: String, val keyRemoved: Boolean = false) : PartyHostHlsCheck
     data class Problem(val message: String) : PartyHostHlsCheck
 }
 
@@ -89,14 +90,22 @@ internal suspend fun checkPartyHostHls(
         httpRequestRaw(method = "GET", url = url, headers = emptyMap(), body = "", followRedirects = true, maxResponseBodyBytes = 512 * 1024)
     },
 ): PartyHostHlsCheck {
-    partyHostHlsProblem(value, accountKeys)?.let { return PartyHostHlsCheck.Problem(it) }
-    val url = value.trim()
+    // A TorBox stream link whose key is only the `token` parameter: try it
+    // without the key (never the keyed address); all other checks still apply.
+    val keyFree = accountKeys.firstNotNullOfOrNull { com.nuvio.app.features.debrid.torboxKeyFreeUrl(value.trim(), it) }
+    val url = keyFree ?: value.trim()
+    partyHostHlsProblem(url, accountKeys)?.let { return PartyHostHlsCheck.Problem(it) }
+    // TorBox addresses must stay on TorBox stream hosts, also after redirects.
+    val torbox = com.nuvio.app.features.debrid.isTorboxStreamUrl(url)
     suspend fun load(target: String): Pair<RawHttpResponse?, String?> {
         val response = try { fetch(target) }
             catch (cancelled: CancellationException) { throw cancelled }
             catch (_: Exception) { return null to "Playlist nicht erreichbar. Netzwerk und Gültigkeit des Links prüfen." }
         if (response.url.isNotBlank() && !isPublicHttpsUrl(response.url)) return null to "Die Playlist leitet auf eine nicht öffentliche Adresse weiter."
-        if (response.status in listOf(401, 403)) return null to "Zugriff verweigert (HTTP ${response.status}). Der Link ist abgelaufen oder nur für ein Gerät gültig."
+        if (torbox && !com.nuvio.app.features.debrid.isTorboxStreamUrl(response.url.ifBlank { target })) return null to "Die TorBox-Playlist leitet auf einen Host außerhalb der TorBox-CDNs weiter."
+        if (response.status in listOf(401, 403)) return null to if (keyFree != null)
+            "TorBox liefert die Playlist ohne Account-Key nicht (HTTP ${response.status}). Links mit Account-Key werden nicht geteilt."
+            else "Zugriff verweigert (HTTP ${response.status}). Der Link ist abgelaufen oder nur für ein Gerät gültig."
         if (response.status in listOf(404, 410)) return null to "Playlist nicht gefunden (HTTP ${response.status}). Der Link ist abgelaufen oder falsch."
         if (response.status !in 200..299) return null to "Playlist nicht abrufbar (HTTP ${response.status})."
         if (!response.body.trimStart().startsWith("#EXTM3U")) return null to "Die Adresse liefert keine HLS-Playlist (#EXTM3U fehlt)."
@@ -107,7 +116,7 @@ internal suspend fun checkPartyHostHls(
     if (master == null) return PartyHostHlsCheck.Problem(masterProblem.orEmpty())
     val media = if (master.body.contains("#EXT-X-STREAM-INF")) {
         val variant = firstHlsVariant(master.body, master.url.ifBlank { url })
-            ?.takeIf { isPublicHttpsUrl(it) && partyHostHlsProblem(it, accountKeys) == null }
+            ?.takeIf { isPublicHttpsUrl(it) && partyHostHlsProblem(it, accountKeys) == null && (!torbox || com.nuvio.app.features.debrid.isTorboxStreamUrl(it)) }
             ?: return PartyHostHlsCheck.Problem("Die Master-Playlist nennt keine öffentliche HTTPS-Variante.")
         val (loaded, problem) = load(variant)
         loaded ?: return PartyHostHlsCheck.Problem("Variante: ${problem.orEmpty()}")
@@ -116,7 +125,7 @@ internal suspend fun checkPartyHostHls(
         return PartyHostHlsCheck.Problem("Live- oder unfertige Playlist (kein #EXT-X-ENDLIST). Für die Party sind nur abgeschlossene VOD-Playlists erlaubt.")
     }
     if (!media.body.contains("#EXTINF")) return PartyHostHlsCheck.Problem("Die Playlist enthält keine Segmente.")
-    return PartyHostHlsCheck.Ok(url)
+    return PartyHostHlsCheck.Ok(url, keyRemoved = keyFree != null)
 }
 
 /** Only the host name is shown for a suggestion; the full link may carry tokens. */

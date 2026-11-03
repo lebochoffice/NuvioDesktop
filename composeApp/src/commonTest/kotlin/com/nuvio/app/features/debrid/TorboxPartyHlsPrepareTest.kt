@@ -82,6 +82,18 @@ class TorboxPartyHlsPrepareTest {
     }
 
     @Test
+    fun aCdnStreamIsPreparedAndAnUnsafeRedirectStopsTheShare() = runTest {
+        val cdn = "https://flux-007.wnam.tb-cdn.io/stream/p/0/0/0/0"
+        assertIs<TorboxPartyHlsResult.Ready>(prepare(ok(cdn), listOf(200)))
+        val keyed = prepareTorboxPartyHls(file, key, createStream = { _, _, _ -> ok("$cdn?token=$key") }, probe = { url, _ -> if (key in url) 500 else 200 }, pause = {})
+        assertIs<TorboxPartyHlsResult.Ready>(keyed)
+        assertTrue(key !in keyed.url)
+        val unsafe = prepare(ok(cdn), listOf(TORBOX_PROBE_UNSAFE_HOST)) as TorboxPartyHlsResult.Failed
+        assertEquals(TorboxHlsFailure.Unsupported, unsafe.reason)
+        assertEquals(TorboxHlsFailure.Unsupported, (prepare(ok("https://evil-tb-cdn.io/a"), listOf(200)) as TorboxPartyHlsResult.Failed).reason)
+    }
+
+    @Test
     fun accountChangeAndMissingKeyNeverCallTheApi() = runTest {
         val calls = mutableListOf<String>()
         val other = prepareTorboxPartyHls(file.copy(accountFingerprint = "other"), key,

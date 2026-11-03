@@ -453,7 +453,8 @@ private fun PlayerScreenRuntime.shareHostPartyHls(url: String, label: String) {
             is com.nuvio.app.features.party.PartyHostHlsCheck.Ok -> {
                 hostPartyHls = com.nuvio.app.features.party.PartyHostHls(result.url, mediaKey, label)
                 if (PartyRepository.state.value.party?.sharing != true) PartyRepository.setSharing(true)
-                hostPartyHlsStatus = "Abgeschlossene HLS-Playlist geprüft und an alle Teilnehmer gesendet. Ob jeder Browser sie abspielen darf (CORS, Gerätegrenzen), zeigt erst die Wiedergabe."
+                hostPartyHlsStatus = (if (result.keyRemoved) "TorBox-Link ohne Account-Key geprüft. " else "") +
+                    "Abgeschlossene HLS-Playlist geprüft und an alle Teilnehmer gesendet. Ob jeder Browser sie abspielen darf (CORS, Gerätegrenzen), zeigt erst die Wiedergabe."
             }
         }
     }

@@ -1690,3 +1690,19 @@ test('watching alone keeps a newly loaded personal VOD independent of the party'
   h.runTimers();
   assert.equal(h.sync(), false); assert.equal(h.get('ctlSolo').textContent, 'Zur Party'); // No automatic return.
 });
+
+test('a TorBox CDN browser source loads for guests and is restored by a reconnect without reloading', async () => {
+  const cdn = 'https://flux-007.wnam.tb-cdn.io/stream/p/0/0/0/0';
+  const h = await harness({autoHost: true});
+  h.session.receive('stream', {member_id: 'host', stream: {media_key: 'movie|tt1||', url: cdn, stream_type: 'hls', browser_hls: {url: cdn}}});
+  assert.equal(h.desktopHls().source, cdn);
+  h.metadata(); await settlePlayback();
+  assert.equal(h.sync(), true); assert.equal(h.player.currentTime, 5);
+  const instance = h.desktopHls();
+  h.session.receive('stream', {member_id: 'host', stream: {media_key: 'movie|tt1||', url: cdn, stream_type: 'hls', browser_hls: {url: cdn}}});
+  assert.equal(h.desktopHls(), instance);
+  h.session.receive('stream', {member_id: 'intruder', stream: null}); // Only the host can revoke.
+  assert.equal(instance.destroyed, undefined);
+  h.session.receive('stream', {member_id: 'host', stream: null}); // "Share my stream" off.
+  assert.equal(instance.destroyed, true);
+});

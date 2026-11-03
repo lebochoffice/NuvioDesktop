@@ -69,6 +69,21 @@ class PartyHostHlsTest {
     }
 
     @Test
+    fun aTorBoxLinkWithTheKeyInTokenIsSharedOnlyWithoutTheKeyAndOnlyOnTorBoxHosts() = runTest {
+        val keyed = "https://flux-007.wnam.tb-cdn.io/stream/p/0/0/0/0?token=account-secret"
+        val keyFree = "https://flux-007.wnam.tb-cdn.io/stream/p/0/0/0/0"
+        val fetched = mutableListOf<String>()
+        assertEquals(PartyHostHlsCheck.Ok(keyFree, keyRemoved = true), check(keyed, mapOf(keyFree to response(keyFree, vod)), fetched))
+        assertTrue(fetched.none { "account-secret" in it }) // The keyed address is never requested.
+        val refused = check(keyed, mapOf(keyFree to response(keyFree, vod, status = 401)))
+        assertIs<PartyHostHlsCheck.Problem>(refused)
+        assertTrue("ohne Account-Key" in refused.message && "account-secret" !in refused.message)
+        assertIs<PartyHostHlsCheck.Problem>(check(keyed, mapOf(keyFree to response(keyFree, vod, finalUrl = "https://cdn.example.net/x.m3u8"))))
+        // Outside TorBox the key stays blocked, wherever it is.
+        assertIs<PartyHostHlsCheck.Problem>(check("https://cdn.example.net/a.m3u8?token=account-secret", emptyMap()))
+    }
+
+    @Test
     fun aSuggestionShowsOnlyTheHostName() {
         assertEquals("cdn.example.net", partyHlsDisplayHost("https://cdn.example.net/a.m3u8?token=private"))
         assertEquals("unbekannter Host", partyHlsDisplayHost("not a url"))

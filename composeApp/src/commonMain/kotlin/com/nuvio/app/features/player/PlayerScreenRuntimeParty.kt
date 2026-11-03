@@ -413,7 +413,7 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
                         val code = try { com.nuvio.app.features.debrid.probeTorboxPartyHls(result.url, torboxKey) }
                             catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
                             catch (_: Exception) { 0 }
-                        if (code == 498) {
+                        if (code == 498 || code == com.nuvio.app.features.debrid.TORBOX_PROBE_UNSAFE_HOST) {
                             torboxPartyStream = null
                             torboxPartyStatus = "TorBox: Manifest enthält Account-Zugangsdaten. Browserfreigabe gestoppt."
                             torboxPartyPhase = com.nuvio.app.features.debrid.TorboxHlsPhase.Unsupported

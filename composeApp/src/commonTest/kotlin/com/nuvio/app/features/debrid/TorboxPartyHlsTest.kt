@@ -4,6 +4,7 @@ import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.Json
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -79,6 +80,52 @@ class TorboxPartyHlsTest {
             {"id":"bad","hash":"c","files":[{"id":1,"name":"y.mkv"}]}
         ]"""))
         assertEquals(listOf(TorboxCloudChoice(22, 0, "alpha.bin", null), TorboxCloudChoice(21, 3, "Zeta.S01E02.mkv", 2147483648)), choices)
+    }
+    @Test fun `official TorBox CDN hosts are accepted with exact subdomain boundaries`() {
+        assertTrue(isTorboxStreamHost("flux-007.wnam.tb-cdn.io")) // Live host of the reported failure.
+        for (domain in listOf("tb-cdn.cx", "tb-cdn.io", "tb-cdn.pw", "tb-cdn.sh", "tb-cdn.st", "tb-cdn.to", "tb-cdn.earth", "torbox.app")) {
+            assertTrue(isTorboxStreamHost(domain), domain)
+            assertTrue(isTorboxStreamHost("edge-1.$domain"), domain)
+            assertTrue(isTorboxStreamHost("EDGE-1.${domain.uppercase()}"), domain)
+        }
+        for (host in listOf("evil-tb-cdn.io", "eviltb-cdn.io", "tb-cdn.io.evil.example", "tb-cdn.com", "tb-cdn.co", "torbox.app.evil.example",
+            "xtorbox.app", "flux.tb-cdn.io.", "a..tb-cdn.io", "-a.tb-cdn.io", "a_b.tb-cdn.io", "127.0.0.1", "tb-cdn", "")) {
+            assertFalse(isTorboxStreamHost(host), host)
+        }
+        assertTrue(isTorboxStreamUrl("https://flux-007.wnam.tb-cdn.io/stream/p/0/0/0/0"))
+        for (url in listOf("http://flux-007.wnam.tb-cdn.io/a", "https://user:pw@flux-007.wnam.tb-cdn.io/a", "https://evil-tb-cdn.io/a", "ftp://tb-cdn.io/a")) {
+            assertFalse(isTorboxStreamUrl(url), url)
+        }
+    }
+    @Test fun `a CDN hls url is a candidate and its token key leads only to the key free variant`() {
+        assertEquals(TorboxHlsCandidate.Url("https://flux-007.wnam.tb-cdn.io/stream/p/0/0/0/0"),
+            torboxHlsCandidate(response("https://flux-007.wnam.tb-cdn.io/stream/p/0/0/0/0"), "account-secret"))
+        val keyed = torboxHlsCandidate(response("https://flux-007.wnam.tb-cdn.io/stream/p/0/0/0/0?token=account-secret"), "account-secret")
+        assertIs<TorboxHlsCandidate.KeyOnlyInTokenParameter>(keyed)
+        assertTrue("account-secret" !in keyed.keyFreeUrl && keyed.keyFreeUrl.startsWith("https://flux-007.wnam.tb-cdn.io/"))
+        assertEquals(TorboxHlsCandidate.UnsafeHost("tb-cdn.io.evil.example"), torboxHlsCandidate(response("https://tb-cdn.io.evil.example/a?token=account-secret"), "account-secret"))
+        assertNull(torboxKeyFreeUrl("https://cdn.example.net/a?token=account-secret", "account-secret")) // Only TorBox hosts.
+        assertNull(torboxKeyFreeUrl("https://flux-007.wnam.tb-cdn.io/a?token=other", "account-secret")) // No key, nothing to strip.
+    }
+    private fun page(url: String, body: String, status: Int = 200, finalUrl: String = url) =
+        com.nuvio.app.features.addons.RawHttpResponse(status = status, statusText = "", url = finalUrl, body = body, headers = emptyMap())
+    private val media = "#EXTM3U\n#EXTINF:6.0,\nseg0.ts\n#EXT-X-ENDLIST\n"
+    @Test fun `the probe keeps redirects and variant playlists on TorBox hosts`() = kotlinx.coroutines.test.runTest {
+        val start = "https://flux-007.wnam.tb-cdn.io/stream/p/master.m3u8"
+        val variant = "https://flux-007.wnam.tb-cdn.io/stream/p/720.m3u8"
+        val master = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\n720.m3u8\n"
+        assertEquals(200, probeTorboxPartyHls(start, "account-secret") { if (it == start) page(start, master) else page(variant, media) })
+        assertEquals(TORBOX_PROBE_UNSAFE_HOST, probeTorboxPartyHls(start, "account-secret") { page(it, media, finalUrl = "https://evil.example/m.m3u8") })
+        assertEquals(TORBOX_PROBE_UNSAFE_HOST, probeTorboxPartyHls(start, "account-secret") {
+            page(it, "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\nhttps://evil-tb-cdn.io/720.m3u8\n")
+        })
+        assertEquals(TORBOX_PROBE_UNSAFE_HOST, probeTorboxPartyHls(start, "account-secret") {
+            if (it == start) page(start, master) else page(variant, media, finalUrl = "https://evil.example/720.m3u8")
+        })
+        val fetched = mutableListOf<String>()
+        assertEquals(TORBOX_PROBE_UNSAFE_HOST, probeTorboxPartyHls("https://evil.example/a.m3u8", "account-secret") { fetched += it; page(it, media) })
+        assertEquals(emptyList(), fetched) // A foreign start address is never requested.
+        assertEquals(498, probeTorboxPartyHls(start, "account-secret") { page(it, media.replace("seg0.ts", "seg0.ts?token=account-secret")) })
     }
     private fun cloud(json: String) = Json { ignoreUnknownKeys = true }.decodeFromString<List<TorboxCloudItemDto>>(json)
     @Test fun `an addon stream maps only to a unique file of the user's own TorBox cloud`() {

@@ -43,6 +43,51 @@ internal sealed interface TorboxHlsCandidate {
 private val SAFE_FIELD_NAME = Regex("^[A-Za-z0-9_]{1,40}$")
 private val SAFE_HOST = Regex("^[a-z0-9.-]{1,253}$")
 
+/**
+ * TorBox stream hosts: torbox.app and the CDN domains TorBox documents
+ * (support.torbox.app, "Accessing TorBox with NextDNS"). Exact name or a real
+ * subdomain only; no trailing dot, no lookalikes such as evil-tb-cdn.io or
+ * tb-cdn.io.example.com. Names only, never IP addresses.
+ */
+internal val TORBOX_STREAM_DOMAINS = listOf(
+    "torbox.app", "tb-cdn.cx", "tb-cdn.io", "tb-cdn.pw", "tb-cdn.sh", "tb-cdn.st", "tb-cdn.to", "tb-cdn.earth",
+)
+private val TORBOX_HOST_LABEL = Regex("^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+
+internal fun isTorboxStreamHost(host: String): Boolean {
+    val name = host.lowercase()
+    if (name.length > 253 || name.endsWith(".") || name.split('.').any { !TORBOX_HOST_LABEL.matches(it) }) return false
+    return TORBOX_STREAM_DOMAINS.any { name == it || name.endsWith(".$it") }
+}
+
+/** HTTPS on a TorBox stream host, without credentials; for redirects and variant playlists. */
+internal fun isTorboxStreamUrl(url: String): Boolean = try {
+    val parsed = Url(url)
+    url.startsWith("https://", ignoreCase = true) && parsed.protocol.name == "https" &&
+        parsed.user.isNullOrEmpty() && parsed.password.isNullOrEmpty() && isTorboxStreamHost(parsed.host)
+} catch (_: Exception) { false }
+
+/**
+ * Same address without the account key, if the key appears ONLY as the
+ * `token` query parameter of a TorBox stream URL. Null otherwise. Whether
+ * TorBox serves it without the key is decided by the playlist probe.
+ */
+internal fun torboxKeyFreeUrl(url: String, apiKey: String): String? {
+    if (apiKey.isBlank() || !isTorboxStreamUrl(url)) return null
+    return try {
+        val parsed = Url(url)
+        val path = parsed.encodedPath
+        if (path.contains(apiKey) || path.decodeURLPart().contains(apiKey)) return null
+        if (parsed.parameters.entries().any { (name, values) -> name != "token" && (name.contains(apiKey) || values.any { it.contains(apiKey) }) }) return null
+        if (parsed.parameters.getAll("token")?.any { it.contains(apiKey) } != true) return null
+        URLBuilder(parsed).apply { parameters.remove("token") }.buildString()
+            .takeUnless { it.contains(apiKey) || it.decodeURLPart().contains(apiKey) }
+    } catch (_: Exception) { null }
+}
+
+/** Probe result: a redirect or variant left the TorBox stream hosts. */
+internal const val TORBOX_PROBE_UNSAFE_HOST = 497
+
 // Field names verified against TorBox's public Stream/streamFunctions modules.
 // Never serialize an entire response: user_token may be the account API key.
 internal fun torboxHlsCandidate(body: JsonElement?, apiKey: String): TorboxHlsCandidate {
@@ -57,18 +102,14 @@ internal fun torboxHlsCandidate(body: JsonElement?, apiKey: String): TorboxHlsCa
         val parsed = Url(candidate)
         val host = parsed.host.lowercase()
         if (parsed.protocol.name != "https" || parsed.user != null || parsed.password != null || parsed.fragment.isNotEmpty()) return TorboxHlsCandidate.Invalid
-        // Covers percent-encoded credentials in query/path, not merely raw text.
-        if (!(host == "torbox.app" || host.endsWith(".torbox.app"))) {
+        if (!isTorboxStreamHost(host)) {
             return TorboxHlsCandidate.UnsafeHost(host.takeIf { SAFE_HOST.matches(it) } ?: "unbekannt")
         }
+        // Covers percent-encoded credentials in query/path, not merely raw text.
         if (candidate.contains(apiKey) || parsed.encodedPath.decodeURLPart().contains(apiKey) ||
             parsed.parameters.entries().any { (_, values) -> values.any { it.contains(apiKey) } }) {
-            val inPathOrOtherParameter = parsed.encodedPath.contains(apiKey) || parsed.encodedPath.decodeURLPart().contains(apiKey) ||
-                parsed.parameters.entries().any { (name, values) -> name != "token" && (name.contains(apiKey) || values.any { it.contains(apiKey) }) }
-            if (inPathOrOtherParameter) return TorboxHlsCandidate.ContainsAccountKey
-            val keyFree = URLBuilder(parsed).apply { parameters.remove("token") }.buildString()
-            if (keyFree.contains(apiKey) || keyFree.decodeURLPart().contains(apiKey)) return TorboxHlsCandidate.ContainsAccountKey
-            return TorboxHlsCandidate.KeyOnlyInTokenParameter(keyFree)
+            return torboxKeyFreeUrl(candidate, apiKey)?.let { TorboxHlsCandidate.KeyOnlyInTokenParameter(it) }
+                ?: TorboxHlsCandidate.ContainsAccountKey
         }
         TorboxHlsCandidate.Url(candidate)
     } catch (_: Exception) { TorboxHlsCandidate.Invalid }
@@ -140,6 +181,7 @@ internal suspend fun prepareTorboxPartyHls(
         )
         if (manifest in listOf(401, 403, 410)) return TorboxPartyHlsResult.Failed("TorBox: Streamzugriff verweigert (HTTP $manifest). Account und Mehrgeräteberechtigung prüfen.", TorboxHlsFailure.Denied)
         if (manifest == 498) return TorboxPartyHlsResult.Failed("TorBox: Playlist enthält Account-Zugangsdaten. Aus Sicherheitsgründen nicht geteilt.", TorboxHlsFailure.Unsupported)
+        if (manifest == TORBOX_PROBE_UNSAFE_HOST) return TorboxPartyHlsResult.Failed("TorBox: Weiterleitung oder Variante auf einem Host außerhalb der TorBox-CDNs. Aus Sicherheitsgründen nicht geteilt.", TorboxHlsFailure.Unsupported)
         if (attempt == 0) onProcessing()
         pause(delayMs)
     }
@@ -238,15 +280,27 @@ internal fun torboxBrowserState(phase: TorboxHlsPhase): String = when (phase) {
 }
 
 // Playlist-only probe: no media forwarding, no account key or raw error logging.
-internal suspend fun probeTorboxPartyHls(url: String, accountKey: String? = null): Int {
+internal suspend fun probeTorboxPartyHls(
+    url: String,
+    accountKey: String? = null,
+    fetch: suspend (String) -> com.nuvio.app.features.addons.RawHttpResponse = { target ->
+        httpRequestRaw(method = "GET", url = target, headers = emptyMap(), body = "", followRedirects = true, maxResponseBodyBytes = 512 * 1024)
+    },
+): Int {
     // Follows redirects (TorBox may redirect to its CDN); no headers or account
-    // key are sent, and the final body is still checked for the key.
-    val response = httpRequestRaw(method = "GET", url = url, headers = emptyMap(), body = "", followRedirects = true, maxResponseBodyBytes = 512 * 1024)
+    // key are sent, and the final body is still checked for the key. The start,
+    // every final address and the first variant must stay on TorBox stream hosts.
+    if (!isTorboxStreamUrl(url)) return TORBOX_PROBE_UNSAFE_HOST
+    val response = fetch(url)
+    val finalUrl = response.url.ifBlank { url }
+    if (!isTorboxStreamUrl(finalUrl)) return TORBOX_PROBE_UNSAFE_HOST
     val result = torboxPlaylistStatus(response.status, response.body, accountKey)
     if (result != 200 || !response.body.contains("#EXT-X-STREAM-INF")) return result
     // Master playlist: the first variant must work the same way (and be key free).
-    val variant = com.nuvio.app.features.party.firstHlsVariant(response.body, response.url.ifBlank { url }) ?: return 422
-    val child = httpRequestRaw(method = "GET", url = variant, headers = emptyMap(), body = "", followRedirects = true, maxResponseBodyBytes = 512 * 1024)
+    val variant = com.nuvio.app.features.party.firstHlsVariant(response.body, finalUrl) ?: return 422
+    if (!isTorboxStreamUrl(variant)) return TORBOX_PROBE_UNSAFE_HOST
+    val child = fetch(variant)
+    if (!isTorboxStreamUrl(child.url.ifBlank { variant })) return TORBOX_PROBE_UNSAFE_HOST
     return torboxPlaylistStatus(child.status, child.body, accountKey)
 }
 
