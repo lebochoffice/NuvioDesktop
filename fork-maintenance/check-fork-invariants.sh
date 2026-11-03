@@ -28,6 +28,9 @@ need_file composeApp/src/commonMain/kotlin/com/nuvio/app/features/debrid/TorboxP
 need_text composeApp/src/commonMain/kotlin/com/nuvio/app/features/party/PartyModels.kt '@SerialName("browser_hls")'
 # Intro-skip configuration guard.
 need_text composeApp/build.gradle.kts 'INTRODB_API_URL missing or not https'
+# WebView2 loader guard: SDK path relative to the root, staged runtime checked.
+need_text composeApp/build.gradle.kts '?.let { rootProject.file(it) }'
+need_text composeApp/build.gradle.kts 'WebView2Loader.dll missing from the staged player runtime'
 # Fork updater: only this fork's releases, checksum required.
 need_text composeApp/src/desktopMain/kotlin/com/nuvio/app/features/updater/AppUpdaterPlatform.desktop.kt 'forkReleaseOwner = "lebochoffice"'
 need_text composeApp/src/desktopMain/kotlin/com/nuvio/app/features/updater/AppUpdaterPlatform.desktop.kt 'actual val requiresUpdateChecksum: Boolean = true'

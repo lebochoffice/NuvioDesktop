@@ -736,9 +736,12 @@ val windowsPlayerRuntimeOutput = layout.buildDirectory.dir("native/windows-runti
 if (isWindowsHost) {
     windowsPlayerBridgeOutput.get().asFile.parentFile.mkdirs()
 }
+// A relative SDK path is relative to the repository root. A bare File would
+// resolve against the Gradle daemon's working directory for exists() but
+// against composeApp/ in Copy/Sync, silently dropping WebView2Loader.dll.
 val windowsWebView2Root = providers.gradleProperty("nuvio.webview2.dir").orNull
     ?.takeIf { it.isNotBlank() }
-    ?.let(::File)
+    ?.let { rootProject.file(it) }
     ?: newestDirectory(File(System.getProperty("user.home"), ".nuget/packages/microsoft.web.webview2"))
     ?: File("__missing_webview2__")
 val windowsWebView2IncludeDir = File(windowsWebView2Root, "build/native/include")
@@ -1491,6 +1494,12 @@ tasks.matching { it.name == "packageReleaseMsi" }.configureEach {
         // WebView2Loader.dll and the Windows player cannot start.
         if (isWindowsHost && !windowsWebView2LoaderDll.exists()) {
             throw GradleException("WebView2Loader.dll not found (${windowsWebView2LoaderDll.path}). Install the Microsoft.Web.WebView2 NuGet package or pass -Pnuvio.webview2.dir=<sdk>; the MSI would lack the player runtime.")
+        }
+        // Check what is actually packaged, not only the SDK: an up-to-date
+        // runtime directory from an earlier run may still lack the loader.
+        val stagedLoader = windowsPlayerRuntimeOutput.get().file("WebView2Loader.dll").asFile
+        if (isWindowsHost && !stagedLoader.exists()) {
+            throw GradleException("WebView2Loader.dll missing from the staged player runtime (${stagedLoader.path}); the MSI would not start the Windows player. Re-run with -Pnuvio.webview2.dir=<sdk>.")
         }
     }
     doLast {
