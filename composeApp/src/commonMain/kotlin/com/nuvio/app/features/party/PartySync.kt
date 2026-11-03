@@ -163,11 +163,12 @@ internal object PartySync {
     }
 
     /**
-     * The host confirms its real paused position once per revision when the
-     * player settled (no seek within SEEK_SETTLE, position stable, not
-     * buffering) but stands more than PAUSED_TOLERANCE_MS from the target,
-     * typically a keyframe before it. Not for coordinator waits; bounded, so
-     * no seek or publish loop.
+     * Safety net after a frame-accurate seek: the host confirms its real
+     * paused position once per revision only if an exact seek was already
+     * tried for this revision and the player settled (no seek within
+     * SEEK_SETTLE, position stable, not buffering) but still stands more than
+     * PAUSED_TOLERANCE_MS from the target (keyframe-only fallback, imprecise
+     * stream). Not for coordinator waits; bounded, so no seek or publish loop.
      */
     fun shouldConfirmPausedPosition(
         isHost: Boolean,
@@ -177,8 +178,9 @@ internal object PartySync {
         stable: Boolean,
         actualMs: Long,
         alreadyConfirmed: Boolean,
+        exactAttempted: Boolean,
     ): Boolean = isHost && playback.paused && !playback.waiting && !isPlaying && settled && stable && !alreadyConfirmed &&
-        abs(actualMs - playback.positionMs) > PAUSED_TOLERANCE_MS
+        exactAttempted && abs(actualMs - playback.positionMs) > PAUSED_TOLERANCE_MS
 
     fun ownSeek(targetMs: Long, partyPositionMs: Long, behind: Boolean): OwnSeek = when {
         targetMs < partyPositionMs - REJOIN_GAP_MS -> OwnSeek.Behind(targetMs)

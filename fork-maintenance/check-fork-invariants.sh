@@ -22,6 +22,11 @@ need_file composeApp/src/commonMain/kotlin/com/nuvio/app/features/party/PartyCom
 need_text composeApp/src/commonMain/kotlin/com/nuvio/app/features/party/PartyChannel.kt '"command")'
 need_text composeApp/src/commonMain/kotlin/com/nuvio/app/features/party/PartyRepository.kt 'private suspend fun onCommand('
 need_text composeApp/src/commonMain/kotlin/com/nuvio/app/features/player/PlayerScreenRuntimeParty.kt 'var awaitingApply: PartyPlayback?'
+# Frame-accurate paused party seek (native bridge + party loop) and the stale-bridge guard.
+need_text composeApp/src/desktopMain/native/windows/player_bridge.cpp 'exact ? "absolute+exact" : "absolute+keyframes"'
+need_text composeApp/src/desktopMain/native/windows/player_bridge.cpp 'NativePlayerBridge_seekToExact'
+need_text composeApp/src/commonMain/kotlin/com/nuvio/app/features/player/PlayerScreenRuntimeParty.kt 'controller.seekToExact('
+need_text composeApp/build.gradle.kts 'windowsPlayerBridgeSource.asFile.lastModified() > output.lastModified()'
 need_text browser-site/src/session.js 'export const COMMAND_PROTOCOL = 1;'
 # TorBox HLS for browser guests.
 need_file composeApp/src/commonMain/kotlin/com/nuvio/app/features/debrid/TorboxPartyHls.kt

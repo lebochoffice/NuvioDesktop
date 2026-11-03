@@ -447,11 +447,12 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
         var publishedInitial = false
         var seekLeadMs = 0L
         var measureSeekLead = false
-        // Final paused position (host only): mpv seeks to keyframes
-        // ("absolute+keyframes", hr-seek=no), so a paused target can be missed
-        // by a GOP. Once settled, the host confirms where it really stands,
-        // at most once per revision, so every member shows the same frame.
+        // Final paused position (host only), now a safety net: paused party
+        // seeks are frame-accurate (seekToExact). If the player still misses
+        // the target (keyframe-only fallback, non-seekable stream), the host
+        // confirms where it really stands, at most once per revision.
         var confirmedPausedSeq: Pair<Long, String?>? = null
+        var exactSeekFor: Pair<Long, String?>? = null
         var lastPausedPosition: Long? = null
         var wasBehind = false
         while (isActive) {
@@ -545,7 +546,13 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
                 awaitingApply = if (own) null else playback
                 applyRetries = 0
                 if ((!own || playback.paused) && abs(snapshot.positionMs - expected) > PartySync.PAUSED_TOLERANCE_MS) {
-                    controller.seekTo(if (playback.paused) expected else expected + seekLeadMs)
+                    // Paused: frame-accurate, so everyone shows the chosen frame
+                    // (keyframe seeks miss by up to a GOP); playing keeps the
+                    // fast keyframe seek with the measured lead.
+                    if (playback.paused) {
+                        controller.seekToExact(expected)
+                        exactSeekFor = identity
+                    } else controller.seekTo(expected + seekLeadMs)
                     measureSeekLead = !playback.paused
                 }
                 lastSeek = clock.markNow()
@@ -628,6 +635,7 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
                     stable = stablePosition,
                     actualMs = snapshot.positionMs,
                     alreadyConfirmed = confirmedPausedSeq == identity,
+                    exactAttempted = exactSeekFor == identity,
                 )) {
                 confirmedPausedSeq = identity
                 partyLog.i { "Confirming paused keyframe position ${snapshot.positionMs} for target ${playback.positionMs}" }
@@ -647,7 +655,11 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
                     partyLog.i { "Seeking $drift ms back into sync with ${seekLeadMs} ms lead" }
                     clearPartyNudge(playback)
                     val target = if (playback.paused) correction.positionMs else correction.positionMs + seekLeadMs
-                    controller.seekTo(if (snapshot.durationMs > 0L) target.coerceAtMost(snapshot.durationMs) else target)
+                    val clamped = if (snapshot.durationMs > 0L) target.coerceAtMost(snapshot.durationMs) else target
+                    if (playback.paused) {
+                        controller.seekToExact(clamped)
+                        exactSeekFor = playback.seq to playback.memberId
+                    } else controller.seekTo(clamped)
                     lastSeek = clock.markNow()
                     measureSeekLead = !playback.paused
                 }

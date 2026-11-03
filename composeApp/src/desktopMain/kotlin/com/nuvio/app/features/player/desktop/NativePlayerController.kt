@@ -61,6 +61,7 @@ internal class NativePlayerController(
     },
     private val nativeDispose: (Long) -> Unit = NativePlayerBridge::dispose,
     private val nativeSeekTo: (Long, Long) -> Unit = NativePlayerBridge::seekTo,
+    private val nativeSeekToExact: (Long, Long) -> Unit = NativePlayerBridge::seekToExact,
     private val isHostDisplayable: () -> Boolean = { host.isDisplayable },
     private val resolveHostView: () -> Long = { AwtNativeViewResolver.resolveNativeViewPointer(host) },
     private val createWaitTimeoutMs: Long = 5_000L,
@@ -957,6 +958,25 @@ internal class NativePlayerController(
     override fun seekTo(positionMs: Long) {
         log.d { "seekTo positionMs=$positionMs handle=$handle" }
         handle.takeIf { it != 0L }?.let { nativeSeekTo(it, positionMs) }
+    }
+
+    // A bridge DLL without the exact entry point (stale local build) falls
+    // back to the keyframe seek instead of failing.
+    private var exactSeekAvailable = true
+
+    override fun seekToExact(positionMs: Long) {
+        val current = handle.takeIf { it != 0L } ?: return
+        if (exactSeekAvailable) {
+            log.d { "seekToExact positionMs=$positionMs handle=$current" }
+            try {
+                nativeSeekToExact(current, positionMs)
+                return
+            } catch (_: UnsatisfiedLinkError) {
+                exactSeekAvailable = false
+                log.w { "Native exact seek unavailable; using keyframe seek" }
+            }
+        }
+        nativeSeekTo(current, positionMs)
     }
 
     override fun trySeekTo(positionMs: Long): Boolean {

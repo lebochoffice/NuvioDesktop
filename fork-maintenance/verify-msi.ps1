@@ -71,13 +71,26 @@ try {
     foreach ($entry in @('com/nuvio/app/features/party/PartyCommandLedger.class', 'com/nuvio/app/features/party/PartyCommand.class')) {
         if (-not $zip.GetEntry($entry)) { throw "Guest command sequencer missing from packaged application: $entry" }
     }
+    # Frame-accurate paused party seek: the bridge DLL must export it (a stale
+    # DLL would silently fall back to keyframe seeks).
+    $bridgeEntry = $zip.GetEntry('native/windows/player_bridge.dll')
+    $memory = New-Object IO.MemoryStream
+    $stream = $bridgeEntry.Open()
+    try { $stream.CopyTo($memory) } finally { $stream.Dispose() }
+    $bridgeText = [Text.Encoding]::ASCII.GetString($memory.ToArray())
+    if (-not $bridgeText.Contains('Java_com_nuvio_app_features_player_desktop_NativePlayerBridge_seekToExact')) { throw 'Packaged player_bridge.dll lacks the exact seek export (stale bridge build)' }
+    $bridgeClass = $zip.GetEntry('com/nuvio/app/features/player/desktop/NativePlayerBridge.class')
+    if (-not $bridgeClass) { throw 'NativePlayerBridge class missing from packaged application' }
+    $reader = New-Object IO.StreamReader($bridgeClass.Open(), [Text.Encoding]::UTF8)
+    try { $bridgeClassText = $reader.ReadToEnd() } finally { $reader.Dispose() }
+    if (-not $bridgeClassText.Contains('seekToExact')) { throw 'NativePlayerBridge.seekToExact missing from packaged application' }
 } finally { $zip.Dispose() }
 if (-not (Test-Path -LiteralPath (Join-Path $app 'runtime/bin/server/jvm.dll'))) { throw 'Packaged Java runtime missing' }
 $manifest = [ordered]@{
     file = $msi.Name; bytes = $msi.Length; sha256 = (Get-FileHash -LiteralPath $msi.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
     product = $properties['ProductName']; productVersion = $properties['ProductVersion']; signature = [string](Get-AuthenticodeSignature -LiteralPath $msi.FullName).Status
     appJar = $jars[0].Name; requiredNativeEntries = $required; watchInBrowser = $true; javaRuntimePresent = $true
-    installedOrLaunched = $false; msiInspectedReadOnly = $true; stagedAppInspected = $true; msiJarMetadataMatchesStage = $true; publicBackendConfigured = $true; introDbConfigured = $true; browserInviteOrigin = 'https://nuvio-watch-friends.pages.dev'; guestCommandSequencer = $true; sourceCommit = $env:GITHUB_SHA
+    installedOrLaunched = $false; msiInspectedReadOnly = $true; stagedAppInspected = $true; msiJarMetadataMatchesStage = $true; publicBackendConfigured = $true; introDbConfigured = $true; browserInviteOrigin = 'https://nuvio-watch-friends.pages.dev'; guestCommandSequencer = $true; exactPausedSeek = $true; sourceCommit = $env:GITHUB_SHA
 }
 $path = Join-Path $msi.DirectoryName ($msi.BaseName + '-verification.json')
 $manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $path -Encoding utf8
