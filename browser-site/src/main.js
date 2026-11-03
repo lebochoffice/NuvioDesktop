@@ -78,7 +78,7 @@ const session = client ? new PartySession(client, deviceId, {
     if (['CHANNEL_ERROR', 'TIMED_OUT', 'CLOSED'].includes(state)) {
       if (syncEnabled) resumeAfterReconnect = true;
       syncEnabled = false;
-      pauseLocally();
+      if (!soloMode) pauseLocally(); // Watching alone does not depend on the party.
       status('Realtime-Verbindung unterbrochen. Sie wird automatisch neu aufgebaut; danach folgt die Wiedergabe wieder der Party-Zeit.', true);
     } else if (state === 'SUBSCRIBED' && resumeAfterReconnect) {
       // Reconnect restores the authoritative party state (state_request + snapshot).
@@ -86,7 +86,11 @@ const session = client ? new PartySession(client, deviceId, {
       resyncNow();
     }
   },
-  playback: () => { updatePersonalHlsReadiness(); applySync(); renderSyncDebug(); },
+  playback: () => {
+    updatePersonalHlsReadiness();
+    if (awaitingPartyState && loadedStream && !soloMode && session.playback) { awaitingPartyState = false; resyncNow(); }
+    applySync(); renderSyncDebug();
+  },
   command: entry => commandSettled(entry),
   stream: stream => {
     // Includes revocations, incompatible URLs and host source changes. Only an
@@ -112,12 +116,18 @@ const session = client ? new PartySession(client, deviceId, {
     if (stream.media_key !== mediaKey(session.room?.info.media)) return;
     const identity = JSON.stringify(stream);
     if (identity === JSON.stringify(selectedStream)) return; // Reconnect re-offers the same source: no reload.
+    // Watching alone: a renewed source continues locally where it was.
+    soloResume = soloMode && loadedStream ? {seconds: player.currentTime, playing: !player.paused} : null;
     // Do not keep playing a revoked or superseded source until the next user click.
     resetVideo(); selectedStream = stream;
     $('streamInfo').textContent = `Freigegebene Quelle: ${stream.name || stream.filename || 'Video'}. Laden überträgt deine IP-Adresse an den Medienanbieter. Die Quelladresse kann private Tokens enthalten.`;
     const problem = streamProblem(stream);
     $('loadStream').hidden = !!problem;
     if (problem) { $('noStream').textContent = 'Diese Quelle kann der Browser nicht abspielen. Der Host kann eine andere Quelle teilen.'; status(problem, true); }
+    else if (autoHostStream && soloMode && soloResume) {
+      status('Neue Host-Quelle wird geladen; du schaust weiter allein.');
+      loadStream();
+    }
     else if (autoHostStream) {
       // Opt-in: load at once (new episode or renewed link) and follow the
       // current party time after metadata, like the big play button.
@@ -126,7 +136,7 @@ const session = client ? new PartySession(client, deviceId, {
     }
     else { $('noStream').textContent = 'Stream bereit. Tippe auf ▶, um gemeinsam zu schauen.'; status('Stream bereit. Tippe auf ▶ zum Abspielen.'); }
   },
-  media: () => { lastHostStreamEvent = undefined; resetVideo('Film gewechselt. Persönliche Quelle entfernt. Bitte eine neue eigene Quelle laden.'); $('streamInfo').textContent = 'Film gewechselt. Warte auf die neue Streamfreigabe oder lade eine eigene HLS-Quelle.'; },
+  media: () => { lastHostStreamEvent = undefined; soloMode = false; soloResume = null; resetVideo('Film gewechselt. Persönliche Quelle entfernt. Bitte eine neue eigene Quelle laden.'); $('streamInfo').textContent = 'Film gewechselt. Warte auf die neue Streamfreigabe oder lade eine eigene HLS-Quelle.'; },
   chat: message => {
     const line = document.createElement('div'), author = document.createElement('b');
     author.textContent = `${message.name || session.room?.members.find(m => m.id === message.member_id)?.display_name || 'Gast'}: `;
@@ -146,6 +156,14 @@ let toastTimer = null, connectionLost = false, realtimeReconnecting = false, res
 // locally; stream URLs and tokens stay in memory.
 const AUTO_HOST_STREAM_KEY = 'nuvio-party-auto-host-stream';
 let autoHostStream = false, lastHostStreamEvent;
+// Automatic start after loading: 'loaded' → 'synced' (party position applied)
+// → 'playing'; 'blocked' (browser autoplay rule) or 'muted' (started without
+// sound because of that rule). awaitingPartyState: loaded before the first
+// party state arrived; the start continues as soon as it does.
+let autoStarting = false, autoStartPhase = null, awaitingPartyState = false;
+// "Allein schauen": membership and source stay, nothing is published and
+// incoming party states do not touch the local player.
+let soloMode = false, soloResume = null;
 try { autoHostStream = globalThis.localStorage?.getItem(AUTO_HOST_STREAM_KEY) === '1'; } catch { /* Preference unavailable. */ }
 function status(message, error = false) {
   $('message').textContent = message;
@@ -262,6 +280,7 @@ function resetVideo(reason = 'Persönliche Quelle entfernt. Für diesen Film kan
   $('noStream').textContent = 'Warte auf eine freigegebene Streamquelle des Hosts …';
   $('streamInfo').textContent = 'Warte auf eine Desktop-Freigabe oder lade eine eigene zulässige HLS-Quelle (Beta).';
   $('resync').disabled = true;
+  renderSoloUi();
 }
 function updatePersonalHlsReadiness(announce = false) {
   if (!personalHls.active || !loadedStream) return;
@@ -387,6 +406,16 @@ function applySync(forcePlay = false) {
       if (error?.name === 'NotSupportedError') {
         failVideo('Der Browser unterstützt diese Videoquelle oder ihre Codecs nicht. Bitte eine andere kompatible eigene Quelle laden.', 'NotSupportedError'); return;
       }
+      // Automatic start blocked by the autoplay rule: browsers allow muted
+      // playback, so try once without sound and offer the sound button.
+      if (error?.name === 'NotAllowedError' && autoStarting && !player.muted) {
+        autoStarting = false; autoStartPhase = 'muted';
+        player.muted = true; renderPlayerUi();
+        status('Stumm gestartet: Der Browser erlaubt den automatischen Start nur ohne Ton. Tippe auf 🔊, um den Ton einzuschalten.');
+        applySync(true); return;
+      }
+      if (error?.name === 'NotAllowedError') autoStartPhase = 'blocked';
+      autoStarting = false;
       syncEnabled = false; presence();
      
       const message = error?.name === 'NotAllowedError'
@@ -397,7 +426,11 @@ function applySync(forcePlay = false) {
     };
     try { Promise.resolve(player.play()).then(() => {
       if (pendingPlay !== attempt) return;
-      finished(); if (loadedStream === playbackSource) presence();
+      finished();
+      if (loadedStream === playbackSource) {
+        if (autoStarting || autoStartPhase === 'synced') { autoStarting = false; autoStartPhase = autoStartPhase === 'muted' ? 'muted' : 'playing'; }
+        presence();
+      }
     }, rejected); }
     catch (error) { rejected(error); }
   }
@@ -423,7 +456,7 @@ function resetSyncState() {
   nudging = false; lastCorrectiveSeekAt = -Infinity; seekSettled = true; leadSeekStartedAt = null;
   bufferingEvents = 0; segmentStats = {loadMs: null, durationS: null};
   pendingCommand = queuedCommand = null; userSeekPending = false;
-  startAfterLoad = false;
+  startAfterLoad = false; autoStarting = false; awaitingPartyState = false; autoStartPhase = null;
 }
 // Playback resumed after a corrective seek: learn the real recovery delay.
 function mediaResumed() {
@@ -609,9 +642,10 @@ function renderPlayerUi() {
   for (const id of ['ctlBack10', 'ctlFwd10']) $(id).disabled = !seekable;
   // Badge states come only from the real sync/connection state.
   const [label, tone] = connectionLost && session?.room ? (realtimeReconnecting ? ['Verbinde neu …', 'warn'] : ['Verbindung unterbrochen', 'lost'])
-    : !syncEnabled ? ['Nicht synchron', 'off'] : buffering || waitingForTarget ? ['Puffert …', 'warn'] : ['Synchron', ''];
+    : soloMode ? ['Allein', 'off'] : !syncEnabled ? ['Nicht synchron', 'off'] : buffering || waitingForTarget ? ['Puffert …', 'warn'] : ['Synchron', ''];
   $('syncChip').hidden = !loadedStream;
   $('syncChip').textContent = label; $('syncChip').className = tone ? `sync-chip ${tone}` : 'sync-chip';
+  renderSoloUi();
 }
 function revealControls() {
   const wrap = $('playerWrap');
@@ -642,7 +676,7 @@ function togglePlay() {
   if (!player.paused) { markGesture(); player.pause(); return; }
   const party = effectivePlayback();
   // Back into a running party: start in sync instead of at the old position.
-  if (!syncEnabled && party && !party.paused && !$('resync').disabled) { resyncNow(); return; }
+  if (!syncEnabled && !soloMode && party && !party.paused && !$('resync').disabled) { resyncNow(); return; }
   if (player.readyState < 1) { status('Die Quelle lädt noch. Gleich geht es los.'); return; }
   playLocally();
 }
@@ -650,7 +684,8 @@ function togglePlay() {
 // command goes out at once (no waiting for a possibly slow HLS "seeked"), and
 // the resulting native seeking event is recognised as ours, not re-sent.
 function seekTo(seconds) {
-  if (guestControl()) {
+  // Only a synced, non-solo player steers the party; otherwise seek locally.
+  if (guestControl() && syncEnabled && !soloMode) {
     pendingSeek = ownSeek = {seconds, at: performance.now()};
     player.currentTime = seconds;
     sendControl(effectivePlayback()?.paused ?? player.paused, seconds, 'seek');
@@ -662,6 +697,23 @@ function skip(seconds) {
   seekTo(Math.max(0, Math.min(duration - .1, player.currentTime + seconds)));
   renderPlayerUi(); revealControls();
 }
+// "Allein schauen": local playback continues, the party is neither steered
+// nor followed (applySync and all senders are gated by syncEnabled/soloMode).
+function enterSolo() {
+  if (!session?.room || !loadedStream) return;
+  soloMode = true; syncEnabled = false; resumeAfterReconnect = false;
+  pendingPlay = null; pendingSeek = ownSeek = null; userSeekPending = false;
+  if (player.playbackRate !== 1) player.playbackRate = 1; // No party nudging any more.
+  status('Du schaust allein weiter. Play, Pause und Springen gelten nur für dich. „Zur Party“ übernimmt wieder die Party-Zeit.');
+  presence(); renderSoloUi(); renderPlayerUi();
+}
+function renderSoloUi() {
+  $('ctlSolo').textContent = soloMode ? 'Zur Party' : 'Allein schauen';
+  $('ctlSolo').setAttribute?.('aria-pressed', String(soloMode));
+  $('ctlSolo').title = soloMode ? 'Wieder der Party-Zeit folgen' : 'Lokal ohne Party-Synchronisierung weiterschauen';
+  $('ctlSolo').disabled = !loadedStream;
+}
+function toggleSolo() { if (soloMode) resyncNow(); else enterSolo(); revealControls(); }
 function toggleFullscreen() {
   const wrap = $('playerWrap');
   if (document.fullscreenElement) { document.exitFullscreen?.(); return; }
@@ -693,12 +745,13 @@ $('ctlPlay').addEventListener('click', togglePlay);
 $('ctlBack10').addEventListener('click', () => skip(-10));
 $('ctlFwd10').addEventListener('click', () => skip(10));
 $('ctlFullscreen').addEventListener('click', toggleFullscreen);
+$('ctlSolo').addEventListener('click', toggleSolo);
 $('ctlBack').addEventListener('click', backToInvite);
 $('ctlChat').addEventListener('click', () => openDrawer('chat'));
 $('membersButton').addEventListener('click', () => openDrawer('info'));
 $('drawerClose').addEventListener('click', closeDrawer);
 $('drawerScrim').addEventListener('click', closeDrawer);
-$('ctlMute').addEventListener('click', () => { player.muted = !player.muted; renderPlayerUi(); });
+$('ctlMute').addEventListener('click', () => { player.muted = !player.muted; if (!player.muted && autoStartPhase === 'muted') autoStartPhase = 'playing'; renderPlayerUi(); });
 $('ctlVolume').addEventListener('input', () => { player.volume = Number($('ctlVolume').value); player.muted = player.volume === 0; renderPlayerUi(); });
 $('ctlSeek').addEventListener('input', () => {
   seekDragging = true;
@@ -766,7 +819,7 @@ function commandSettled(entry) {
 // Local user gesture → shared command. Coalesced: one RPC in flight, the
 // latest gesture queued. Confirmed states arrive via acceptPlayback.
 function sendControl(paused, seconds, kind = 'toggle') {
-  if (!guestControl()) return false;
+  if (!guestControl() || soloMode) return false;
   if (session.canSequence()) return sendSequenced(paused, seconds, kind);
   const request = {paused, seconds};
   if (pendingCommand) { queuedCommand = request; return true; }
@@ -991,6 +1044,8 @@ $('passwordToggle').addEventListener('click', () => {
 });
 $('loadStream').addEventListener('click', startStream);
 function resyncNow() {
+  // Back to the party time always ends "Allein schauen".
+  if (soloMode) { soloMode = false; renderSoloUi(); }
   // A lost subscription is not repaired by requestState/applySync: rebuild it
   // first; the party time is applied once it is SUBSCRIBED again.
   if (connectionLost && session?.room) {
@@ -1000,6 +1055,8 @@ function resyncNow() {
     return;
   }
   if (!session?.playback) {
+    // Automatic start: continue as soon as the first party state arrives.
+    if (autoStarting) { awaitingPartyState = true; status('Quelle geladen. Warte auf die Party-Zeit des Hosts …'); session?.requestState().catch(() => {}); return; }
     status('Noch kein Playback-Zustand vorhanden. Prüfe den Desktop-Host.');
     session?.requestState().catch(() => status('Host-Zustand konnte nicht angefragt werden. Realtime-Verbindung prüfen.', true));
     return;
@@ -1009,17 +1066,28 @@ function resyncNow() {
   session.requestState().catch(() => status('Aktueller Host-Zustand konnte nicht angefragt werden. Realtime-Verbindung prüfen.', true));
  
   applySync(true); presence(); renderPlayerUi();
-  if (syncEnabled && !waitingForTarget && session.playback.paused) status('Der Host hat pausiert. Die Wiedergabe startet, sobald er fortsetzt.');
+  if (syncEnabled && loadedStream && autoStartPhase !== 'muted') autoStartPhase = !player.paused ? 'playing' : 'synced';
+  if (syncEnabled && !waitingForTarget && session.playback.paused) { autoStarting = false; status('Der Host hat pausiert. Die Wiedergabe startet, sobald er fortsetzt.'); }
 }
 $('resync').addEventListener('click', resyncNow);
 player.addEventListener('loadedmetadata', () => {
   if (!loadedStream) return;
   if (personalHls.active) { updatePersonalHlsReadiness(true); return; }
   loading = false; $('noStream').hidden = true; $('resync').disabled = false;
-  status('Metadaten geladen. Klicke auf „Party-Zeit aktualisieren“. Codecfehler können erst beim Start sichtbar werden.'); presence();
-  // Started via the big play button: follow the party at once. If the
-  // browser blocks autoplay, the play button retries within a user gesture.
-  if (startAfterLoad) { startAfterLoad = false; resyncNow(); }
+  autoStartPhase = 'loaded';
+  // "Allein schauen" during a source renewal: continue locally where it was.
+  if (soloMode && soloResume) {
+    const resume = soloResume; soloResume = null; startAfterLoad = false;
+    try { player.currentTime = resume.seconds; } catch { /* Not seekable yet. */ }
+    if (resume.playing) playLocally();
+    status('Neue Quelle geladen. Du schaust weiter allein.'); presence(); return;
+  }
+  status(startAfterLoad ? 'Quelle geladen. Party-Zeit wird übernommen …'
+    : 'Metadaten geladen. Klicke auf „Party-Zeit aktualisieren“. Codecfehler können erst beim Start sichtbar werden.');
+  presence();
+  // Started via the big play button or automatically: follow the party at
+  // once. A blocked autoplay falls back to muted playback (see applySync).
+  if (startAfterLoad) { startAfterLoad = false; autoStarting = true; resyncNow(); }
 });
 // Native controls do not identify the origin of a seeking event. Track actual
 // control gestures rather than assuming every hls.js currentTime write is a user seek.
@@ -1137,6 +1205,7 @@ function renderSyncDebug() {
     lastCommandResult: choice(d.lastCommandResult, ['confirmed', 'stored_not_broadcast', 'broadcast', 'persisted', 'persist_failed', 'broadcast_failed', 'host_only', 'not_confirmed', 'closed', 'rpc_failed', 'pending', 'accepted', 'applied', 'rejected', 'unknown']),
     // Host-sequenced commands: fixed labels only, never IDs.
     hostSequencer: session?.hostCommands === true,
+    autoStart: choice(autoStartPhase, ['loaded', 'synced', 'playing', 'blocked', 'muted']), awaitingPartyState, soloMode,
     latestCommandStatus: choice(session?.latestCommand?.status, ['pending', 'accepted', 'applied', 'rejected', 'unknown']),
     latestCommandReason: choice(session?.latestCommand?.reason, ['host_only', 'superseded', 'stale_epoch', 'not_member', 'invalid', 'rejected']),
   }, null, 2);

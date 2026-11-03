@@ -1294,3 +1294,92 @@ test('stream URLs are never stored; only the automatic-mode preference may be', 
   h.get('autoHostStream').checked = false; h.get('autoHostStream').fire('change'); h.get('autoHostStream').checked = true; h.get('autoHostStream').fire('change');
   assert.equal(h.desktopHls(), null); // The old film's offer is forgotten after a media change.
 });
+
+// --- Automatic start and "Allein schauen". Written, not executed here. ---
+const debugData = h => { h.tick(); return JSON.parse(h.get('watchSection').children.at(-1).children.at(-1).textContent); };
+const hostShare = url => ({media_key: 'movie|tt1||', url, stream_type: 'hls'});
+
+test('autostart: loaded → synced → playing without any click when the browser allows it', async () => {
+  const h = await harness({debug: true}); h.session.playback = {...playback, paused: false, position_ms: 30000};
+  h.session.handlers.stream(hostShare('https://stream.example.test/a.m3u8')); h.get('loadStream').fire('click');
+  h.metadata(); await settlePlayback();
+  assert.equal(h.sync(), true); assert.equal(h.player.paused, false); assert.equal(h.player.currentTime, 30);
+  assert.equal(debugData(h).autoStart, 'playing');
+  assert.match(h.get('message').textContent, /Party-Zeit wird übernommen|Stream/);
+});
+
+test('autostart: a blocked autoplay starts muted once and offers the sound button; unmuting ends the muted state', async () => {
+  const h = await harness({debug: true}); h.session.playback = {...playback, paused: false};
+  let attempts = 0;
+  h.player.play = function () { attempts++; if (!this.muted) return Promise.reject({name: 'NotAllowedError'}); this.paused = false; return Promise.resolve(); };
+  h.session.handlers.stream(hostShare('https://stream.example.test/a.m3u8')); h.get('loadStream').fire('click');
+  h.metadata(); await settlePlayback(); await settlePlayback();
+  assert.equal(h.player.muted, true); assert.equal(h.player.paused, false); assert.equal(h.sync(), true);
+  assert.equal(attempts, 2); assert.match(h.get('message').textContent, /Stumm gestartet/);
+  assert.equal(debugData(h).autoStart, 'muted');
+  h.get('ctlMute').fire('click'); assert.equal(h.player.muted, false); assert.equal(debugData(h).autoStart, 'playing');
+});
+
+test('autostart: when even muted playback is blocked, the state is "blocked" and a manual retry works', async () => {
+  const h = await harness({debug: true}); h.session.playback = {...playback, paused: false};
+  h.player.play = () => Promise.reject({name: 'NotAllowedError'});
+  h.session.handlers.stream(hostShare('https://stream.example.test/a.m3u8')); h.get('loadStream').fire('click');
+  h.metadata(); await settlePlayback(); await settlePlayback();
+  assert.equal(h.sync(), false); assert.equal(debugData(h).autoStart, 'blocked');
+  assert.match(h.get('message').textContent, /blockiert/);
+  h.player.play = function () { this.paused = false; return Promise.resolve(); };
+  h.get('resync').fire('click'); await settlePlayback();
+  assert.equal(h.sync(), true); assert.equal(h.player.paused, false);
+});
+
+test('autostart: a source loaded before the first party state starts as soon as that state arrives', async () => {
+  const h = await harness({debug: true}); h.session.playback = null;
+  h.session.handlers.stream(hostShare('https://stream.example.test/a.m3u8')); h.get('loadStream').fire('click');
+  h.metadata(); await settlePlayback();
+  assert.equal(h.sync(), false); assert.match(h.get('message').textContent, /Warte auf die Party-Zeit/);
+  assert.equal(debugData(h).awaitingPartyState, true);
+  h.session.receive('state', {...playback, seq: 2, paused: false, position_ms: 40000}); await settlePlayback();
+  assert.equal(h.sync(), true); assert.equal(h.player.currentTime, 40); assert.equal(h.player.paused, false);
+});
+
+test('Allein schauen: playback continues locally, own Play/Pause/Seek send nothing, party states do not touch the player', async () => {
+  const h = await playingGuest(), c = controllable(h);
+  h.get('ctlSolo').fire('click');
+  assert.equal(h.get('ctlSolo').textContent, 'Zur Party'); assert.equal(h.get('syncChip').textContent, 'Allein');
+  assert.equal(h.player.paused, false); assert.equal(h.sync(), false); // Stream keeps running.
+  h.player.play = function () { this.paused = false; this.fire('play'); return Promise.resolve(); };
+  h.get('ctlPlay').fire('click'); await settlePlayback(); // Local pause
+  h.get('ctlPlay').fire('click'); await settlePlayback(); // Local play: does not rejoin the party.
+  h.get('ctlFwd10').fire('click'); h.player.fire('seeking'); h.player.fire('seeked');
+  h.get('ctlSeek').value = '500'; h.get('ctlSeek').fire('change');
+  assert.equal(c.sends.length, 0); assert.equal(c.rpcs.length, 0); assert.equal(h.sync(), false);
+  const local = h.player.currentTime;
+  h.session.receive('state', {...playback, seq: 5, paused: true, position_ms: 1000}); h.tick(); await settlePlayback();
+  assert.equal(h.player.paused, false); assert.equal(h.player.currentTime, local);
+  assert.equal(h.sent.at(-1)[0], 'behind'); // Presence: not waited for by the coordinator.
+});
+
+test('Allein schauen survives a realtime loss; "Zur Party" returns to the current party time', async () => {
+  const h = await playingGuest();
+  h.get('ctlSolo').fire('click');
+  h.session.handlers.connection('CHANNEL_ERROR'); assert.equal(h.player.paused, false); // Not paused by the party.
+  h.session.handlers.connection('SUBSCRIBED'); await settlePlayback();
+  assert.equal(h.sync(), false); assert.equal(h.get('ctlSolo').textContent, 'Zur Party'); // No automatic rejoin.
+  h.session.receive('state', {...playback, seq: 6, paused: false, position_ms: 70000});
+  h.get('ctlSolo').fire('click'); await settlePlayback();
+  assert.equal(h.sync(), true); assert.equal(h.player.currentTime, 70);
+  assert.equal(h.get('ctlSolo').textContent, 'Allein schauen'); assert.equal(h.get('syncChip').textContent, 'Synchron');
+});
+
+test('Allein schauen: a renewed host source continues locally at the same position; a film change ends the mode', async () => {
+  const h = await harness(); h.session.playback = {...playback, paused: false};
+  h.get('autoHostStream').checked = true; h.get('autoHostStream').fire('change');
+  h.session.handlers.stream(hostShare('https://stream.example.test/a.m3u8')); h.metadata(); await settlePlayback();
+  h.get('ctlSolo').fire('click'); h.player.currentTime = 50;
+  h.session.handlers.stream(hostShare('https://stream.example.test/a-renewed.m3u8'));
+  assert.equal(h.desktopHls().source, 'https://stream.example.test/a-renewed.m3u8');
+  h.metadata(); await settlePlayback();
+  assert.equal(h.player.currentTime, 50); assert.equal(h.sync(), false); assert.equal(h.get('ctlSolo').textContent, 'Zur Party');
+  h.session.handlers.media();
+  assert.equal(h.get('ctlSolo').textContent, 'Allein schauen'); assert.equal(h.get('ctlSolo').disabled, true);
+});

@@ -293,3 +293,8 @@ input[type=range]:disabled { cursor: default; opacity: .5; }
 /* Opt-in "Host-Stream automatisch verwenden" in the drawer's Technik block. */
 .check-row { display: flex; gap: .5rem; align-items: flex-start; margin: .25rem 0 .5rem; line-height: 1.35; cursor: pointer; }
 .check-row input { margin-top: .2rem; flex: none; }
+
+/* "Allein schauen" / "Zur Party" toggle in the controls bar. */
+.solo-btn { border: 1px solid rgba(255,255,255,.35); background: rgba(0,0,0,.35); color: #fff; border-radius: 999px; padding: 6px 12px; font-size: 13px; cursor: pointer; white-space: nowrap; }
+.solo-btn[aria-pressed="true"] { background: #fff; color: #111; }
+.solo-btn:disabled { opacity: .4; cursor: default; }
