@@ -8,10 +8,23 @@ export async function callRpc(client, name, args = {}) {
   return result;
 }
 
+// Fork command protocol 1 (Nuvio Desktop fork ≥ 0.1.39 as host): the host
+// announces it in its status and is the only sequencer. Guests send commands
+// with their own ID and never assign revisions themselves.
+export const COMMAND_PROTOCOL = 1;
+// Technical timeout for a missing host answer; never a lock on new commands.
+export const ACK_TIMEOUT_MS = 4000;
+const COMMAND_TRANSMISSIONS = 2; // first send + one retry with the same ID
+const COMMAND_LIMIT = 64;
+const REJECT_REASONS = ['host_only', 'superseded', 'stale_epoch', 'not_member', 'invalid'];
+// pending → accepted → applied; pending/unknown → accepted/applied/rejected.
+const NEXT_STATUS = {pending: ['accepted', 'applied', 'rejected', 'unknown'], unknown: ['accepted', 'applied', 'rejected'], accepted: ['applied'], applied: [], rejected: []};
+const newCommandId = () => globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+
 // Uses only RPCs and channel events present in Nuvio Dev PartyApi/PartyChannel.
-// Guests never become coordinators. With host_only=false they may issue the
-// same playback command as a Desktop guest: either exactly like Nuvio Desktop
-// (broadcast, then persist) or only after watch_party_update confirmed it.
+// Guests never become coordinators. With host_only=false they control playback:
+// via host-sequenced commands when the host supports them, otherwise like a
+// Nuvio Desktop guest (broadcast, then persist) or after watch_party_update.
 export class PartySession {
   constructor(client, deviceId, handlers = {}) {
     this.client = client; this.deviceId = deviceId; this.handlers = handlers;
@@ -20,6 +33,8 @@ export class PartySession {
     this.seenMessages = new Set(); this.timers = []; this.clockOffset = 0;
     this.presence = {status: 'browsing'};
     this.closing = null;
+    this.hostCommands = false; this.commands = new Map(); this.latestCommand = null;
+    this.commandTimers = new Set(); this.ackTimeoutMs = ACK_TIMEOUT_MS;
     // Local, allowlisted telemetry only: never retain payloads, identities or URLs.
     this.diagnostics = {connection: 'CLOSED', realtimeStates: 0, snapshotStates: 0,
       lastRealtimeAt: null, lastAcceptedAt: null, acceptedSource: null,
@@ -94,6 +109,106 @@ export class PartySession {
     } catch { if (gen === this.generation) d.lastCommandResult = 'persist_failed'; }
   }
 
+  // --- Host-sequenced commands (protocol 1) ---------------------------------
+  // PENDING: sent. ACCEPTED: the host (member_id = host_member_id) ordered it,
+  // via ack or the resulting state. APPLIED: the host's player reached it
+  // (informational only, never changes playback). REJECTED: host refused it.
+  // UNKNOWN: no answer after one retry with the same ID; the server snapshot
+  // is then reloaded. Realtime payload identities are not server-verified,
+  // so acknowledgements only steer this UI; playback always follows the
+  // ordered party state.
+  canSequence() { return this.canControl() && this.hostCommands === true; }
+  issueCommand({paused, positionMs, kind = 'toggle'}) {
+    const room = this.room;
+    if (!this.canControl()) throw Object.assign(new Error('host_only'), {code: 'host_only'});
+    if (!this.hostCommands) throw Object.assign(new Error('no_sequencer'), {code: 'no_sequencer'});
+    const base = this.playback, id = newCommandId();
+    const command = {command_id: id, member_id: room.memberId, paused: paused === true,
+      position_ms: Math.max(0, Math.round(Number(positionMs) || 0)), base_seq: base?.seq ?? null,
+      media_key: mediaKey(room.info.media), host_member_id: room.info.host_member_id};
+    if (!command.media_key || !Number.isSafeInteger(command.position_ms)) throw Object.assign(new Error('invalid_command'), {code: 'invalid_command'});
+    // Local preview while the host has not answered; never broadcast.
+    const optimistic = {seq: base?.seq ?? 0, member_id: room.memberId, paused: command.paused, position_ms: command.position_ms,
+      rate: base?.rate ?? 1, at: Math.round(this.now()), media_key: command.media_key, waiting: false};
+    const entry = {id, kind, command, optimistic, room, gen: this.generation, status: 'pending', reason: null, seq: null,
+      transmissions: 0, reached: false, stale: false};
+    this.commands.set(id, entry);
+    for (const [key, old] of this.commands) {
+      if (this.commands.size <= COMMAND_LIMIT) break;
+      if (old !== entry) this.commands.delete(key);
+    }
+    this.latestCommand = entry;
+    this.diagnostics.commands++;
+    this.transmit(entry);
+    return entry;
+  }
+  async transmit(entry) {
+    if (!this.commandLive(entry)) return;
+    entry.transmissions++;
+    // A failed send is answered by the same timeout and retry as a lost one.
+    await Promise.resolve(this.channel?.send({type: 'broadcast', event: 'command', payload: entry.command})).catch(() => 'error');
+    if (!this.commandLive(entry) || entry.status !== 'pending') return;
+    this.later(() => {
+      if (!this.commandLive(entry) || entry.status !== 'pending') return;
+      if (entry.transmissions < COMMAND_TRANSMISSIONS) { this.transmit(entry); return; } // same ID: executed at most once
+      this.settleCommand(entry, 'unknown');
+      this.refresh(); // authoritative server state instead of repeating the command
+    });
+  }
+  commandLive(entry) { return entry.gen === this.generation && entry.room === this.room; }
+  later(callback) {
+    const timer = setTimeout(() => { this.commandTimers.delete(timer); callback(); }, this.ackTimeoutMs);
+    timer?.unref?.(); // Node test runs only; browsers return a number.
+    this.commandTimers.add(timer);
+  }
+  settleCommand(entry, status, {seq = null, reason = null} = {}) {
+    if (!NEXT_STATUS[entry.status].includes(status)) return;
+    entry.status = status;
+    if (Number.isSafeInteger(seq)) entry.seq = seq;
+    if (status === 'rejected') entry.reason = REJECT_REASONS.includes(reason) ? reason : 'rejected';
+    this.diagnostics.lastCommandResult = status;
+    if (status === 'accepted' && !entry.reached) {
+      // The ordered state itself may have been lost: ask for it, and stop
+      // showing the local preview if it still does not arrive.
+      if (entry.seq != null && (!this.playback || entry.seq > this.playback.seq)) this.requestState().catch(() => {});
+      this.later(() => {
+        if (!this.commandLive(entry) || entry.reached) return;
+        entry.stale = true; this.emit('command', entry); this.refresh();
+      });
+    }
+    this.emit('command', entry);
+  }
+  receiveAck(ack) {
+    const room = this.room;
+    if (!room || !ack || ack.member_id !== room.info.host_member_id || ack.origin_member_id !== room.memberId) return;
+    const entry = this.commands.get(String(ack.command_id ?? ''));
+    if (!entry || !this.commandLive(entry)) return;
+    const seq = Number.isSafeInteger(ack.seq) ? ack.seq : null;
+    if (ack.status === 'accepted') this.settleCommand(entry, 'accepted', {seq});
+    else if (ack.status === 'applied' && (entry.seq == null || seq === entry.seq)) {
+      if (entry.status !== 'accepted') this.settleCommand(entry, 'accepted', {seq});
+      this.settleCommand(entry, 'applied', {seq});
+    }
+    else if (ack.status === 'rejected') this.settleCommand(entry, 'rejected', {reason: ack.reason});
+  }
+  // The guest's own preview, as long as no other member's newer revision
+  // superseded it. The guest's own earlier commands do not end the preview
+  // (rapid toggling); the host orders them before this one.
+  optimisticPlayback() {
+    const entry = this.latestCommand, party = this.playback, room = this.room;
+    if (!entry || !room || !this.commandLive(entry) || entry.reached || entry.stale || !['pending', 'accepted'].includes(entry.status)) return null;
+    if (party && party.seq > (entry.command.base_seq ?? -1)) {
+      const ownEarlier = party.origin_member_id === room.memberId && this.commands.has(party.command_id);
+      if (!ownEarlier) return null;
+    }
+    return entry.optimistic;
+  }
+  dropCommands(reason) {
+    for (const entry of this.commands.values()) if (['pending', 'unknown'].includes(entry.status)) this.settleCommand(entry, 'rejected', {reason});
+    this.commandTimers.forEach(clearTimeout); this.commandTimers.clear();
+    this.commands.clear(); this.latestCommand = null;
+  }
+
   rpc(name, args) { return callRpc(this.client, name, args); }
   emit(name, value) { this.handlers[name]?.(value); }
   now() { return Date.now() + this.clockOffset; }
@@ -137,7 +252,7 @@ export class PartySession {
       config: {private: true, broadcast: {ack: false, self: false}, presence: {key: room.memberId}},
     });
     this.channel = ch;
-    for (const event of ['state', 'stream', 'media', 'control', 'chat', 'ended', 'member_left', 'member_joined', 'state_request']) {
+    for (const event of ['state', 'stream', 'media', 'control', 'chat', 'ended', 'member_left', 'member_joined', 'state_request', 'status', 'ack']) {
       ch.on('broadcast', {event}, ({payload}) => {
         if (gen === this.generation && this.room === room) this.receive(event, payload);
       });
@@ -155,6 +270,12 @@ export class PartySession {
   receive(event, payload) {
     if (event === 'state') { this.acceptPlayback(payload, 'realtime'); return; }
     if (!this.room || !payload) return;
+    if (event === 'ack') { this.receiveAck(payload); return; }
+    // Only the current host's status announces the sequencer capability.
+    if (event === 'status') {
+      if (payload.member_id === this.room.info.host_member_id) this.hostCommands = payload.commands === COMMAND_PROTOCOL;
+      return;
+    }
     if (event === 'stream' && payload.member_id === this.room.info.host_member_id) this.emit('stream', payload.stream ?? null);
     // Database snapshots are authoritative for media, membership and host-only changes.
     if (['media', 'control', 'member_joined'].includes(event)) this.refresh();
@@ -182,7 +303,15 @@ export class PartySession {
       : !isNewerPlayback(next, this.playback) ? 'not_newer' : 'accepted';
     if (d.lastDecision !== 'accepted') return;
     d.lastAcceptedAt = receivedAt; d.acceptedSource = source;
-    this.playback = next; this.emit('playback', next);
+    this.playback = next;
+    // The ordered revision of one of our commands, published by the host.
+    const entry = next.command_id && next.origin_member_id === this.room.memberId && next.member_id === info.host_member_id
+      ? this.commands.get(String(next.command_id)) : null;
+    if (entry && this.commandLive(entry)) {
+      entry.reached = true;
+      if (entry.status === 'pending' || entry.status === 'unknown') this.settleCommand(entry, 'accepted', {seq: next.seq});
+    }
+    this.emit('playback', next);
   }
   async refresh() {
     const room = this.room;
@@ -198,6 +327,9 @@ export class PartySession {
       // Sequence numbers belong to a coordinator. A new host may start at 0;
       // never keep following the previous host while waiting for its state.
       if (changed || hostChanged) this.playback = null;
+      // New epoch: commands for the previous host or film never become valid.
+      if (hostChanged) this.hostCommands = false;
+      if (changed || hostChanged) this.dropCommands('stale_epoch');
       if (changed) { this.presence = {status: 'browsing'}; this.emit('media', room.info.media); }
       if (changed || hostChanged) this.emit('stream', null);
       if (room.info.host_member_id === room.memberId) {
@@ -273,6 +405,8 @@ export class PartySession {
     if (this.closing) return this.closing;
     const old = this.room, ch = this.channel;
     this.room = null; this.channel = null; this.playback = null;
+    this.hostCommands = false; this.commands.clear(); this.latestCommand = null;
+    this.commandTimers.forEach(clearTimeout); this.commandTimers.clear();
     this.diagnostics.connection = 'CLOSED';
     this.timers.forEach(clearInterval); this.timers = [];
     this.chatCursor = null; this.seenMessages.clear(); this.presence = {status: 'browsing'};

@@ -1114,3 +1114,79 @@ test('desktop host commands still drive the browser while a browser command is p
   c.release(); await settlePlayback();
   assert.equal(h.session.playback.seq, 3); // The late persist reply of seq 2 cannot override the host.
 });
+
+// --- Host-sequenced guest control (0.1.39, Nuvio Desktop fork host). Written, not executed here. ---
+function sequencedHost(h, options) {
+  const c = controllable(h, options);
+  h.session.receive('status', {member_id: 'host', status: 'ready', commands: 1});
+  h.session.handlers.room(h.session.room);
+  return {...c, commands: () => c.sends.filter(s => s.event === 'command').map(s => s.payload)};
+}
+
+test('host-sequenced: Pause, Play and Seek are commands with their own ID; no browser revision, no RPC, the host state confirms', async () => {
+  const h = await playingGuest(), c = sequencedHost(h, {hold: true});
+  assert.match(h.get('controlInfo').textContent, /ordnet und bestätigt/);
+  h.get('ctlPlay').fire('click'); await settlePlayback();
+  const [pause] = c.commands();
+  assert.equal(c.sends.length, 1); assert.equal(c.sends[0].event, 'command');
+  assert.deepEqual([pause.paused, pause.base_seq, pause.host_member_id, 'seq' in pause], [true, 1, 'host', false]);
+  assert.equal(c.rpcs.length, 0); assert.equal(h.player.paused, true); // Optimistic, immediately.
+  h.tick(); await settlePlayback(); assert.equal(h.player.paused, true); // The old party state does not take it back.
+  h.session.receive('state', {...playback, seq: 2, paused: true, position_ms: pause.position_ms, origin_member_id: 'guest', command_id: pause.command_id});
+  assert.equal(h.session.latestCommand.status, 'accepted'); assert.match(h.get('message').textContent, /Pause für alle/);
+  h.player.play = function () { this.paused = false; this.fire('play'); return Promise.resolve(); };
+  h.get('ctlPlay').fire('click'); await settlePlayback();
+  assert.equal(c.commands()[1].paused, false); assert.equal(c.commands()[1].base_seq, 2); assert.equal(h.player.paused, false);
+  h.get('ctlFwd10').fire('click'); h.player.fire('seeking'); h.player.fire('seeked'); await settlePlayback();
+  assert.equal(c.commands()[2].position_ms, h.player.currentTime * 1000);
+  h.tick(); h.tick(); await settlePlayback();
+  assert.equal(c.sends.length, 3); assert.equal(c.rpcs.length, 0); // Applying our own commands never echoes.
+});
+
+test('host-sequenced: Desktop Play right after a browser Pause plays at once; the later rejection does not revert it', async () => {
+  const h = await playingGuest(), c = sequencedHost(h);
+  h.get('ctlPlay').fire('click'); await settlePlayback();
+  assert.equal(h.player.paused, true);
+  h.session.receive('state', {...playback, seq: 2, member_id: 'host', paused: false, position_ms: 40000}); // Host's own Play.
+  await settlePlayback();
+  assert.equal(h.player.paused, false); assert.equal(h.player.currentTime, 40);
+  h.session.receive('ack', {command_id: c.commands()[0].command_id, member_id: 'host', origin_member_id: 'guest', status: 'rejected', reason: 'superseded', seq: 2});
+  await settlePlayback();
+  assert.match(h.get('message').textContent, /neuerer Befehl/); assert.equal(h.player.paused, false);
+  h.tick(); await settlePlayback();
+  assert.equal(c.sends.length, 1); assert.equal(h.player.paused, false);
+});
+
+test('host-sequenced: no answer → one retry with the same ID, then the server state; playback follows the party again', async () => {
+  const h = await playingGuest(), c = sequencedHost(h);
+  h.session.ackTimeoutMs = 2;
+  h.get('ctlPlay').fire('click'); await settlePlayback();
+  assert.equal(h.player.paused, true);
+  await new Promise(resolve => setTimeout(resolve, 30)); await settlePlayback();
+  const [first, retry] = c.commands();
+  assert.equal(c.commands().length, 2); assert.equal(first.command_id, retry.command_id);
+  assert.equal(h.session.latestCommand.status, 'unknown'); assert.match(h.get('message').textContent, /Keine Antwort vom Host/);
+  assert.ok(c.rpcs.some(([name]) => name === 'watch_party_heartbeat'));
+  h.tick(); await settlePlayback();
+  assert.equal(h.player.paused, false); // The authoritative party state (playing) applies again.
+});
+
+test('host-sequenced seeking: drag only previews, release sends once, identical releases and HLS events are not re-sent', async () => {
+  const h = await playingGuest(), c = sequencedHost(h);
+  h.get('ctlFwd10').fire('click'); await settlePlayback();
+  h.player.fire('seeking'); h.player.fire('waiting'); // Own seek; HLS still loading.
+  h.get('ctlFwd10').fire('click'); await settlePlayback();
+  h.get('ctlSeek').value = '500'; h.get('ctlSeek').fire('input'); h.get('ctlSeek').fire('input');
+  assert.equal(c.commands().length, 2); // Dragging is a local preview only.
+  h.get('ctlSeek').fire('change'); h.get('ctlSeek').fire('change'); await settlePlayback();
+  h.player.fire('seeking'); h.player.fire('seeked'); h.player.fire('canplay'); await settlePlayback();
+  h.tick(); h.tick(); await settlePlayback();
+  assert.deepEqual(c.commands().map(cmd => cmd.position_ms), [15000, 25000, 60000]);
+});
+
+test('a host without the announcement keeps desktop-parity control (state broadcast), even after a legacy status', async () => {
+  const h = await playingGuest(), c = controllable(h, {confirm: false});
+  h.session.receive('status', {member_id: 'host', status: 'ready'});
+  h.get('ctlPlay').fire('click'); await settlePlayback();
+  assert.deepEqual(c.sends.map(s => s.event), ['state']);
+});

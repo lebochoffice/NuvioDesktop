@@ -14,6 +14,18 @@ internal sealed interface OwnSeek {
     data object Blocked : OwnSeek
 }
 
+/** Progress of applying a revision received from another member. */
+internal enum class PendingApply {
+    /** A real local action changed the intent since; nothing left to apply. */
+    Superseded,
+    /** The player has not reached the play state yet (seek/HLS/network). */
+    Waiting,
+    /** Play state reached, position still far away: regular correction seeks. */
+    Seeking,
+    /** Reached. */
+    Applied,
+}
+
 internal object PartySync {
     const val NUDGE_START_MS = 250L
     const val NUDGE_STOP_MS = 80L
@@ -80,6 +92,13 @@ internal object PartySync {
             abs(next.positionMs - expectedPositionMs(previous, next.at)) > SEEK_NOTICE_MS -> PartyAction.Seeked
             else -> null
         }
+    }
+
+    fun pendingApply(pendingPaused: Boolean, shouldPlay: Boolean, isPlaying: Boolean, driftMs: Long): PendingApply = when {
+        shouldPlay == pendingPaused -> PendingApply.Superseded
+        isPlaying == pendingPaused -> PendingApply.Waiting
+        abs(driftMs) > SEEK_THRESHOLD_MS -> PendingApply.Seeking
+        else -> PendingApply.Applied
     }
 
     fun ownSeek(targetMs: Long, partyPositionMs: Long, behind: Boolean): OwnSeek = when {

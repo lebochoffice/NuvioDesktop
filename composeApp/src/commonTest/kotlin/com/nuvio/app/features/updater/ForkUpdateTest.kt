@@ -25,7 +25,7 @@ class ForkUpdateTest {
     }
 
     @Test
-    fun `only the fork watch party msi is eligible; official or other assets are ignored`() {
+    fun `only the fork watch party msi is eligible - official or other assets are ignored`() {
         val assets = listOf(
             candidate("Nuvio-Windows-x64-0.1.38.msi"),
             candidate("Nuvio-WatchParty-Windows-x64-0.1.38-watchparty.msi"),

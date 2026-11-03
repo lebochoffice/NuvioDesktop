@@ -338,14 +338,16 @@ test('desktop-parity mode broadcasts the command first (like Nuvio Desktop guest
   await f.session.join('UXZ83H', 'Guest'); await f.connect();
   f.session.room.info.host_only = false;
   const order = [], send = f.ch.send, rpc = f.client.rpc;
+  let release;
+  const persisted = new Promise(resolve => { release = resolve; });
   f.ch.send = async message => { order.push(['send', message.event]); return send(message); };
   f.client.rpc = async (name, args) => { order.push(['rpc', name]); return name === 'watch_party_update'
-    ? {data: {party: {...snapshot().party, host_only: false, playback: {...playback, seq: 1}}}} : rpc(name, args); };
+    ? persisted.then(() => ({data: {party: {...snapshot().party, host_only: false, playback: {...playback, seq: 1}}}})) : rpc(name, args); };
   const stored = await f.session.commitControl(f.session.prepareControl({paused: true, positionMs: 7000}), {mode: 'desktop'});
   assert.deepEqual(order, [['send', 'state'], ['rpc', 'watch_party_update']]);
   assert.equal(f.session.playback, stored); assert.equal(stored.seq, 3); assert.equal(stored.member_id, 'guest');
   assert.equal(f.session.diagnostics.lastCommandResult, 'broadcast'); // Returns before the RPC finished.
-  await new Promise(resolve => setImmediate(resolve));
+  release(); await new Promise(resolve => setImmediate(resolve));
   assert.equal(f.session.diagnostics.lastCommandResult, 'persisted');
   f.ch.send = async () => 'rate limited';
   await assert.rejects(f.session.commitControl(f.session.prepareControl({paused: false, positionMs: 0}), {mode: 'desktop'}), e => e.code === 'broadcast_failed');
@@ -375,3 +377,172 @@ test('desktop parity: rapid commands never wait for a slow RPC; late or duplicat
   assert.equal(f.session.playback, seek);
 });
 
+
+// --- Host-sequenced commands (fork protocol 1, 0.1.39). Written, not executed here. ---
+async function sequenced(t, {announce = true} = {}) {
+  const f = fixture(); t.after(() => f.session.close());
+  await f.session.join('UXZ83H', 'Guest'); await f.connect();
+  f.session.room.info.host_only = false;
+  if (announce) f.emit('status', {member_id: 'host', status: 'ready', commands: 1});
+  return f;
+}
+const sentCommands = f => f.messages.filter(m => m.event === 'command').map(m => m.payload);
+const hostState = (command, seq, extra = {}) => ({seq, member_id: 'host', paused: command.paused, position_ms: command.position_ms, rate: 1, at: 1000,
+  media_key: 'movie|tt1||', waiting: false, origin_member_id: command.member_id, command_id: command.command_id, ...extra});
+const ack = (command, status, extra = {}) => ({command_id: command.command_id, member_id: 'host', origin_member_id: 'guest', status, ...extra});
+const tick = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+test('sequencer capability comes only from the current host status; legacy hosts keep the old path', async t => {
+  const f = await sequenced(t, {announce: false});
+  assert.equal(f.session.canSequence(), false);
+  assert.throws(() => f.session.issueCommand({paused: true, positionMs: 0}), e => e.code === 'no_sequencer');
+  f.emit('status', {member_id: 'guest2', status: 'ready', commands: 1}); assert.equal(f.session.canSequence(), false);
+  f.emit('status', {member_id: 'host', status: 'ready'}); assert.equal(f.session.canSequence(), false); // Older host.
+  f.emit('status', {member_id: 'host', status: 'ready', commands: 1}); assert.equal(f.session.canSequence(), true);
+  f.session.room.info.host_only = true; assert.equal(f.session.canSequence(), false);
+  assert.throws(() => f.session.issueCommand({paused: true, positionMs: 0}), e => e.code === 'host_only');
+});
+
+test('browser pause: command with own ID and base revision; the host state accepts it, the host ack marks it applied', async t => {
+  const f = await sequenced(t), events = [];
+  f.session.handlers.command = entry => events.push(entry.status);
+  const entry = f.session.issueCommand({paused: true, positionMs: 7000});
+  const [command] = sentCommands(f);
+  assert.equal(command.command_id, entry.id); assert.match(command.command_id, /^[A-Za-z0-9-]{8,64}$/);
+  assert.deepEqual([command.member_id, command.paused, command.position_ms, command.base_seq, command.media_key, command.host_member_id],
+    ['guest', true, 7000, 2, 'movie|tt1||', 'host']);
+  assert.ok(!('seq' in command)); // Guests never assign revisions.
+  assert.ok(!JSON.stringify(command).includes('session-jwt')); // No credentials in the payload.
+  assert.equal(entry.status, 'pending');
+  assert.equal(f.session.playback.seq, 2); assert.equal(f.session.optimisticPlayback().paused, true);
+  f.emit('state', hostState(command, 3));
+  assert.equal(f.session.playback.seq, 3); assert.equal(entry.status, 'accepted'); assert.equal(entry.reached, true);
+  assert.equal(f.session.optimisticPlayback(), null);
+  f.emit('ack', ack(command, 'accepted', {seq: 3})); // Duplicate confirmation: no second event.
+  f.emit('ack', ack(command, 'applied', {seq: 3}));
+  assert.equal(entry.status, 'applied'); assert.deepEqual(events, ['accepted', 'applied']);
+});
+
+test('browser play and seek are sequenced the same way; rapid commands chain on the same base without flicker', async t => {
+  const f = await sequenced(t);
+  const pause = f.session.issueCommand({paused: true, positionMs: 1000});
+  const play = f.session.issueCommand({paused: false, positionMs: 1000});
+  const seek = f.session.issueCommand({paused: false, positionMs: 61000, kind: 'seek'});
+  assert.deepEqual(sentCommands(f).map(c => c.base_seq), [2, 2, 2]); // No waiting for any answer.
+  f.emit('state', hostState(pause.command, 3)); // Our older command arrives first ...
+  assert.equal(f.session.optimisticPlayback(), seek.optimistic); // ... and does not interrupt the newest preview.
+  f.emit('state', hostState(play.command, 4));
+  f.emit('state', hostState(seek.command, 5));
+  assert.equal(f.session.optimisticPlayback(), null);
+  assert.deepEqual([f.session.playback.seq, f.session.playback.position_ms, f.session.playback.paused], [5, 61000, false]);
+});
+
+test('desktop play right after a browser pause wins: a foreign newer revision ends the preview, the late rejection changes nothing', async t => {
+  const f = await sequenced(t);
+  const pause = f.session.issueCommand({paused: true, positionMs: 1000});
+  f.emit('state', {...playback, seq: 3, member_id: 'host', paused: false, position_ms: 40000}); // Host's own Play first.
+  assert.equal(f.session.optimisticPlayback(), null); assert.equal(f.session.playback.paused, false);
+  f.emit('ack', ack(pause.command, 'rejected', {reason: 'superseded', seq: 3}));
+  assert.equal(pause.status, 'rejected'); assert.equal(pause.reason, 'superseded');
+  assert.equal(f.session.playback.seq, 3); assert.equal(sentCommands(f).length, 1); // No retry, no echo.
+  // Accepted browser pause, then the host plays: the newer host revision applies.
+  const pause2 = f.session.issueCommand({paused: true, positionMs: 41000});
+  f.emit('state', hostState(pause2.command, 4));
+  f.emit('state', {...playback, seq: 5, member_id: 'host', paused: false, position_ms: 41000});
+  assert.equal(f.session.playback.paused, false); assert.equal(f.session.playback.seq, 5);
+});
+
+test('several browser guests: another guest command supersedes ours; acks for others are ignored', async t => {
+  const f = await sequenced(t);
+  const mine = f.session.issueCommand({paused: true, positionMs: 1000});
+  const other = {command_id: 'other-guest-1', member_id: 'guest2', paused: false, position_ms: 9000};
+  f.emit('state', hostState(other, 3));
+  assert.equal(f.session.playback.origin_member_id, 'guest2'); assert.equal(f.session.optimisticPlayback(), null);
+  assert.equal(mine.status, 'pending'); // Untouched by the other guest's revision.
+  f.emit('ack', {...ack(other, 'accepted'), origin_member_id: 'guest2'}); assert.equal(mine.status, 'pending');
+  f.emit('ack', ack(mine.command, 'rejected', {reason: 'superseded'})); assert.equal(mine.status, 'rejected');
+});
+
+test('forged acknowledgements and states of non-hosts cannot confirm a command', async t => {
+  const f = await sequenced(t);
+  const entry = f.session.issueCommand({paused: true, positionMs: 1000});
+  f.emit('ack', {...ack(entry.command, 'accepted'), member_id: 'guest2'});
+  f.emit('ack', {...ack(entry.command, 'applied'), origin_member_id: 'guest2'});
+  f.emit('ack', ack({command_id: 'unknown-command'}, 'accepted'));
+  assert.equal(entry.status, 'pending');
+  f.emit('state', {...hostState(entry.command, 3), member_id: 'guest2'}); // Accepted as a revision (host_only=false) ...
+  assert.equal(entry.status, 'pending'); assert.equal(entry.reached, false); // ... but not as the host's confirmation.
+  f.emit('ack', ack(entry.command, 'rejected', {reason: '<script>'}));
+  assert.equal(entry.reason, 'rejected'); // Unknown reasons are reduced to a fixed label.
+});
+
+test('out-of-order and duplicate realtime messages: older revisions are dropped, late acks only upgrade their own command', async t => {
+  const f = await sequenced(t);
+  const first = f.session.issueCommand({paused: true, positionMs: 1000});
+  const second = f.session.issueCommand({paused: false, positionMs: 1000});
+  f.emit('state', hostState(second.command, 4)); // Newer revision overtakes the older one.
+  f.emit('state', hostState(first.command, 3));
+  assert.equal(f.session.playback.seq, 4); assert.equal(f.session.diagnostics.lastDecision, 'not_newer');
+  assert.equal(first.reached, false); assert.equal(first.status, 'pending');
+  f.emit('ack', ack(first.command, 'accepted', {seq: 3})); // Late ack.
+  assert.equal(first.status, 'accepted'); assert.equal(f.session.playback.seq, 4);
+  assert.equal(f.session.latestCommand, second); assert.equal(f.session.optimisticPlayback(), null);
+  f.emit('state', hostState(second.command, 4)); assert.equal(f.session.playback.seq, 4); // Duplicate.
+});
+
+test('no host answer: one retry with the same command ID, then UNKNOWN and the server snapshot; never endless resends', async t => {
+  const f = await sequenced(t);
+  f.session.ackTimeoutMs = 5;
+  const entry = f.session.issueCommand({paused: true, positionMs: 1000});
+  const heartbeats = () => f.calls.filter(c => c[0] === 'watch_party_heartbeat').length, before = heartbeats();
+  await tick(40);
+  const sent = sentCommands(f);
+  assert.equal(sent.length, 2); assert.equal(sent[0].command_id, sent[1].command_id); // The host executes an ID at most once.
+  assert.equal(entry.status, 'unknown'); assert.equal(f.session.optimisticPlayback(), null);
+  assert.ok(heartbeats() > before); // Reconciled with the authoritative server state.
+  await tick(30); assert.equal(sentCommands(f).length, 2);
+  // The command may have succeeded after all (timeout after execution).
+  f.emit('state', hostState(entry.command, 3));
+  assert.equal(entry.status, 'accepted'); assert.equal(f.session.playback.seq, 3);
+});
+
+test('accepted but the ordered state never arrives: the preview ends and the state is requested again', async t => {
+  const f = await sequenced(t);
+  f.session.ackTimeoutMs = 5;
+  const requests = () => f.messages.filter(m => m.event === 'state_request').length, before = requests();
+  const entry = f.session.issueCommand({paused: true, positionMs: 1000});
+  f.emit('ack', ack(entry.command, 'accepted', {seq: 3}));
+  assert.equal(requests(), before + 1); // Missing seq 3 is asked for.
+  assert.equal(f.session.optimisticPlayback(), entry.optimistic);
+  await tick(30);
+  assert.equal(entry.stale, true); assert.equal(f.session.optimisticPlayback(), null);
+});
+
+test('media change and host change end the epoch: pending commands are rejected locally and old acks ignored', async t => {
+  const f = await sequenced(t);
+  const entry = f.session.issueCommand({paused: true, positionMs: 1000});
+  f.client.rpc = async () => ({data: {...snapshot(), party: {...snapshot().party, host_only: false, media: {...media, meta_id: 'tt2'}, playback: {...playback, seq: 0, media_key: 'movie|tt2||'}}}});
+  await f.session.refresh();
+  assert.equal(entry.status, 'rejected'); assert.equal(entry.reason, 'stale_epoch');
+  assert.equal(f.session.latestCommand, null); assert.equal(f.session.optimisticPlayback(), null);
+  f.emit('ack', ack(entry.command, 'accepted', {seq: 1})); assert.equal(entry.status, 'rejected');
+  const g = await sequenced(t);
+  const pending = g.session.issueCommand({paused: true, positionMs: 1000});
+  g.client.rpc = async () => ({data: {...snapshot(), party: {...snapshot().party, host_only: false, host_member_id: 'host2', playback: {...playback, seq: 0, member_id: 'host2'}}}});
+  await g.session.refresh();
+  assert.equal(pending.reason, 'stale_epoch'); assert.equal(g.session.canSequence(), false); // The new host must announce itself.
+});
+
+test('reconnect: the authoritative snapshot is restored; closing clears commands and timers', async t => {
+  const f = await sequenced(t);
+  f.client.rpc = async name => name === 'watch_party_heartbeat'
+    ? {data: {...snapshot(), party: {...snapshot().party, host_only: false, playback: {...playback, seq: 7, paused: true}}}}
+    : {data: name === 'watch_party_clock' ? Date.now() : {messages: []}};
+  await f.connect(); await tick(0);
+  assert.equal(f.session.playback.seq, 7); assert.equal(f.session.playback.paused, true);
+  assert.ok(f.messages.some(m => m.event === 'state_request'));
+  const entry = f.session.issueCommand({paused: false, positionMs: 1000});
+  assert.equal(entry.command.base_seq, 7);
+  await f.session.close();
+  assert.equal(f.session.canSequence(), false); assert.equal(f.session.commands.size, 0); assert.equal(f.session.commandTimers.size, 0);
+});

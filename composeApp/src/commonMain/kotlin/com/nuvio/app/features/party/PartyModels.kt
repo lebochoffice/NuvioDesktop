@@ -120,7 +120,16 @@ data class PartyPlayback(
     val at: Long,
     @SerialName("media_key") val mediaKey: String? = null,
     val waiting: Boolean = false,
-)
+    // Fork command protocol (optional, ignored by older clients): the member
+    // whose command the host sequenced into this revision, and its command ID.
+    // memberId remains the publisher (the host). Never persisted.
+    @SerialName("origin_member_id") val originMemberId: String? = null,
+    @SerialName("command_id") val commandId: String? = null,
+) {
+    /** Member whose action produced this revision. */
+    val actorId: String?
+        get() = originMemberId ?: memberId
+}
 
 @Serializable
 data class PartyMember(
@@ -157,6 +166,8 @@ data class PartyPresence(
     val status: PartyMemberStatus = PartyMemberStatus.Browsing,
     @SerialName("media_key") val mediaKey: String? = null,
     @SerialName("behind_ms") val behindMs: Long? = null,
+    // Set by a host that sequences guest commands (PartyCommands.PROTOCOL).
+    val commands: Int? = null,
 )
 
 @Serializable

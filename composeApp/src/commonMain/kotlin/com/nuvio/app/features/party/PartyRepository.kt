@@ -86,6 +86,8 @@ object PartyRepository {
     private var resumedAt: TimeMark? = null
     private val ignoredWaiting = mutableSetOf<String>()
     private var rejoining = false
+    private val commands = PartyCommandLedger()
+    private var appliedReported: String? = null
 
     init {
         scope.launch {
@@ -192,6 +194,20 @@ object PartyRepository {
         scope.launch { publish(paused = paused, positionMs = positionMs, rate = rate, waiting = false, at = at) }
     }
 
+    /**
+     * The local player reached a revision the host sequenced from a guest
+     * command. Sent once per command; informational for the guest only.
+     */
+    fun reportApplied(commandId: String, seq: Long) {
+        scope.launch {
+            val party = _state.value.party ?: return@launch
+            val current = _playback.value ?: return@launch
+            if (!party.isHost || current.commandId != commandId || current.seq != seq || appliedReported == commandId) return@launch
+            appliedReported = commandId
+            runCatching { channel?.send("ack", ackPayload(party, commandId, current.originMemberId, "applied", seq, null)) }
+        }
+    }
+
     fun publishMedia(media: PartyMedia, positionMs: Long) {
         scope.launch {
             val party = _state.value.party ?: return@launch
@@ -202,7 +218,11 @@ object PartyRepository {
                 _playback.value
             } else {
                 nextPlayback(party, paused = false, positionMs = positionMs, rate = 1f, waiting = false, mediaKey = media.key, at = clock.nowMs())
-                    .also { _playback.value = it }
+                    .also {
+                        _playback.value = it
+                        commands.resetRevisions()
+                        commands.record(it.seq, party.memberId, system = false)
+                    }
             }
             persistJob?.cancel()
             val snapshot = runRemote { PartyApi.update(party.id, deviceId(), media, next) }
@@ -269,6 +289,8 @@ object PartyRepository {
         ignoredWaiting.clear()
         waitStartedAt = null
         resumedAt = null
+        commands.clear()
+        appliedReported = null
         _playback.value = playback?.takeIf { it.mediaKey == null || it.mediaKey == party.media.key }
         _state.value = PartyUiState(party = party)
         session.launch {
@@ -334,6 +356,7 @@ object PartyRepository {
         val party = _state.value.party ?: return
         when (event) {
             "state" -> decode(payload, PartyPlayback.serializer())?.let(::accept)
+            "command" -> onCommand(party, payload)
             "state_request" -> {
                 if (payload.string("member_id") == party.memberId) return
                 runCatching { channel?.send("status", encodePresence(ownPresence(party))) }
@@ -374,6 +397,56 @@ object PartyRepository {
             "chat" -> PartyChat.receive(payload)
         }
     }
+
+    // Only the host sequences. Realtime payload identities are not verified by
+    // the server: membership/host-only are checked against the last server
+    // snapshot, and the result is persisted by the host's own authorized RPC.
+    private suspend fun onCommand(party: ActiveParty, payload: JsonObject) {
+        if (!party.isHost) return
+        val command = decode(payload, PartyCommand.serializer()) ?: return
+        if (!PartyCommands.validId(command.commandId)) return
+        commands.result(command.commandId)?.let { previous ->
+            // Retry of a known command ID: answer again, never execute twice.
+            runCatching { channel?.send("ack", ackPayload(party, command.commandId, command.memberId, previous)) }
+            return
+        }
+        val current = _playback.value
+        val result = when (val decision = PartyCommands.decide(command, party, current, commands.revisions())) {
+            PartyCommandDecision.Accept -> {
+                publish(
+                    paused = command.paused,
+                    positionMs = command.positionMs,
+                    rate = current?.rate ?: 1f,
+                    waiting = false,
+                    origin = command.memberId,
+                    commandId = command.commandId,
+                )
+                val next = _playback.value
+                if (next != null) {
+                    val action = PartySync.actionOf(current, next)
+                    val name = party.member(command.memberId)?.displayName
+                    if (action != null && name != null) _notices.tryEmit(PartyNotice(name, action, next.positionMs, next.rate))
+                }
+                PartyCommandResult(accepted = true, seq = next?.seq)
+            }
+            is PartyCommandDecision.Reject -> PartyCommandResult(accepted = false, seq = current?.seq, reason = decision.reason)
+        }
+        commands.remember(command.commandId, result)
+        runCatching { channel?.send("ack", ackPayload(party, command.commandId, command.memberId, result)) }
+    }
+
+    private fun ackPayload(party: ActiveParty, commandId: String, origin: String, result: PartyCommandResult): JsonObject =
+        ackPayload(party, commandId, origin, if (result.accepted) "accepted" else "rejected", result.seq, result.reason)
+
+    private fun ackPayload(party: ActiveParty, commandId: String, origin: String?, status: String, seq: Long?, reason: String?): JsonObject =
+        buildJsonObject {
+            put("command_id", commandId)
+            put("member_id", party.memberId)
+            origin?.let { put("origin_member_id", it) }
+            put("status", status)
+            seq?.let { put("seq", it) }
+            reason?.let { put("reason", it) }
+        }
 
     private fun onPresence(joins: Map<String, Presence>, leaves: Map<String, Presence>) {
         val party = _state.value.party ?: return
@@ -466,6 +539,7 @@ object PartyRepository {
         val changed = media.key != party.media.key
         updateParty { it.copy(media = media) }
         if (changed) {
+            commands.resetRevisions()
             _playback.value = playback?.takeIf { it.mediaKey == null || it.mediaKey == media.key }
             if (_sharedStream.value?.mediaKey != media.key) _sharedStream.value = null
             ignoredWaiting.clear()
@@ -487,9 +561,10 @@ object PartyRepository {
             if (current.waiting) ignoredWaiting += PartySync.waitingMemberIds(party, emptySet())
         }
         _playback.value = candidate
-        if (candidate.memberId == party.memberId) return
+        commands.record(candidate.seq, candidate.actorId, system = candidate.waiting)
+        if (candidate.actorId == party.memberId) return
         val action = PartySync.actionOf(current, candidate) ?: return
-        val name = party.member(candidate.memberId)?.displayName ?: return
+        val name = party.member(candidate.actorId)?.displayName ?: return
         _notices.tryEmit(PartyNotice(name, action, candidate.positionMs, candidate.rate))
     }
 
@@ -499,11 +574,16 @@ object PartyRepository {
         rate: Float,
         waiting: Boolean,
         at: Long = clock.nowMs(),
+        origin: String? = null,
+        commandId: String? = null,
+        system: Boolean = false,
     ) {
         val party = _state.value.party ?: return
         if (!party.canControl) return
         val current = _playback.value
         val next = nextPlayback(party, paused, positionMs, rate, waiting, party.media.key, at)
+            .copy(originMemberId = origin, commandId = commandId)
+        commands.record(next.seq, next.actorId, system = system || waiting)
         if (current != null && current.paused && !paused) {
             resumedAt = clock.mark()
             if (current.waiting && !waiting) ignoredWaiting += PartySync.waitingMemberIds(party, emptySet())
@@ -538,7 +618,8 @@ object PartyRepository {
         persistJob = sessionScope?.launch {
             delay(PERSIST_DELAY)
             val party = _state.value.party ?: return@launch
-            val playback = _playback.value ?: return@launch
+            // Command fields are wire-only; the stored row keeps the existing schema.
+            val playback = _playback.value?.copy(originMemberId = null, commandId = null) ?: return@launch
             runRemote { PartyApi.update(party.id, deviceId(), null, playback) }?.let { applySnapshot(it) }
         }
     }
@@ -583,14 +664,14 @@ object PartyRepository {
                 val graceOver = resumedAt?.let { it.elapsedNow() > RESUME_GRACE } ?: true
                 if (waiting.isNotEmpty() && graceOver) {
                     val position = PartySync.expectedPositionMs(playback, clock.nowMs())
-                    publish(paused = true, positionMs = position, rate = playback.rate, waiting = true)
+                    publish(paused = true, positionMs = position, rate = playback.rate, waiting = true, system = true)
                     waitStartedAt = clock.mark()
                 }
             } else if (playback.waiting) {
                 val started = waitStartedAt ?: clock.mark().also { waitStartedAt = it }
                 if (waiting.isEmpty() || started.elapsedNow() > WAIT_LIMIT) {
                     ignoredWaiting += waiting
-                    publish(paused = false, positionMs = playback.positionMs, rate = playback.rate, waiting = false)
+                    publish(paused = false, positionMs = playback.positionMs, rate = playback.rate, waiting = false, system = true)
                 }
             }
         }
@@ -667,8 +748,13 @@ object PartyRepository {
     private fun encodePlayback(playback: PartyPlayback): JsonObject =
         PartyApi.json.encodeToJsonElement(PartyPlayback.serializer(), playback).jsonObject
 
-    private fun encodePresence(presence: PartyPresence): JsonObject =
-        PartyApi.json.encodeToJsonElement(PartyPresence.serializer(), presence).jsonObject
+    // The host announces that it sequences guest commands; browsers then send
+    // "command" events instead of their own revisions.
+    private fun encodePresence(presence: PartyPresence): JsonObject {
+        val party = _state.value.party
+        val announced = if (party?.isHost == true && presence.memberId == party.memberId) presence.copy(commands = PartyCommands.PROTOCOL) else presence
+        return PartyApi.json.encodeToJsonElement(PartyPresence.serializer(), announced).jsonObject
+    }
 
     private fun <T> decode(element: JsonElement, serializer: KSerializer<T>): T? =
         runCatching { PartyApi.json.decodeFromJsonElement(serializer, element) }.getOrNull()

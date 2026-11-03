@@ -76,6 +76,7 @@ const session = client ? new PartySession(client, deviceId, {
     }
   },
   playback: () => { updatePersonalHlsReadiness(); applySync(); renderSyncDebug(); },
+  command: entry => commandSettled(entry),
   stream: stream => {
     // Includes revocations, incompatible URLs and host source changes. Only an
     // authoritative media/room lifecycle event clears a personal source.
@@ -273,9 +274,11 @@ function presence() {
     status('Status nicht gesendet. Party-Verbindung prüfen.', true);
   });
 }
-// The own command is followed optimistically until the server confirms it; a
-// newer accepted party state (other member, host) always wins.
+// The own command is followed optimistically until the host (sequenced) or
+// the server confirms it; a newer accepted state of another member always wins.
 function effectivePlayback() {
+  const optimistic = session?.optimisticPlayback?.();
+  if (optimistic) return optimistic;
   const party = session?.playback, own = pendingCommand?.playback;
   return own && isNewerPlayback(own, party) ? own : party;
 }
@@ -541,6 +544,7 @@ function renderControlInfo() {
   const info = session?.room?.info, allowed = guestControl();
   $('controlInfo').textContent = !info ? 'Steuerung: nur der Host.'
     : !guestControlEnabled ? 'Steuerung: Play/Pause und Springen steuert der Desktop-Host. Gemeinsame Browsersteuerung ist in dieser Version ausgeschaltet. Lokale Bedienung trennt dich von der Party-Zeit.'
+    : allowed && session.canSequence() ? 'Steuerung: Play, Pause und Springen im Player gelten für alle (vom Host erlaubt). Der Desktop-Host ordnet und bestätigt jeden Befehl.'
     : allowed ? (guestControlMode === 'confirmed'
       ? 'Steuerung: Play, Pause und Springen im Player gelten für alle (vom Host erlaubt). Jeder Befehl wird zuerst vom Backend bestätigt.'
       : 'Steuerung: Play, Pause und Springen im Player gelten für alle (vom Host erlaubt), wie bei Desktop-Gästen.')
@@ -620,7 +624,7 @@ function seekTo(seconds) {
   if (guestControl()) {
     pendingSeek = ownSeek = {seconds, at: performance.now()};
     player.currentTime = seconds;
-    sendControl(effectivePlayback()?.paused ?? player.paused, seconds);
+    sendControl(effectivePlayback()?.paused ?? player.paused, seconds, 'seek');
   } else { markGesture(); player.currentTime = seconds; }
 }
 function skip(seconds) {
@@ -704,10 +708,37 @@ player.addEventListener('click', () => {
   else if (controlsShownAtPointer) hideControls(); else revealControls();
 });
 for (const event of ['timeupdate', 'play', 'pause', 'durationchange', 'volumechange', 'emptied']) player.addEventListener(event, () => renderPlayerUi());
+// Host-sequenced (Nuvio Desktop fork ≥ 0.1.39): every gesture is one command
+// with its own ID, sent at once: no RPC from the browser, no queue, no lock.
+// The host orders it; an identical seek that is still open is not repeated.
+function sendSequenced(paused, seconds, kind) {
+  const open = session.latestCommand;
+  if (kind === 'seek' && open && open.kind === 'seek' && !open.reached && ['pending', 'accepted'].includes(open.status) &&
+      open.command.paused === paused && Math.abs(open.command.position_ms - seconds * 1000) < 250) return true;
+  try { session.issueCommand({paused, positionMs: seconds * 1000, kind}); }
+  catch { return false; }
+  applySync(); renderControlInfo();
+  return true;
+}
+const REJECTED_TEXT = {
+  host_only: 'Der Host hat die Gaststeuerung deaktiviert. Party-Zeit wird wieder übernommen.',
+  superseded: 'Ein neuerer Befehl war schneller. Party-Zeit wird übernommen.',
+  stale_epoch: 'Host oder Film hat gewechselt. Der Befehl gilt nicht mehr.',
+};
+function commandSettled(entry) {
+  // Only the latest gesture speaks; older ones were already overtaken.
+  if (entry === session.latestCommand) {
+    if (entry.status === 'accepted' && !entry.stale) status(entry.kind === 'seek' ? 'Gesprungen für alle.' : entry.command.paused ? 'Pause für alle.' : 'Wiedergabe für alle.');
+    else if (entry.status === 'rejected') status(REJECTED_TEXT[entry.reason] || 'Der Host hat den Befehl abgelehnt. Party-Zeit wird übernommen.', true);
+    else if (entry.status === 'unknown') status('Keine Antwort vom Host. Der aktuelle Party-Zustand wird vom Server geladen.', true);
+  }
+  applySync(); renderControlInfo(); renderSyncDebug();
+}
 // Local user gesture → shared command. Coalesced: one RPC in flight, the
 // latest gesture queued. Confirmed states arrive via acceptPlayback.
-function sendControl(paused, seconds) {
+function sendControl(paused, seconds, kind = 'toggle') {
   if (!guestControl()) return false;
+  if (session.canSequence()) return sendSequenced(paused, seconds, kind);
   const request = {paused, seconds};
   if (pendingCommand) { queuedCommand = request; return true; }
   let command;
@@ -987,7 +1018,7 @@ player.addEventListener('seeked', () => {
   if (userSeekPending) {
     userSeekPending = false;
     const p = effectivePlayback();
-    if (syncEnabled && sendControl(p?.paused ?? player.paused, player.currentTime)) { presence(); return; }
+    if (syncEnabled && sendControl(p?.paused ?? player.paused, player.currentTime, 'seek')) { presence(); return; }
   }
   applySync(); presence();
 });
@@ -1050,7 +1081,11 @@ function renderSyncDebug() {
     playbackRate: number(player.playbackRate),
     guestControl: guestControl(), controlBlockedReason: controlBlockedReason(), commandPending: !!pendingCommand,
     commandsSent: number(d.commands),
-    lastCommandResult: choice(d.lastCommandResult, ['confirmed', 'stored_not_broadcast', 'broadcast', 'persisted', 'persist_failed', 'broadcast_failed', 'host_only', 'not_confirmed', 'closed', 'rpc_failed']),
+    lastCommandResult: choice(d.lastCommandResult, ['confirmed', 'stored_not_broadcast', 'broadcast', 'persisted', 'persist_failed', 'broadcast_failed', 'host_only', 'not_confirmed', 'closed', 'rpc_failed', 'pending', 'accepted', 'applied', 'rejected', 'unknown']),
+    // Host-sequenced commands: fixed labels only, never IDs.
+    hostSequencer: session?.hostCommands === true,
+    latestCommandStatus: choice(session?.latestCommand?.status, ['pending', 'accepted', 'applied', 'rejected', 'unknown']),
+    latestCommandReason: choice(session?.latestCommand?.reason, ['host_only', 'superseded', 'stale_epoch', 'not_member', 'invalid', 'rejected']),
   }, null, 2);
 }
 setInterval(() => { applySync(); presence(); renderControlInfo(); renderSyncDebug(); }, 1000);

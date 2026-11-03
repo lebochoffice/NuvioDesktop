@@ -17,7 +17,12 @@ need_file browser-site/tests/personal-hls-integration.test.js
 need_text composeApp/src/desktopMain/resources/player-ui/party.js 'NUVIO_BROWSER_PARTY_BRIDGE_V1'
 need_text composeApp/src/desktopMain/resources/player-ui/party.js 'nuvio-browser-party-host-v2'
 need_text composeApp/src/commonMain/kotlin/com/nuvio/app/features/party/PartyRepository.kt 'WATCH_PARTY_BROWSER_ORIGIN = "https://nuvio-watch-friends.pages.dev"'
-need_text composeApp/src/commonMain/kotlin/com/nuvio/app/features/player/PlayerScreenRuntimeParty.kt 'REMOTE_APPLY_GRACE'
+# Host-sequenced guest commands (command ID, ack) and event-based remote apply.
+need_file composeApp/src/commonMain/kotlin/com/nuvio/app/features/party/PartyCommands.kt
+need_text composeApp/src/commonMain/kotlin/com/nuvio/app/features/party/PartyChannel.kt '"command")'
+need_text composeApp/src/commonMain/kotlin/com/nuvio/app/features/party/PartyRepository.kt 'private suspend fun onCommand('
+need_text composeApp/src/commonMain/kotlin/com/nuvio/app/features/player/PlayerScreenRuntimeParty.kt 'var awaitingApply: PartyPlayback?'
+need_text browser-site/src/session.js 'export const COMMAND_PROTOCOL = 1;'
 # TorBox HLS for browser guests.
 need_file composeApp/src/commonMain/kotlin/com/nuvio/app/features/debrid/TorboxPartyHls.kt
 need_text composeApp/src/commonMain/kotlin/com/nuvio/app/features/party/PartyModels.kt '@SerialName("browser_hls")'

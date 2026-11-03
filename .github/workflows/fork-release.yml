@@ -95,7 +95,7 @@ jobs:
       - name: Desktop tests (party, updater, fork logic)
         shell: pwsh
         run: |
-          .\gradlew.bat :composeApp:desktopTest --tests '*Party*Test' --tests '*Update*Test' --tests '*ReleaseSelector*' --tests '*VersionUtils*' "-Pnuvio.webview2.dir=$env:NUVIO_WEBVIEW2_DIR" '-Dorg.gradle.jvmargs=-Xmx4g' '-Pkotlin.daemon.jvmargs=-Xmx3g' --max-workers=2 --no-configuration-cache --console=plain --stacktrace
+          .\gradlew.bat :composeApp:desktopTest --tests '*Party*Test' --tests '*Fork*UpdateTest' --tests '*AppUpdate*Test' --tests '*UpdateChannelTest' --tests '*ReleaseSelector*' --tests '*VersionUtils*' "-Pnuvio.webview2.dir=$env:NUVIO_WEBVIEW2_DIR" '-Dorg.gradle.jvmargs=-Xmx4g' '-Pkotlin.daemon.jvmargs=-Xmx3g' --max-workers=2 --no-configuration-cache --console=plain --stacktrace
           if ($LASTEXITCODE -ne 0) { throw 'Desktop tests failed; no release.' }
       - name: Build and verify MSI (same commit)
         shell: pwsh

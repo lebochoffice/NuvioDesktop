@@ -67,13 +67,17 @@ try {
     $reader = New-Object IO.StreamReader($partyClass.Open(), [Text.Encoding]::UTF8)
     try { $partyText = $reader.ReadToEnd() } finally { $reader.Dispose() }
     if (-not $partyText.Contains('https://nuvio-watch-friends.pages.dev')) { throw 'Browser watch party invite origin missing from packaged application' }
+    # 0.1.39: the host sequences browser commands (command ID + ack).
+    foreach ($entry in @('com/nuvio/app/features/party/PartyCommandLedger.class', 'com/nuvio/app/features/party/PartyCommand.class')) {
+        if (-not $zip.GetEntry($entry)) { throw "Guest command sequencer missing from packaged application: $entry" }
+    }
 } finally { $zip.Dispose() }
 if (-not (Test-Path -LiteralPath (Join-Path $app 'runtime/bin/server/jvm.dll'))) { throw 'Packaged Java runtime missing' }
 $manifest = [ordered]@{
     file = $msi.Name; bytes = $msi.Length; sha256 = (Get-FileHash -LiteralPath $msi.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
     product = $properties['ProductName']; productVersion = $properties['ProductVersion']; signature = [string](Get-AuthenticodeSignature -LiteralPath $msi.FullName).Status
     appJar = $jars[0].Name; requiredNativeEntries = $required; watchInBrowser = $true; javaRuntimePresent = $true
-    installedOrLaunched = $false; msiInspectedReadOnly = $true; stagedAppInspected = $true; msiJarMetadataMatchesStage = $true; publicBackendConfigured = $true; introDbConfigured = $true; browserInviteOrigin = 'https://nuvio-watch-friends.pages.dev'; sourceCommit = $env:GITHUB_SHA
+    installedOrLaunched = $false; msiInspectedReadOnly = $true; stagedAppInspected = $true; msiJarMetadataMatchesStage = $true; publicBackendConfigured = $true; introDbConfigured = $true; browserInviteOrigin = 'https://nuvio-watch-friends.pages.dev'; guestCommandSequencer = $true; sourceCommit = $env:GITHUB_SHA
 }
 $path = Join-Path $msi.DirectoryName ($msi.BaseName + '-verification.json')
 $manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $path -Encoding utf8

@@ -62,6 +62,7 @@ import com.nuvio.app.features.party.PartySource
 import com.nuvio.app.features.party.PartyStream
 import com.nuvio.app.features.party.isShareableStreamUrl
 import com.nuvio.app.features.party.PartySync
+import com.nuvio.app.features.party.PendingApply
 import com.nuvio.app.features.party.message
 import com.nuvio.app.features.party.UnreadBadge
 import com.nuvio.app.features.party.messageRes
@@ -418,11 +419,13 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
         var lastSeek: TimeMark? = null
         var lastCorrection: TimeMark? = null
         var lastSeq: Pair<Long, String?>? = null
-        // Set when a command from another member (e.g. a browser guest) was
-        // applied: the local player may need a moment (seek/HLS/network) to
-        // reach that state; until then its old state must not be published
-        // back as a new command (playback ping-pong).
-        var lastRemoteApply: TimeMark? = null
+        // Revision from another member (e.g. a browser guest command the host
+        // sequenced) that the local player has not reached yet (seek/HLS/
+        // network). Until it is reached, superseded by a newer revision or by a
+        // real local action, the player's old state is never published back as
+        // a new command (playback ping-pong). Event-based, no fixed time window.
+        var awaitingApply: PartyPlayback? = null
+        var applyRetries = 0
         var lastStatus: Triple<PartyMemberStatus, String, Long?>? = null
         var wasInBackground = false
         var publishedInitial = false
@@ -509,8 +512,11 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
                 val forced = lastSeq == null
                 lastSeq = identity
                 applyPartyPaused(playback.paused, force = forced)
-                val own = playback.memberId == party.memberId && !forced
-                lastRemoteApply = if (own || forced) null else clock.markNow()
+                // A revision the host sequenced from a guest command is published
+                // by this device but caused by someone else: apply it like a remote one.
+                val own = playback.actorId == party.memberId && !forced
+                awaitingApply = if (own) null else playback
+                applyRetries = 0
                 if ((!own || playback.paused) && abs(snapshot.positionMs - expected) > PartySync.PAUSED_TOLERANCE_MS) {
                     controller.seekTo(if (playback.paused) expected else expected + seekLeadMs)
                     measureSeekLead = !playback.paused
@@ -528,11 +534,39 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
                 continue
             }
 
-            if (snapshot.isPlaying != shouldPlay) {
-                if (lastRemoteApply?.let { it.elapsedNow() < REMOTE_APPLY_GRACE } == true) {
-                    mismatchSince = null
-                    continue
+            val pending = awaitingApply
+            if (pending != null) {
+                when (PartySync.pendingApply(pending.paused, shouldPlay, snapshot.isPlaying, snapshot.positionMs - expected)) {
+                    // A real local action changed the intent; it was published on its own.
+                    PendingApply.Superseded -> awaitingApply = null
+                    PendingApply.Applied -> {
+                        awaitingApply = null
+                        mismatchSince = null
+                        pending.commandId?.let { PartyRepository.reportApplied(it, pending.seq) }
+                    }
+                    // Play state reached; the regular correction below completes the seek.
+                    PendingApply.Seeking -> Unit
+                    PendingApply.Waiting -> {
+                        // Re-issue the programmatic apply; this is recovery, not a
+                        // lock: local controls publish directly at any time. Only a
+                        // player that never reaches it (failed play) is handled like
+                        // any other divergence afterwards.
+                        val since = mismatchSince ?: clock.markNow().also { mismatchSince = it }
+                        if (since.elapsedNow() > OUTSIDE_TOGGLE_DELAY) {
+                            mismatchSince = null
+                            if (applyRetries < MAX_APPLY_RETRIES) {
+                                applyRetries++
+                                applyPartyPaused(pending.paused, force = true)
+                            } else {
+                                awaitingApply = null
+                            }
+                        }
+                        continue
+                    }
                 }
+            }
+
+            if (snapshot.isPlaying != shouldPlay) {
                 val since = mismatchSince ?: clock.markNow().also { mismatchSince = it }
                 if (since.elapsedNow() > OUTSIDE_TOGGLE_DELAY) {
                     mismatchSince = null
@@ -757,7 +791,7 @@ private val PARTY_TICK = 250.milliseconds
 private val NOTICE_DURATION = 3_000.milliseconds
 private val BUFFERING_REPORT_DELAY = 1_000.milliseconds
 private val OUTSIDE_TOGGLE_DELAY = 1_200.milliseconds
-private val REMOTE_APPLY_GRACE = 3_000.milliseconds
+private const val MAX_APPLY_RETRIES = 3
 private val SEEK_SETTLE = 2_500.milliseconds
 private val CORRECTION_INTERVAL = 500.milliseconds
 private const val MAX_SEEK_LEAD_MS = 3_000L

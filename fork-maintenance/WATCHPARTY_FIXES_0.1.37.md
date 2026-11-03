@@ -28,7 +28,7 @@ Branch `feature/party-premium-ui`. Keine Commits, Pushes oder Deployments. Tests
 3. **Seek wartete auf `seeked`:** Eigene ±10-s- und Zeitleisten-Sprünge wurden erst nach dem nativen `seeked` gesendet; bei HLS kann das Sekunden dauern.
 
 **Änderungen:**
-- Desktop `PlayerScreenRuntimeParty.kt`: Nach einem angewendeten fremden Befehl wird das Rücksenden des lokalen Zustands 3 s lang unterdrückt (`REMOTE_APPLY_GRACE`). Eigene Bedienungen und alle übrigen Regeln (Host-only, Puffer-Koordinator, Korrekturen) bleiben unverändert.
+- Desktop `PlayerScreenRuntimeParty.kt`: Nach einem angewendeten fremden Befehl wird das Rücksenden des lokalen Zustands 3 s lang unterdrückt (`REMOTE_APPLY_GRACE`). *Ab 0.1.39 ersetzt durch ereignisbasiertes Abwarten (`awaitingApply`), siehe `WATCHPARTY_COMMANDS_0.1.39.md`.* Eigene Bedienungen und alle übrigen Regeln (Host-only, Puffer-Koordinator, Korrekturen) bleiben unverändert.
 - Browser `session.js`: Der Befehl gilt nach dem Broadcast als erledigt; die Speicherung (`watch_party_update`) läuft im Hintergrund. Späte oder veraltete Antworten werden geordnet (`isNewer`) angewendet und können nichts zurückdrehen.
 - Browser `main.js`: Eigene Sprünge senden den Zielzeitpunkt sofort. Das zugehörige native `seeking` wird als eigenes erkannt (`ownSeek`) und nicht doppelt gesendet.
 

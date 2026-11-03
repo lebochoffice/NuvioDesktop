@@ -11,10 +11,10 @@ Stand 03.11.2026, Branch `feature/party-premium-ui`. Nichts committet, gepusht, 
 3. **Konfliktprüfung und Fork-Invarianten:**
    - Bei Konflikt: Merge abgebrochen, Entwurfs-PR „(conflict)“ von `updates/nuvio-dev`, Lauf fehlgeschlagen.
    - Der Prüfer `check-fork-invariants.sh` wird **aus dem Fork-Dev** genommen, nicht aus dem gemergten Code, und macht nur `grep`/`test`.
-   - Er prüft: `browser-site`, Bridge-Marker und v2-Host in `party.js`, Cloudflare-Origin, `REMOTE_APPLY_GRACE`, TorBox-HLS, `browser_hls`, IntroDB-Guard, Fork-Updater (Owner `lebochoffice`, Prüfsummenpflicht) und die Fork-Workflows.
+   - Er prüft: `browser-site`, Bridge-Marker und v2-Host in `party.js`, Cloudflare-Origin, Host-Sequencer für Browserbefehle (`PartyCommands.kt`, `command`-Event, `awaitingApply`, `COMMAND_PROTOCOL`; ab 0.1.39 statt `REMOTE_APPLY_GRACE`), TorBox-HLS, `browser_hls`, IntroDB-Guard, Fork-Updater (Owner `lebochoffice`, Prüfsummenpflicht) und die Fork-Workflows.
    - Fehlt etwas: Entwurfs-PR „(invariants)“, Lauf fehlgeschlagen.
 4. **Sauber:** Entwurfs-PR „Integrate Nuvio Desktop Dev updates (checked)“ von `updates/nuvio-integration` nach `Dev`. Force-with-lease gilt nur für diesen Integrationsbranch, nie für Dev.
-5. **CI auf dem PR** (`Fork - Windows MSI`): Fork-Invarianten, Browser-Tests (`npm test`) und Vite-Build, Desktop-Tests `*Party*Test`, `*Update*Test`, `ReleaseSelector`, `VersionUtils`. Ein Fehler blockiert den Merge, sofern Dev diese Checks als „required“ verlangt.
+5. **CI auf dem PR** (`Fork - Windows MSI`): Fork-Invarianten, Browser-Tests (`npm test`) und Vite-Build, Desktop-Tests `*Party*Test`, Fork- und App-Updater-Tests, `ReleaseSelector`, `VersionUtils` (ohne das upstream-eigene `LinuxUpdateInstallTest`, das nur auf Linux-Pfaden läuft). Ein Fehler blockiert den Merge, sofern Dev diese Checks als „required“ verlangt.
 6. **Freigabe:** Standard ist der manuelle Merge. Auto-Merge nur mit der Repository-Variable `FORK_AUTO_MERGE=true`, und dann erst nach grünen Pflicht-Checks.
 7. **Release** (`Fork - Release Windows MSI`, nur manuell und mit Freigabe über die Umgebung `fork-release`):
    - Prüft Version und Tag: neu, numerischer Kern größer als jede bisherige `v*-watchparty`-Release.
@@ -65,6 +65,6 @@ Stand 03.11.2026, Branch `feature/party-premium-ui`. Nichts committet, gepusht, 
 ## Tests (lokal ausführen)
 
 ```powershell
-.\gradlew.bat :composeApp:desktopTest --tests '*Update*Test' --tests '*Party*Test' --tests '*ReleaseSelector*' --tests '*VersionUtils*' --no-configuration-cache --console=plain
+.\gradlew.bat :composeApp:desktopTest --tests '*Fork*UpdateTest' --tests '*AppUpdate*Test' --tests '*UpdateChannelTest' --tests '*Party*Test' --tests '*ReleaseSelector*' --tests '*VersionUtils*' --no-configuration-cache --console=plain
 bash fork-maintenance/check-fork-invariants.sh
 ```
