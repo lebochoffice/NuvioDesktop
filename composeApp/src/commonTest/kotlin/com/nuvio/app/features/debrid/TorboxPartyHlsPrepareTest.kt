@@ -94,6 +94,41 @@ class TorboxPartyHlsPrepareTest {
     }
 
     @Test
+    fun aPermanentTorBoxErrorSuchAs422EndsAtOnceInsteadOfPollingForTenMinutes() = runTest {
+        for (code in listOf(422, 400, TORBOX_PROBE_NOT_HLS)) {
+            val pauses = mutableListOf<Long>()
+            val failed = prepare(ok("https://flux-007.wnam.tb-cdn.io/stream/p/0/0/0/0"), listOf(code), pauses = pauses) as TorboxPartyHlsResult.Failed
+            assertEquals(TorboxHlsFailure.Unsupported, failed.reason)
+            assertEquals(emptyList(), pauses, "HTTP $code must not be polled")
+        }
+        // Real processing states are still polled, bounded as before.
+        val pauses = mutableListOf<Long>()
+        assertIs<TorboxPartyHlsResult.Ready>(prepare(ok("https://stream.torbox.app/a.m3u8"), listOf(404, 503, 429, 200), pauses = pauses))
+        assertEquals(3, pauses.size)
+    }
+
+    @Test
+    fun withTheFamilyShareTheOriginalAddressWithItsTokenIsUsedUnchanged() = runTest {
+        val keyed = "https://flux-007.wnam.tb-cdn.io/stream/p/0/0/0/0?token=$key"
+        val probed = mutableListOf<Pair<String, String>>()
+        val ready = prepareTorboxPartyHls(file, key, createStream = { _, _, _ -> ok(keyed) },
+            probe = { url, checkKey -> probed += url to checkKey; TORBOX_PROBE_OK_NEEDS_TOKEN }, pause = {}, familyShare = true)
+        assertIs<TorboxPartyHlsResult.Ready>(ready)
+        assertEquals(keyed, ready.url); assertTrue(ready.familyOnly); assertTrue(ready.propagateToken)
+        assertEquals(listOf(keyed to ""), probed) // Host-side probe of the original; no key-in-body check on it.
+        // Without the share service the keyed address is never used, and a 422 for
+        // the key-free address ends at once with a clear message.
+        probed.clear()
+        val refused = prepareTorboxPartyHls(file, key, createStream = { _, _, _ -> ok(keyed) },
+            probe = { url, checkKey -> probed += url to checkKey; 422 }, pause = {}) as TorboxPartyHlsResult.Failed
+        assertTrue("Freigabedienst" in refused.message && key !in refused.message)
+        assertTrue(probed.single().first.let { key !in it })
+        // A foreign host stays blocked even with the share service.
+        assertIs<TorboxPartyHlsResult.Failed>(prepareTorboxPartyHls(file, key,
+            createStream = { _, _, _ -> ok("https://evil-tb-cdn.io/a?token=$key") }, probe = { _, _ -> 200 }, pause = {}, familyShare = true))
+    }
+
+    @Test
     fun accountChangeAndMissingKeyNeverCallTheApi() = runTest {
         val calls = mutableListOf<String>()
         val other = prepareTorboxPartyHls(file.copy(accountFingerprint = "other"), key,

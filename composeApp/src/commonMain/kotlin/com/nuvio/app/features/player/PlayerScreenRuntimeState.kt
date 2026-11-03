@@ -313,6 +313,15 @@ internal class PlayerScreenRuntime(
     var hostPartyHls by mutableStateOf<com.nuvio.app.features.party.PartyHostHls?>(null)
     var hostPartyHlsStatus by mutableStateOf("")
     var hostPartyHlsBusy by mutableStateOf(false)
+    // Family share: the prepared TorBox address carries the account token.
+    var torboxFamilyOnly by mutableStateOf(false)
+    var torboxPropagateToken by mutableStateOf(false)
+    // Party members the host admitted for the family share (this party only).
+    var familyAdmitted by mutableStateOf<Set<String>>(emptySet())
+    var familyShareRev by mutableStateOf<Int?>(null)
+    var familyShareStatus by mutableStateOf("")
+    // Party of the last published family share, revoked when the host leaves.
+    var familySharePartyId by mutableStateOf<String?>(null)
     var partyBehindMs by mutableStateOf<Long?>(null)
     var partyRateNudge: Float? = null
     var partyPreviousKey: String? = null

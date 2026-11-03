@@ -1,7 +1,7 @@
 import {createClient} from '@supabase/supabase-js';
 import Hls from 'hls.js';
 import './style.css';
-import {normalizeCode, validCode, partyCodeFromPath, mediaKey, expectedPositionMs, isNewerPlayback, streamProblem, streamIsHls, browserPartyStream, publicConfigProblem, memberSync, memberSyncLabel} from './protocol.js';
+import {normalizeCode, validCode, partyCodeFromPath, mediaKey, expectedPositionMs, isNewerPlayback, streamProblem, streamIsHls, browserPartyStream, publicConfigProblem, memberSync, memberSyncLabel, shareWorkerOrigin, withFamilyToken} from './protocol.js';
 import {PartySession, callRpc} from './session.js';
 import {PersonalHlsSource, personalHlsUrlProblem} from './personal-hls.js';
 import {SYNC, HLS_TUNING, bufferedRanges, bufferAhead, correctionFor, seekTarget, SeekLead, StallTracker, qualityOptions} from './sync-policy.js';
@@ -18,6 +18,10 @@ const key = import.meta.env.VITE_SUPABASE_ANON_KEY?.trim();
 const guestControlSetting = String(import.meta.env.VITE_PARTY_GUEST_CONTROL ?? '').trim().toLowerCase();
 const guestControlMode = guestControlSetting === 'off' ? 'off' : ['1', 'confirmed'].includes(guestControlSetting) ? 'confirmed' : 'desktop';
 const guestControlEnabled = guestControlMode !== 'off';
+// Optional family share Worker: hands the host's TorBox address (with account
+// token) only to members the host admitted. Memory only, never stored/logged.
+const SHARE_WORKER = shareWorkerOrigin(import.meta.env.VITE_PARTY_SHARE_WORKER);
+let familyGrant = null, familyRequest = 0, familyStream = null;
 const configProblem = publicConfigProblem(url, key);
 const client = configProblem ? null : createClient(url, key, {
   auth: {autoRefreshToken: true, persistSession: true, detectSessionInUrl: false},
@@ -120,6 +124,9 @@ const session = client ? new PartySession(client, deviceId, {
     const browserPending = !!stream && Object.hasOwn(stream, 'browser_hls');
     // Optional desktop hint while browser_hls has no URL yet (older hosts send none).
     const browserState = browserPending ? String(stream.browser_hls?.state || 'preparing') : null;
+    // Family share: the address comes from the share service, not the broadcast.
+    if (browserState === 'family' && !stream.browser_hls?.url) { fetchFamilyStream(stream); return; }
+    if (!familyStream || stream?.browser_hls?.url !== familyStream.url) familyRequest++; // A newer host offer wins.
     const offered = browserPartyStream(stream);
     // A personal source is replaced only in the opt-in automatic mode, and
     // only by a playable host source; never by a revocation or pending HLS.
@@ -180,7 +187,7 @@ const session = client ? new PartySession(client, deviceId, {
   },
   error: e => status(friendlyError(e), true),
   closed: reason => {
-    lastHostStreamEvent = undefined;
+    lastHostStreamEvent = undefined; familyGrant = null; familyStream = null; familyRequest++;
     // Party ended / host left: a loaded source may keep playing locally (see
     // "ended"). A removal, leave or new join stops it.
     if (!keepAfterPartyEnd(reason)) resetVideo('Party-Verbindung geschlossen. Persönliche Quelle entfernt.');
@@ -974,7 +981,11 @@ function loadStream() {
     if (streamIsHls(stream)) {
       if (player.canPlayType('application/vnd.apple.mpegurl') && !Object.keys(stream.headers || {}).length) { player.src = stream.url; renderQuality(null, true); }
       else if (Hls.isSupported()) {
-        const instance = new Hls({...HLS_TUNING, debug: false, enableWorker: true, xhrSetup: xhr => {
+        const familyToken = familyStream && familyStream.url === stream.url ? familyStream.token : null;
+        const instance = new Hls({...HLS_TUNING, debug: false, enableWorker: true, xhrSetup: (xhr, requestUrl) => {
+          // Family share with propagate_token: variants that lost the query get the same token.
+          const target = familyToken ? withFamilyToken(requestUrl, familyToken) : requestUrl;
+          if (target !== requestUrl) xhr.open('GET', target, true);
           xhr.withCredentials = false;
           for (const [name, value] of Object.entries(stream.headers || {})) xhr.setRequestHeader(name, value);
         }});
@@ -992,6 +1003,54 @@ function loadStream() {
     } else player.src = stream.url;
     presence();
   } catch { failVideo('Die Quelle konnte nicht geöffnet werden. HTTPS, Format und Zugriffsrechte prüfen.'); }
+}
+
+// Admitted guests get the host's address from the share service with their own
+// session and membership; a per-guest grant refreshes it after a reconnect.
+async function fetchFamilyStream(offer) {
+  const room = session?.room, request = ++familyRequest;
+  if (!SHARE_WORKER) {
+    $('streamInfo').textContent = 'Der Host teilt per Familienfreigabe. Sie ist in diesem Browser-Build nicht eingerichtet; eigenen Video-Link verwenden.';
+    return;
+  }
+  if (!room) return;
+  const post = async (action, body, jwt) => {
+    const headers = {'Content-Type': 'application/json'};
+    if (jwt) headers.Authorization = `Bearer ${jwt}`;
+    const response = await fetch(`${SHARE_WORKER}/v1/${action}`, {method: 'POST', headers, body: JSON.stringify({party_id: room.info.id, ...body}), credentials: 'omit', cache: 'no-store'});
+    return {status: response.status, body: await response.json().catch(() => ({}))};
+  };
+  let result = null;
+  try {
+    if (familyGrant && familyGrant.party === room.info.id && familyGrant.expires > Date.now()) {
+      result = await post('stream', {grant: familyGrant.grant});
+      if (result.status !== 200) { familyGrant = null; result = null; }
+    }
+    if (!result) {
+      const {data: {session: auth} = {}} = await client.auth.getSession();
+      if (!auth?.access_token) throw new Error('auth');
+      result = await post('grant', {device_id: deviceId}, auth.access_token);
+      if (result.status === 200) familyGrant = {party: room.info.id, grant: result.body.grant, expires: Number(result.body.expires_at) || 0};
+    }
+  } catch { result = {status: 0, body: {}}; }
+  if (request !== familyRequest || session?.room !== room) return; // Superseded.
+  const url = result.status === 200 ? String(result.body.url || '') : '';
+  if (!url || result.body.media_key !== offer.media_key) {
+    // Not (or no longer) admitted: a running family source stops at once.
+    if (familyStream && loadedStream?.url === familyStream.url) resetVideo();
+    familyStream = null;
+    $('streamInfo').textContent = result.status === 403
+      ? 'Familienfreigabe: Du bist (noch) nicht zugelassen. Der Host kann dich im Party-Menü unter „Familienfreigabe“ einschalten.'
+      : result.status === 404 ? 'Familienfreigabe ist noch nicht aktiv. Sie startet, sobald der Host dich zulässt.'
+      : 'Familienfreigabe gerade nicht erreichbar. Beim nächsten Host-Update wird es erneut versucht.';
+    $('noStream').textContent = 'Keine Browserquelle für dich freigegeben.';
+    return;
+  }
+  // The token is the query of the shared address itself; kept in memory only.
+  let token = null;
+  try { token = result.body.propagate_token === true ? new URL(url).searchParams.get('token') : null; } catch { token = null; }
+  familyStream = {url, token};
+  session.handlers.stream({media_key: offer.media_key, url: '', stream_type: 'hls', browser_hls: {url, label: 'TorBox (Familie)'}});
 }
 
 $('personalHlsForm').addEventListener('submit', e => {

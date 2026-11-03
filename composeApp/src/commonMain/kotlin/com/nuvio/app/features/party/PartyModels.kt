@@ -53,6 +53,9 @@ data class PartyBrowserHls(
     val state: String? = null,
     // Optional display name ("TorBox HLS", "Video-Link des Hosts"); older browsers ignore it.
     val label: String? = null,
+    // state "family": the address is only available from the family share
+    // service for admitted guests; rev changes with every new share there.
+    val rev: Int? = null,
 )
 
 @Serializable

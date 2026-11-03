@@ -69,6 +69,9 @@ abstract class GenerateRuntimeConfigsTask : DefaultTask() {
     @get:Input
     abstract val partyBrowserOrigin: Property<String>
 
+    @get:Input
+    abstract val partyShareWorker: Property<String>
+
     @TaskAction
     fun generate() {
         val props = Properties()
@@ -171,6 +174,7 @@ abstract class GenerateRuntimeConfigsTask : DefaultTask() {
                 |
                 |object PartyBrowserConfig {
                 |    const val ORIGIN = "${partyBrowserOrigin.get()}"
+                |    const val SHARE_WORKER = "${partyShareWorker.get()}"
                 |}
                 """.trimMargin()
             )
@@ -585,6 +589,15 @@ val partyBrowserOriginValue: String = when (val requested = providers.gradleProp
     else -> throw GradleException("nuvio.party.browserOrigin must be 'production', 'preview', $partyBrowserProductionOrigin or $partyBrowserPreviewOrigin (got '$requested').")
 }
 
+// Optional family share Worker (party-share-worker/). Empty by default: then
+// TorBox addresses with the account token are never shared. Only an exact
+// HTTPS origin without path, port or credentials is accepted.
+val partyShareWorkerValue: String = providers.gradleProperty("nuvio.party.shareWorker").orNull?.trim()?.trimEnd('/').orEmpty().also {
+    if (it.isNotEmpty() && !Regex("^https://[a-z0-9-]+(\\.[a-z0-9-]+)+$").matches(it)) {
+        throw GradleException("nuvio.party.shareWorker must be an https origin such as https://nuvio-party-share.example.workers.dev (got '$it').")
+    }
+}
+
 val generateRuntimeConfigs = tasks.register<GenerateRuntimeConfigsTask>("generateRuntimeConfigs") {
     outputDir.set(generatedRuntimeConfigDir)
     // NUVIO_BROWSER_PARTY_BRIDGE_V1: optional file must be unset if absent.
@@ -602,6 +615,7 @@ val generateRuntimeConfigs = tasks.register<GenerateRuntimeConfigsTask>("generat
     sentryDesktopDsn.set(runtimeConfigValue("SENTRY_DESKTOP_DSN"))
     tmdbApiKey.set(runtimeConfigValue("TMDB_API_KEY"))
     partyBrowserOrigin.set(partyBrowserOriginValue)
+    partyShareWorker.set(partyShareWorkerValue)
     sentryEnvironment.set(
         when {
             requestedGradleTasks.any { "benchmark" in it } -> "benchmark"

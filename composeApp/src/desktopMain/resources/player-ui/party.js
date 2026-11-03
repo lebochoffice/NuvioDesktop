@@ -506,7 +506,34 @@ const buildPartyHostSettings = party => {
   if (hlsStatus) section.appendChild(partyElement("p", "party-note", `Browser-HLS: ${hlsStatus}`));
   if (party.torboxLinkAvailable) section.appendChild(buildPartyTorboxLink(party));
   if (party.hostHlsAllowed) section.appendChild(buildPartyHostHls(party));
+  if (party.familyAvailable) section.appendChild(buildPartyFamily(party));
   return section;
+};
+
+// Family share: TorBox addresses with the account token reach only the members
+// switched on here, through the protected share service. "Share my stream"
+// stays the host's decision; no extra confirmation.
+const buildPartyFamily = party => {
+  const box = partyElement("div", "party-family");
+  box.appendChild(partyElement("p", "party-switch-title", "Familienfreigabe (TorBox)"));
+  box.appendChild(partyElement("p", "party-note", "Nur eingeschaltete Mitglieder erhalten deinen TorBox-Stream samt Account-Token. Ein schon erhaltener Token bleibt bei ihnen nutzbar, bis du ihn bei TorBox neu erzeugst."));
+  const members = normalizeItems(party.familyMembers);
+  if (!members.length) box.appendChild(partyElement("p", "party-note", "Noch keine weiteren Mitglieder in der Party."));
+  members.forEach(member => {
+    const row = partyElement("label", "party-family-member");
+    const check = partyElement("input");
+    check.type = "checkbox";
+    check.checked = Boolean(member.admitted);
+    check.dataset.partyFocus = `family:${String(member.id)}`;
+    check.addEventListener("click", event => event.stopPropagation());
+    check.addEventListener("change", () => send(`partyFamilyAdmit:${String(member.id)}`, check.checked ? 1 : 0));
+    row.appendChild(check);
+    row.appendChild(document.createTextNode(` ${String(member.name || "Mitglied")}`));
+    box.appendChild(row);
+  });
+  const status = String(party.familyStatus || "").trim();
+  if (status) box.appendChild(partyElement("p", "party-note", status));
+  return box;
 };
 
 // Drafts survive panel rebuilds; they live only in this overlay's memory.

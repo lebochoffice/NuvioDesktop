@@ -93,3 +93,14 @@ test('browser_hls label names a host video link; control characters are stripped
   assert.equal(browserPartyStream({...stream, browser_hls: {url: stream.url}}).name, 'TorBox HLS');
   assert.equal(browserPartyStream({...stream, browser_hls: {url: stream.url, label: 'x'.repeat(200)}}).name.length, 80);
 });
+
+test('family share helpers: token only for TorBox HTTPS hosts without a token; strict Worker origin', async () => {
+  const {withFamilyToken, shareWorkerOrigin, isTorboxStreamHost} = await import('../src/protocol.js');
+  assert.equal(withFamilyToken('https://a.tb-cdn.io/v.m3u8', 'T'), 'https://a.tb-cdn.io/v.m3u8?token=T');
+  assert.equal(withFamilyToken('https://a.tb-cdn.io/v.m3u8?token=X', 'T'), 'https://a.tb-cdn.io/v.m3u8?token=X');
+  for (const url of ['https://evil-tb-cdn.io/v.m3u8', 'http://a.tb-cdn.io/v.m3u8', 'https://cdn.example.test/v.m3u8']) assert.equal(withFamilyToken(url, 'T'), url);
+  assert.equal(withFamilyToken('https://a.tb-cdn.io/v.m3u8', null), 'https://a.tb-cdn.io/v.m3u8');
+  assert.ok(isTorboxStreamHost('flux-007.wnam.tb-cdn.io')); assert.ok(!isTorboxStreamHost('tb-cdn.io.evil.example'));
+  assert.equal(shareWorkerOrigin('https://nuvio-party-share.example.workers.dev/'), 'https://nuvio-party-share.example.workers.dev');
+  for (const bad of ['', 'http://x.example', 'https://x.example/path', 'https://user@x.example', 'https://x.example:8443', null]) assert.equal(shareWorkerOrigin(bad), '');
+});

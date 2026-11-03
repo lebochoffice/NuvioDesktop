@@ -28,6 +28,29 @@ export function safeStreamUrl(value) {
     return true;
   } catch { return false; }
 }
+// TorBox stream hosts (same allowlist as Desktop and the share Worker).
+export const TORBOX_STREAM_DOMAINS = ['torbox.app', 'tb-cdn.cx', 'tb-cdn.io', 'tb-cdn.pw', 'tb-cdn.sh', 'tb-cdn.st', 'tb-cdn.to', 'tb-cdn.earth'];
+export function isTorboxStreamHost(host) {
+  const name = String(host || '').toLowerCase();
+  if (!name || name.length > 253 || name.endsWith('.') || name.split('.').some(label => !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label))) return false;
+  return TORBOX_STREAM_DOMAINS.some(domain => name === domain || name.endsWith(`.${domain}`));
+}
+// Family share: TorBox variant/segment requests that lost the query get the
+// share's own token back, only on TorBox stream hosts and only over HTTPS.
+export function withFamilyToken(requestUrl, token) {
+  if (!token) return requestUrl;
+  try {
+    const url = new URL(requestUrl);
+    if (url.protocol !== 'https:' || !isTorboxStreamHost(url.hostname) || url.searchParams.has('token')) return requestUrl;
+    url.searchParams.set('token', token);
+    return url.toString();
+  } catch { return requestUrl; }
+}
+// Exact HTTPS origin of the optional family share Worker, or '' (disabled).
+export const shareWorkerOrigin = value => {
+  const origin = String(value ?? '').trim().replace(/\/+$/, '');
+  return /^https:\/\/[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(origin) ? origin : '';
+};
 export const isHlsUrl = url => /\.m3u8(?:[?#]|$)/i.test(url);
 export const isDashUrl = url => /\.mpd(?:[?#]|$)/i.test(url);
 export const isUnsupportedFile = url => /\.(?:mkv|avi|torrent)(?:[?#]|$)/i.test(url) || /^(?:magnet|ipfs):/i.test(url);

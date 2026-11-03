@@ -233,10 +233,15 @@ internal fun PlayerScreenRuntime.currentPartyStream(): PartyStream? {
     val accountKey = com.nuvio.app.features.debrid.DebridSettingsRepository.snapshot()
         .apiKeyFor(com.nuvio.app.features.debrid.DebridProviders.TORBOX_ID)
     if (torboxFile != null && torboxFile.accountFingerprint != com.nuvio.app.features.debrid.torboxAccountFingerprint(accountKey)) return null
+    val ready = torboxPartyStream?.takeIf { torboxFile != null && it.mediaKey == partyKey && torboxPreparedFile == torboxFile }
+    // The address with the account token goes only to the family share service.
+    val family = hostLink == null && ready != null && torboxFamilyOnly
     val prepared = if (hostLink != null) PartyStream(mediaKey = partyKey, url = hostLink.url, streamType = "hls")
-        else torboxPartyStream?.takeIf { torboxFile != null && it.mediaKey == partyKey && torboxPreparedFile == torboxFile }
+        else ready?.takeUnless { family }
     val browserHls = if (hostLink != null) {
         com.nuvio.app.features.party.PartyBrowserHls(url = hostLink.url, label = hostLink.label)
+    } else if (family) {
+        com.nuvio.app.features.party.PartyBrowserHls(url = null, state = "family", rev = familyShareRev)
     } else if (torboxFile != null) {
         com.nuvio.app.features.party.PartyBrowserHls(
             url = prepared?.url,
@@ -250,6 +255,9 @@ internal fun PlayerScreenRuntime.currentPartyStream(): PartyStream? {
     // nothing is shared.
     val originalShareable = isShareableStreamUrl(activeSourceUrl) && activeSourceAudioUrl == null
     if (!originalShareable || (accountKey.isNotBlank() && hlsOnlyNeeded(accountKey))) {
+        // Family share: browsers fetch the address from the service; Desktop
+        // guests get no URL (an empty one is ignored by isShareableStreamUrl).
+        if (family) return PartyStream(mediaKey = partyKey, url = "", streamType = "hls", browserHls = browserHls)
         prepared ?: return null
         return PartyStream(
             mediaKey = partyKey,
@@ -377,6 +385,8 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
     LaunchedEffect(partyId, key, torboxFile, torboxKey, partyState.party?.isHost, partyState.party?.media?.key, torboxPartyRefresh) {
         torboxPartyStream = null
         torboxPreparedFile = null
+        torboxFamilyOnly = false
+        torboxPropagateToken = false
         torboxPartyStatus = ""
         torboxPartyPhase = com.nuvio.app.features.debrid.TorboxHlsPhase.Unavailable
         if (torboxFile == null || partyId == null || partyState.party?.isHost != true || partyState.party?.media?.key != key) return@LaunchedEffect
@@ -385,10 +395,14 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
         var renewals = 0
         // One producer per player/file; cancellation on media, account or party change.
         while (isActive) {
-            val result = com.nuvio.app.features.debrid.prepareTorboxPartyHls(torboxFile, torboxKey) {
-                torboxPartyPhase = com.nuvio.app.features.debrid.TorboxHlsPhase.Processing
-                torboxPartyStatus = "TorBox verarbeitet den Stream. Die Playlist ist noch nicht fertig; es wird bis zu etwa 10 Minuten geprüft."
-            }
+            val result = com.nuvio.app.features.debrid.prepareTorboxPartyHls(
+                torboxFile, torboxKey,
+                onProcessing = {
+                    torboxPartyPhase = com.nuvio.app.features.debrid.TorboxHlsPhase.Processing
+                    torboxPartyStatus = "TorBox verarbeitet den Stream. Die Playlist ist noch nicht fertig; es wird bis zu etwa 10 Minuten geprüft."
+                },
+                familyShare = com.nuvio.app.features.party.PartyFamilyShare.configured,
+            )
             when (result) {
                 is com.nuvio.app.features.debrid.TorboxPartyHlsResult.Failed -> {
                     torboxPartyStream = null
@@ -403,14 +417,19 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
                 }
                 is com.nuvio.app.features.debrid.TorboxPartyHlsResult.Ready -> {
                     torboxPreparedFile = torboxFile
+                    torboxFamilyOnly = result.familyOnly
+                    torboxPropagateToken = result.propagateToken
                     torboxPartyStream = PartyStream(mediaKey = key, url = result.url, name = "TorBox HLS", streamType = "hls")
                     torboxPartyPhase = com.nuvio.app.features.debrid.TorboxHlsPhase.Ready
-                    torboxPartyStatus = "TorBox HLS vorbereitet. Freigabe erst mit Share my stream. Mehrgerätezugriff und Browserwiedergabe müssen geprüft werden."
+                    torboxPartyStatus = if (result.familyOnly)
+                        "TorBox HLS mit Account-Token vorbereitet. Nur zugelassene Familienmitglieder erhalten ihn über den Freigabedienst, wenn Share my stream an ist."
+                    else "TorBox HLS vorbereitet. Freigabe erst mit Share my stream. Mehrgerätezugriff und Browserwiedergabe müssen geprüft werden."
                     // Renew only after an explicit expiry/access failure, never on
                     // every recomposition, toggle or transient network failure.
                     while (isActive) {
                         delay(60_000L)
-                        val code = try { com.nuvio.app.features.debrid.probeTorboxPartyHls(result.url, torboxKey) }
+                        // The family address carries the token by design: no key check on it.
+                        val code = try { com.nuvio.app.features.debrid.probeTorboxPartyHls(result.url, if (result.familyOnly) "" else torboxKey) }
                             catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
                             catch (_: Exception) { 0 }
                         if (code == 498 || code == com.nuvio.app.features.debrid.TORBOX_PROBE_UNSAFE_HOST) {
@@ -466,6 +485,35 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
 
     LaunchedEffect(sharing, sharedStream) {
         if (sharing) PartyRepository.shareStream(sharedStream)
+    }
+
+    // Family share: publish the token address for the admitted members while
+    // "Share my stream" is on; revoke when it is off, the title changes or the
+    // party ends. Guests that already loaded it keep playing.
+    val familyUrl = torboxPartyStream?.url?.takeIf { torboxFamilyOnly && torboxPartyStream?.mediaKey == key }
+    val familyHost = partyState.party?.isHost == true && partyState.party?.media?.key == key
+    LaunchedEffect(partyId, key, sharing, familyUrl, familyAdmitted, familyHost) {
+        val previous = familySharePartyId
+        if (previous != null && previous != partyId) {
+            // Host left: no new grants. Guests keep what they already loaded.
+            com.nuvio.app.features.party.PartyFamilyShare.revoke(previous)
+            familySharePartyId = null
+        }
+        if (partyId == null) { familyAdmitted = emptySet(); familyShareRev = null; familyShareStatus = ""; return@LaunchedEffect }
+        if (!com.nuvio.app.features.party.PartyFamilyShare.configured || !familyHost) return@LaunchedEffect
+        if (!sharing || familyUrl == null) {
+            if (familySharePartyId != null) com.nuvio.app.features.party.PartyFamilyShare.revoke(partyId)
+            familySharePartyId = null
+            familyShareRev = null
+            familyShareStatus = if (familyUrl != null) "Familienfreigabe beendet (Share my stream ist aus)." else ""
+            return@LaunchedEffect
+        }
+        val members = partyState.party?.members.orEmpty().map { it.id }.toSet()
+        val admitted = familyAdmitted.filter { it in members }
+        val result = com.nuvio.app.features.party.PartyFamilyShare.publish(partyId, key, familyUrl, admitted, torboxPropagateToken)
+        familySharePartyId = partyId
+        familyShareRev = result.rev
+        familyShareStatus = result.message
     }
 
     LaunchedEffect(key, partyId) {

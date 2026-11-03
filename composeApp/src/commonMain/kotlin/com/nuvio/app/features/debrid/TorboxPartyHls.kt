@@ -17,7 +17,12 @@ internal fun torboxAccountFingerprint(apiKey: String): String =
 internal enum class TorboxHlsFailure { RequestFailed, Denied, Unsupported, NotReady }
 
 internal sealed interface TorboxPartyHlsResult {
-    class Ready(val url: String) : TorboxPartyHlsResult
+    /**
+     * familyOnly: the original TorBox address carrying the account token. It is
+     * never broadcast; only the family share service may hand it to admitted
+     * guests. propagateToken: variant playlists need the same `token`.
+     */
+    class Ready(val url: String, val familyOnly: Boolean = false, val propagateToken: Boolean = false) : TorboxPartyHlsResult
     class Failed(val message: String, val reason: TorboxHlsFailure = TorboxHlsFailure.RequestFailed) : TorboxPartyHlsResult {
         // The account/plan refused access (not a transient failure).
         val denied: Boolean get() = reason == TorboxHlsFailure.Denied
@@ -87,6 +92,24 @@ internal fun torboxKeyFreeUrl(url: String, apiKey: String): String? {
 
 /** Probe result: a redirect or variant left the TorBox stream hosts. */
 internal const val TORBOX_PROBE_UNSAFE_HOST = 497
+/** Probe result: 2xx, but the body is no HLS playlist (our own check, not TorBox). */
+internal const val TORBOX_PROBE_NOT_HLS = 415
+/** Probe result: playable, but the variant playlist only works with the same `token`. */
+internal const val TORBOX_PROBE_OK_NEEDS_TOKEN = 290
+
+/**
+ * Statuses that show TorBox is still producing the playlist. Everything else
+ * (422 parameter error, 400, 405, not HLS, …) is permanent: fail at once
+ * instead of polling for ten minutes.
+ */
+internal val TORBOX_PROCESSING_STATUSES = setOf(0, 202, 404, 408, 425, 429, 500, 502, 503, 504)
+
+/** The address with `token` set to [token] (for variant requests that need it). */
+internal fun withTorboxToken(url: String, token: String): String? = try {
+    URLBuilder(Url(url)).apply { parameters.remove("token"); parameters.append("token", token) }.buildString()
+} catch (_: Exception) { null }
+
+internal fun torboxTokenOf(url: String): String? = try { Url(url).parameters["token"]?.takeIf { it.isNotBlank() } } catch (_: Exception) { null }
 
 // Field names verified against TorBox's public Stream/streamFunctions modules.
 // Never serialize an entire response: user_token may be the account API key.
@@ -135,10 +158,14 @@ internal suspend fun prepareTorboxPartyHls(
         { key, torrentId, fileId -> TorboxApiClient.createStream(key, torrentId, fileId) },
     probe: suspend (url: String, apiKey: String) -> Int = { url, key -> probeTorboxPartyHls(url, key) },
     pause: suspend (Long) -> Unit = { kotlinx.coroutines.delay(it) },
+    // True only when the protected family share service is configured: then
+    // the original address with the account token is used (host side only).
+    familyShare: Boolean = false,
 ): TorboxPartyHlsResult {
     if (apiKey.isBlank()) return TorboxPartyHlsResult.Failed("TorBox: Kein gespeicherter Account-Key verfügbar.")
     if (file.accountFingerprint != torboxAccountFingerprint(apiKey)) return TorboxPartyHlsResult.Failed("TorBox: Account geändert. Quelle im neuen Account erneut auswählen.")
     var keyFree = false
+    var familyOnly = false
     val url = try {
         val response = createStream(apiKey, file.torrentId, file.fileId)
         val root = response.body as? JsonObject
@@ -148,7 +175,13 @@ internal suspend fun prepareTorboxPartyHls(
         if (!response.isSuccessful || (root?.get("success") as? JsonPrimitive)?.booleanOrNull != true) {
             return TorboxPartyHlsResult.Failed("TorBox: API-Anfrage fehlgeschlagen (HTTP ${response.status}). Account, Tarif und Verfügbarkeit prüfen.")
         }
-        when (val candidate = torboxHlsCandidate(response.body, apiKey)) {
+        // Same address TorBox returned (host already checked by the candidate).
+        val original = ((root?.get("data") as? JsonObject)?.get("hls_url") as? JsonPrimitive)?.contentOrNull
+        val candidate = torboxHlsCandidate(response.body, apiKey)
+        val keyed = candidate is TorboxHlsCandidate.KeyOnlyInTokenParameter || candidate == TorboxHlsCandidate.ContainsAccountKey
+        // Family share: keep the original address with its token unchanged.
+        if (familyShare && keyed && original != null && isTorboxStreamUrl(original)) original.also { familyOnly = true }
+        else when (candidate) {
             is TorboxHlsCandidate.Url -> candidate.url
             // Variant A: try the same stream without the account key. Never the keyed URL.
             is TorboxHlsCandidate.KeyOnlyInTokenParameter -> candidate.keyFreeUrl.also { keyFree = true }
@@ -171,17 +204,25 @@ internal suspend fun prepareTorboxPartyHls(
     // Poll the same newly created session; never create duplicates merely
     // because the transcoder has not produced its first manifest yet.
     for ((attempt, delayMs) in TORBOX_PLAYLIST_POLL_DELAYS_MS.withIndex()) {
-        val manifest = try { probe(url, apiKey) }
+        // The original family address legitimately carries the token: no key check on it.
+        val manifest = try { probe(url, if (familyOnly) "" else apiKey) }
             catch (cancelled: CancellationException) { throw cancelled }
             catch (_: Exception) { 0 }
-        if (manifest == 200) return TorboxPartyHlsResult.Ready(url)
-        if (keyFree && manifest in listOf(401, 403)) return TorboxPartyHlsResult.Failed(
-            "TorBox: Die HLS-Adresse enthält den Account-Key, und ohne ihn liefert TorBox die Playlist nicht (HTTP $manifest). Aus Sicherheitsgründen nicht geteilt.",
+        if (manifest == 200 || manifest == TORBOX_PROBE_OK_NEEDS_TOKEN) {
+            return TorboxPartyHlsResult.Ready(url, familyOnly = familyOnly, propagateToken = manifest == TORBOX_PROBE_OK_NEEDS_TOKEN)
+        }
+        if (keyFree && manifest in listOf(401, 403, 422)) return TorboxPartyHlsResult.Failed(
+            "TorBox: Ohne Account-Key liefert TorBox die Playlist nicht (HTTP $manifest). Für die Familienfreigabe muss der Freigabedienst eingerichtet sein.",
             TorboxHlsFailure.Unsupported,
         )
         if (manifest in listOf(401, 403, 410)) return TorboxPartyHlsResult.Failed("TorBox: Streamzugriff verweigert (HTTP $manifest). Account und Mehrgeräteberechtigung prüfen.", TorboxHlsFailure.Denied)
         if (manifest == 498) return TorboxPartyHlsResult.Failed("TorBox: Playlist enthält Account-Zugangsdaten. Aus Sicherheitsgründen nicht geteilt.", TorboxHlsFailure.Unsupported)
         if (manifest == TORBOX_PROBE_UNSAFE_HOST) return TorboxPartyHlsResult.Failed("TorBox: Weiterleitung oder Variante auf einem Host außerhalb der TorBox-CDNs. Aus Sicherheitsgründen nicht geteilt.", TorboxHlsFailure.Unsupported)
+        if (manifest == TORBOX_PROBE_NOT_HLS) return TorboxPartyHlsResult.Failed("TorBox: Die Antwort ist keine HLS-Playlist (#EXTM3U fehlt).", TorboxHlsFailure.Unsupported)
+        // Permanent errors end at once; only real processing states are polled again.
+        if (manifest !in TORBOX_PROCESSING_STATUSES) return TorboxPartyHlsResult.Failed(
+            "TorBox: Playlist-Anfrage abgelehnt (HTTP $manifest).", TorboxHlsFailure.Unsupported,
+        )
         if (attempt == 0) onProcessing()
         pause(delayMs)
     }
@@ -296,15 +337,26 @@ internal suspend fun probeTorboxPartyHls(
     if (!isTorboxStreamUrl(finalUrl)) return TORBOX_PROBE_UNSAFE_HOST
     val result = torboxPlaylistStatus(response.status, response.body, accountKey)
     if (result != 200 || !response.body.contains("#EXT-X-STREAM-INF")) return result
-    // Master playlist: the first variant must work the same way (and be key free).
-    val variant = com.nuvio.app.features.party.firstHlsVariant(response.body, finalUrl) ?: return 422
+    // Master playlist: the first variant must work the same way (and be key free),
+    // requested exactly as hls.js would resolve it.
+    val variant = com.nuvio.app.features.party.firstHlsVariant(response.body, finalUrl) ?: return TORBOX_PROBE_NOT_HLS
     if (!isTorboxStreamUrl(variant)) return TORBOX_PROBE_UNSAFE_HOST
     val child = fetch(variant)
     if (!isTorboxStreamUrl(child.url.ifBlank { variant })) return TORBOX_PROBE_UNSAFE_HOST
-    return torboxPlaylistStatus(child.status, child.body, accountKey)
+    val childResult = torboxPlaylistStatus(child.status, child.body, accountKey)
+    // A relative variant loses the query. If it only works with the same token,
+    // report that, so admitted browsers add it to TorBox requests themselves.
+    val token = torboxTokenOf(url) ?: torboxTokenOf(finalUrl)
+    if (childResult in listOf(401, 403, 422) && token != null && torboxTokenOf(variant) == null) {
+        val withToken = withTorboxToken(variant, token) ?: return childResult
+        val retry = fetch(withToken)
+        if (!isTorboxStreamUrl(retry.url.ifBlank { withToken })) return TORBOX_PROBE_UNSAFE_HOST
+        return if (torboxPlaylistStatus(retry.status, retry.body, accountKey) == 200) TORBOX_PROBE_OK_NEEDS_TOKEN else childResult
+    }
+    return childResult
 }
 
 internal fun torboxPlaylistStatus(status: Int, body: String, accountKey: String?): Int {
     if (!accountKey.isNullOrBlank() && (body.contains(accountKey) || body.contains(encodePathSegment(accountKey)))) return 498
-    return if (status in 200..299 && body.trimStart().startsWith("#EXTM3U")) 200 else status.takeUnless { it in 200..299 } ?: 422
+    return if (status in 200..299 && body.trimStart().startsWith("#EXTM3U")) 200 else status.takeUnless { it in 200..299 } ?: TORBOX_PROBE_NOT_HLS
 }

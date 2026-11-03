@@ -38,7 +38,7 @@ class FakeHls {
 // existing tests keep the manual flow, so the default here is a stored 'off'.
 // joined: party code remembered in this tab (reload rejoin); fakeJoin records
 // joins instead of calling the backend and leaves the room empty until then.
-async function harness({debug = false, guestControl = false, guestJoin = false, rpc = null, path = '/', autoHost = false, joined = null, fakeJoin = false} = {}) {
+async function harness({debug = false, guestControl = false, guestJoin = false, rpc = null, path = '/', autoHost = false, joined = null, fakeJoin = false, share = null} = {}) {
   const elements = new Map(), storageWrites = [], sent = [], timers = [], historyCalls = [];
   const location = {pathname: path, origin: 'https://watch.example.test'};
   let clock = 0, tick = () => {};
@@ -77,7 +77,13 @@ async function harness({debug = false, guestControl = false, guestJoin = false, 
   const context = vm.createContext({
     ...protocol, ...syncPolicy, PersonalHlsSource, personalHlsUrlProblem, Hls: FakeHls, PartySession: FakeSession,
     createClient: () => client, callRpc: (_client, name, args) => { if (rpc?.[name]) return rpc[name](args); throw Error('Unexpected RPC'); }, URL, Blob,
-    env: {VITE_SUPABASE_URL: 'https://backend.example.test', VITE_SUPABASE_ANON_KEY: 'sb_publishable_TEST', ...(guestControl === true ? {VITE_PARTY_GUEST_CONTROL: '1'} : typeof guestControl === 'string' ? {VITE_PARTY_GUEST_CONTROL: guestControl} : {}), ...(guestJoin ? {VITE_PARTY_GUEST_JOIN: '1'} : {})},
+    // Family share Worker double: share.handle(action, body, headers) -> {status, body}.
+    fetch: async (url, init) => {
+      if (!share) throw Error('Unexpected fetch');
+      const reply = await share.handle(String(url).split('/v1/')[1], JSON.parse(init.body), init.headers || {});
+      return {status: reply.status, json: async () => reply.body};
+    },
+    env: {VITE_SUPABASE_URL: 'https://backend.example.test', VITE_SUPABASE_ANON_KEY: 'sb_publishable_TEST', ...(guestControl === true ? {VITE_PARTY_GUEST_CONTROL: '1'} : typeof guestControl === 'string' ? {VITE_PARTY_GUEST_CONTROL: guestControl} : {}), ...(guestJoin ? {VITE_PARTY_GUEST_JOIN: '1'} : {}), ...(share ? {VITE_PARTY_SHARE_WORKER: 'https://share.example.test'} : {})},
     document: {getElementById: get, createElement: () => new Element()}, location, history: {replaceState: (_state, _title, url) => { historyCalls.push(url); location.pathname = url; }},
     window: {addEventListener: (event, callback) => windowEvents.set(event, callback)},
     sessionStorage: {getItem: key => key === 'nuvio-party-debug' ? (debug ? '1' : null) : key === 'nuvio-party-joined' ? joined : 'test-device', setItem: (...args) => storageWrites.push(args)},
@@ -1705,4 +1711,87 @@ test('a TorBox CDN browser source loads for guests and is restored by a reconnec
   assert.equal(instance.destroyed, undefined);
   h.session.receive('stream', {member_id: 'host', stream: null}); // "Share my stream" off.
   assert.equal(instance.destroyed, true);
+});
+
+// --- 0.1.46: family share through the protected Worker ---
+
+const FAMILY_URL = 'https://flux-007.wnam.tb-cdn.io/stream/p/master.m3u8?token=FAKE_ACCOUNT_TOKEN_FOR_TESTS';
+const familyOffer = (rev = 1) => ({media_key: 'movie|tt1||', url: '', stream_type: 'hls', browser_hls: {url: null, state: 'family', rev}});
+function familyWorker({admitted = true, propagate = true} = {}) {
+  const calls = [];
+  const worker = {calls, admitted, grants: new Set(), handle: async (action, body, headers) => {
+    calls.push({action, body, auth: headers.Authorization || ''});
+    if (action === 'grant') {
+      if (!headers.Authorization) return {status: 401, body: {error: 'auth'}};
+      if (!worker.admitted) return {status: 403, body: {error: 'not_admitted'}};
+      const grant = `grant-${calls.length}`.padEnd(43, 'x'); worker.grants.add(grant);
+      return {status: 200, body: {grant, url: FAMILY_URL, media_key: 'movie|tt1||', rev: 1, propagate_token: propagate, expires_at: Date.now() + 600000}};
+    }
+    if (action === 'stream') {
+      if (!worker.admitted || !worker.grants.has(body.grant)) return {status: 403, body: {error: 'revoked'}};
+      return {status: 200, body: {url: FAMILY_URL, media_key: 'movie|tt1||', rev: 1, propagate_token: propagate, expires_at: Date.now() + 600000}};
+    }
+    return {status: 404, body: {}};
+  }};
+  return worker;
+}
+const familySignedIn = {session: {access_token: 'guest-session-jwt', user: {id: 'u1', is_anonymous: false}}};
+
+test('an admitted guest fetches the original address with its own session, loads it, syncs and adds the token to TorBox variants', async () => {
+  const share = familyWorker();
+  const h = await harness({autoHost: true, share, rpc: familySignedIn});
+  h.session.receive('stream', {member_id: 'host', stream: familyOffer()}); await settlePlayback();
+  assert.deepEqual(share.calls.map(c => c.action), ['grant']);
+  assert.equal(share.calls[0].auth, 'Bearer guest-session-jwt'); assert.equal(share.calls[0].body.device_id, 'test-device');
+  const instance = h.desktopHls();
+  assert.equal(instance.source, FAMILY_URL); // Token kept unchanged.
+  assert.match(h.get('streamInfo').textContent, /TorBox \(Familie\)/);
+  h.metadata(); await settlePlayback();
+  assert.equal(h.sync(), true); assert.equal(h.player.currentTime, 5); // Party time, no Sync click.
+  const opened = [], xhr = {open: (...args) => opened.push(args), setRequestHeader() {}};
+  instance.config.xhrSetup(xhr, 'https://flux-007.wnam.tb-cdn.io/stream/p/720.m3u8');
+  assert.equal(opened[0][1], 'https://flux-007.wnam.tb-cdn.io/stream/p/720.m3u8?token=FAKE_ACCOUNT_TOKEN_FOR_TESTS');
+  opened.length = 0; instance.config.xhrSetup(xhr, 'https://cdn.example.test/other.ts');
+  assert.equal(opened.length, 0); // Never to other hosts.
+  assert.ok(!JSON.stringify(h.storageWrites).includes('FAKE_ACCOUNT_TOKEN_FOR_TESTS')); // Memory only.
+  assert.ok(!JSON.stringify(h.sent).includes('FAKE_ACCOUNT_TOKEN_FOR_TESTS'));
+});
+
+test('a reconnect re-offer uses the per-guest grant and does not reload; withdrawing the admission stops playback', async () => {
+  const share = familyWorker();
+  const h = await harness({autoHost: true, share, rpc: familySignedIn});
+  h.session.receive('stream', {member_id: 'host', stream: familyOffer()}); await settlePlayback();
+  h.metadata(); await settlePlayback();
+  const instance = h.desktopHls();
+  h.session.receive('stream', {member_id: 'host', stream: familyOffer()}); await settlePlayback();
+  assert.equal(share.calls.at(-1).action, 'stream'); assert.equal(share.calls.at(-1).auth, ''); // Grant only, no session.
+  assert.equal(h.desktopHls(), instance); assert.equal(instance.destroyed, undefined);
+  share.admitted = false; // Host switched this member off (new rev).
+  h.session.receive('stream', {member_id: 'host', stream: familyOffer(2)}); await settlePlayback();
+  assert.equal(instance.destroyed, true); assert.equal(h.player.paused, true);
+  assert.match(h.get('streamInfo').textContent, /nicht zugelassen/);
+});
+
+test('a member who is not admitted, or a build without the Worker, never loads the family source', async () => {
+  const share = familyWorker({admitted: false});
+  const h = await harness({autoHost: true, share, rpc: familySignedIn});
+  h.session.receive('stream', {member_id: 'host', stream: familyOffer()}); await settlePlayback();
+  assert.equal(h.desktopHls(), null); assert.match(h.get('streamInfo').textContent, /nicht zugelassen/);
+  const plain = await harness({autoHost: true});
+  plain.session.receive('stream', {member_id: 'host', stream: familyOffer()}); await settlePlayback();
+  assert.equal(plain.desktopHls(), null); assert.match(plain.get('streamInfo').textContent, /nicht eingerichtet/);
+  const forged = await harness({autoHost: true, share: familyWorker(), rpc: familySignedIn});
+  forged.session.receive('stream', {member_id: 'guest-2', stream: familyOffer()}); await settlePlayback();
+  assert.equal(forged.desktopHls(), null); // Only the host's offer triggers a fetch.
+});
+
+test('when the host leaves, an admitted guest keeps watching the loaded family source alone', async () => {
+  const share = familyWorker();
+  const h = await harness({autoHost: true, share, rpc: familySignedIn});
+  h.session.receive('stream', {member_id: 'host', stream: familyOffer()}); await settlePlayback();
+  h.metadata(); await settlePlayback();
+  const instance = h.desktopHls();
+  h.session.handlers.ended('Der Host hat die Party verlassen.', 'host_left');
+  assert.equal(instance.destroyed, undefined); assert.equal(h.get('ctlSolo').textContent, 'Zur Party');
+  h.session.receive('stream', {member_id: 'host', stream: null});
 });

@@ -1,0 +1,25 @@
+# Copy to wrangler.toml and deploy yourself (not deployed by this repository).
+# Only public values here; the TorBox key never lives in the Worker config.
+name = "nuvio-party-share"
+main = "src/index.js"
+compatibility_date = "2026-10-01"
+workers_dev = true
+
+[vars]
+# Same public backend as the Desktop/browser build (publishable or anon key only).
+SUPABASE_URL = "https://api.nuvio.tv"
+SUPABASE_ANON_KEY = "sb_publishable_REPLACE_ME"
+# Browser pages that may call /v1/grant and /v1/stream (comma separated, exact origins).
+ALLOWED_ORIGINS = "https://feature-party-premium-ui.nuvio-watch-friends.pages.dev"
+
+[[durable_objects.bindings]]
+name = "PARTY_SHARE"
+class_name = "PartyShare"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["PartyShare"]
+
+# No logpush and no tail consumers: request bodies carry the share address.
+[observability]
+enabled = false

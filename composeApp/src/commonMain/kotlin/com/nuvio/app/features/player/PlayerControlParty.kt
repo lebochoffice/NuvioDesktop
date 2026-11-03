@@ -40,6 +40,10 @@ data class PlayerControlPartyState(
     val torboxChoicesBusy: Boolean = false,
     val torboxChoicesStatus: String = "",
     val torboxChoices: List<PlayerControlTorboxChoice> = emptyList(),
+    // Family share of TorBox addresses with the account token.
+    val familyAvailable: Boolean = false,
+    val familyStatus: String = "",
+    val familyMembers: List<PlayerControlFamilyMember> = emptyList(),
     val canEnd: Boolean = false,
     val seatsLabel: String = "",
     val maxMembers: Int = 0,
@@ -54,6 +58,13 @@ data class PlayerControlPartyState(
     val messageToken: Long = 0L,
     val labels: Map<String, String> = emptyMap(),
     val chat: PlayerControlChatState = PlayerControlChatState(),
+)
+
+@Serializable
+data class PlayerControlFamilyMember(
+    val id: String = "",
+    val name: String = "",
+    val admitted: Boolean = false,
 )
 
 @Serializable

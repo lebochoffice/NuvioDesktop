@@ -127,6 +127,27 @@ class TorboxPartyHlsTest {
         assertEquals(emptyList(), fetched) // A foreign start address is never requested.
         assertEquals(498, probeTorboxPartyHls(start, "account-secret") { page(it, media.replace("seg0.ts", "seg0.ts?token=account-secret")) })
     }
+    @Test fun `a relative variant that needs the same token is reported, and non HLS answers are our own 415`() = kotlinx.coroutines.test.runTest {
+        val start = "https://flux-007.wnam.tb-cdn.io/stream/p/master.m3u8?token=FAKE_TOKEN"
+        val variant = "https://flux-007.wnam.tb-cdn.io/stream/p/720.m3u8"
+        val master = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\n720.m3u8\n"
+        val requested = mutableListOf<String>()
+        val code = probeTorboxPartyHls(start, "") { url ->
+            requested += url
+            when {
+                url == start -> page(start, master)
+                url == variant -> page(variant, """{"detail":"token missing"}""", status = 422) // Like FastAPI without token.
+                url.startsWith(variant) && "token=FAKE_TOKEN" in url -> page(url, media)
+                else -> page(url, "", status = 404)
+            }
+        }
+        assertEquals(TORBOX_PROBE_OK_NEEDS_TOKEN, code)
+        assertEquals(3, requested.size)
+        assertEquals(422, probeTorboxPartyHls(start, "") { url -> if (url == start) page(start, master) else page(url, "{}", status = 422) })
+        assertEquals(TORBOX_PROBE_NOT_HLS, probeTorboxPartyHls(start, "") { page(it, "<html>Player</html>") })
+        assertEquals(TORBOX_PROBE_NOT_HLS, torboxPlaylistStatus(200, "{}", null))
+        assertEquals(422, torboxPlaylistStatus(422, "{}", null)) // A real 422 is TorBox's own status.
+    }
     private fun cloud(json: String) = Json { ignoreUnknownKeys = true }.decodeFromString<List<TorboxCloudItemDto>>(json)
     @Test fun `an addon stream maps only to a unique file of the user's own TorBox cloud`() {
         val items = cloud("""[
