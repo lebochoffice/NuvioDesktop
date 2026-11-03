@@ -25,8 +25,8 @@ function setup(party, initialStorage = {}) {
   const section = context.buildBridge(party);
   const input = section.children.find(child => child.tag === 'input' && child.className === 'party-browser-host');
   assert.ok(input, 'The harness must edit the actual browser address input');
-  const button = section.children.at(-1);
-  return {input, button, events, confirmations, sharingSwitch: () => context.buildSwitch('sharing', 'Share', '', party.sharing, 'partySharing')};
+  const button = section.children.at(-1), nuvioButton = section.children.at(-2);
+  return {input, button, nuvioButton, events, confirmations, sharingSwitch: () => context.buildSwitch('sharing', 'Share', '', party.sharing, 'partySharing')};
 }
 test('host browser invite copies exactly the current code without granting stream consent', {skip: !source && 'Separate browser repository: desktop source unavailable'}, () => {
   const f = setup({code:'UXZ83H', sharing:false});
@@ -104,4 +104,13 @@ test('preview test build: the invite uses exactly the configured preview, even o
 test('an unexpected origin from the app falls back to production', {skip: !source && 'Separate browser repository: desktop source unavailable'}, () => {
   const f = setup({code: 'UXZ83H', sharing: false, browserOrigin: 'https://evil.example'});
   assert.equal(f.input.value, 'https://nuvio-watch-friends.pages.dev');
+});
+
+test('"Watch in Nuvio" copies the original Nuvio invite; "Watch in Browser" stays the last button', {skip: !source && 'Separate browser repository: desktop source unavailable'}, () => {
+  const f = setup({code:'UXZ83H', sharing:false});
+  f.nuvioButton.click();
+  assert.deepEqual(f.events, [{type: 'partyCopyNuvioLink', value: 0}]); // Kotlin copies https://nuvio.tv/party/<CODE>.
+  f.button.click();
+  assert.equal(f.events[1].type.split(':')[0], 'partyBrowserInvite');
+  assert.equal(f.confirmations.length, 0);
 });

@@ -97,6 +97,12 @@ internal fun PlayerScreenRuntime.rememberPartyControlsState(): PlayerControlPart
             clipboard.setText(AnnotatedString(url))
             showPartyMessage("Browser link copied")
         }
+        copyNuvioInvite = {
+            party?.let {
+                clipboard.setText(AnnotatedString(partyInviteLink(it.code)))
+                showPartyMessage("Nuvio link copied")
+            }
+        }
         copyPartyInvite = {
             if (invite != null) {
                 clipboard.setText(AnnotatedString(invite))
@@ -326,6 +332,7 @@ internal fun PlayerScreenRuntime.handlePartyControlsEvent(type: String, value: D
     when (type) {
         "partyStart" -> startParty()
         "partyCopyInvite" -> copyPartyInvite()
+        "partyCopyNuvioLink" -> copyNuvioInvite()
         "partyHostOnly" -> PartyRepository.setHostOnly(value >= 0.5)
         "partySharing" -> PartyRepository.setSharing(value >= 0.5)
         // Restarts the single HLS producer; ignored while one is preparing.

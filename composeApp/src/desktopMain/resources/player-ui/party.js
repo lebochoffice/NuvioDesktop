@@ -482,7 +482,9 @@ const buildPartyBrowserShare = party => {
     // Copying the link must never implicitly enable source sharing.
     return copy();
   };
-  section.appendChild(partyButtonElement("Watch in Browser · Copy link", "primary", "browserShare", onClick));
+  // Same party code: the original Nuvio invite, then the browser invite (last).
+  section.appendChild(partyButtonElement("Watch in Nuvio – Copy link", "", "nuvioShare", () => send("partyCopyNuvioLink", 0)));
+  section.appendChild(partyButtonElement("Watch in Browser – Copy link", "primary", "browserShare", onClick));
   return section;
 };
 

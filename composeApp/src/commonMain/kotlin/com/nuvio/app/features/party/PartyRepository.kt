@@ -846,10 +846,12 @@ const val WATCH_PARTY_BROWSER_PREVIEW_ORIGIN = "https://feature-party-premium-ui
 val watchPartyBrowserOrigin: String
     get() = PartyBrowserConfig.ORIGIN.takeIf { it == WATCH_PARTY_BROWSER_PREVIEW_ORIGIN } ?: WATCH_PARTY_BROWSER_ORIGIN
 
+// "Watch in Nuvio": the original upstream invite (opens the Nuvio app).
+// "Watch in Browser" builds its own link from watchPartyBrowserOrigin.
 fun partyInviteLink(code: String): String = partyInviteLink(code, ServerConfigurationRepository.active.value.isCustom)
 
-internal fun partyInviteLink(code: String, customBackend: Boolean, origin: String = watchPartyBrowserOrigin): String =
-    if (customBackend) "nuvio://party/$code" else "$origin/party/$code"
+internal fun partyInviteLink(code: String, customBackend: Boolean): String =
+    if (customBackend) "nuvio://party/$code" else "https://nuvio.tv/party/$code"
 
 const val PARTY_CODE_LENGTH = 6
 private const val PARTY_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
