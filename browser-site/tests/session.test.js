@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import {strict as assert} from 'node:assert';
-import {PartySession} from '../src/session.js';
+import {PartySession, connectionReason} from '../src/session.js';
 
 const media = {meta_type: 'movie', meta_id: 'tt1', title: 'Example'};
 const playback = {seq: 2, member_id: 'host', paused: false, position_ms: 1000, rate: 1, at: 1000, media_key: 'movie|tt1||'};
@@ -545,4 +545,110 @@ test('reconnect: the authoritative snapshot is restored; closing clears commands
   assert.equal(entry.command.base_seq, 7);
   await f.session.close();
   assert.equal(f.session.canSequence(), false); assert.equal(f.session.commands.size, 0); assert.equal(f.session.commandTimers.size, 0);
+});
+
+// --- P0 after 0.1.39: realtime recovery and rejected-command catch-up. Written, not executed here. ---
+// Separate channel objects per subscribe, so stale callbacks can be replayed.
+function realtimeFixture() {
+  const calls = [], messages = [], channels = [];
+  const client = {
+    auth: {getSession: async () => ({data: {session: {access_token: 'session-jwt-REFRESHED', user: {id: 'u', is_anonymous: false}}}})},
+    realtime: {setAuth: async token => calls.push(['auth', token])},
+    channel: () => {
+      const ch = {events: [], on(_type, {event}, callback) { this.events.push({event, callback}); return this; },
+        subscribe(callback) { this.cb = callback; }, track: async () => 'ok', send: async p => { messages.push(p); return 'ok'; }};
+      channels.push(ch); calls.push(['channel']); return ch;
+    },
+    removeChannel: async ch => calls.push(['remove', channels.indexOf(ch)]),
+    rpc: async (name, args) => {
+      calls.push([name, args]);
+      if (name === 'watch_party_clock') return {data: Date.now()};
+      if (name === 'watch_party_list_messages') return {data: {messages: []}};
+      return {data: snapshot()};
+    },
+  };
+  const session = new PartySession(client, 'device', {});
+  session.reconnectBaseMs = 5; session.rejoinGraceMs = 20;
+  return {client, calls, messages, channels, session, emit: (ch, event, payload) => ch.events.find(e => e.event === event).callback({payload})};
+}
+
+test('CLOSED is final in realtime-js: the channel is recreated with a refreshed token; stale callbacks are ignored', async t => {
+  const f = realtimeFixture(), states = []; t.after(() => f.session.close());
+  f.session.handlers.connection = s => states.push(s);
+  await f.session.join('UXZ83H', 'Guest');
+  const first = f.channels[0];
+  await first.cb('SUBSCRIBED');
+  await first.cb('CLOSED');
+  assert.equal(f.session.diagnostics.connection, 'CLOSED');
+  await tick(40);
+  assert.equal(f.channels.length, 2); // New channel instead of a dead one.
+  assert.ok(f.calls.some(c => c[0] === 'remove' && c[1] === 0));
+  assert.equal(f.calls.filter(c => c[0] === 'auth').at(-1)[1], 'session-jwt-REFRESHED');
+  assert.equal(f.session.channel, f.channels[1]); assert.equal(f.session.diagnostics.reconnects, 1);
+  await first.cb('CLOSED'); await first.cb('SUBSCRIBED'); // Stale callbacks of the removed channel.
+  assert.equal(f.session.diagnostics.connection, 'CONNECTING');
+  f.emit(first, 'state', {...playback, seq: 50}); assert.equal(f.session.playback.seq, 2); // Old channel events are ignored.
+  await f.channels[1].cb('SUBSCRIBED');
+  assert.equal(f.session.diagnostics.connection, 'SUBSCRIBED');
+  assert.ok(f.messages.filter(m => m.event === 'state_request').length >= 2); // Authoritative state requested again.
+  assert.deepEqual(states.slice(0, 3), ['CONNECTING', 'SUBSCRIBED', 'CLOSED']);
+  assert.equal(states.at(-1), 'SUBSCRIBED');
+});
+
+test('CHANNEL_ERROR / TIMED_OUT: realtime-js may rejoin by itself; only a rejoin that never succeeds recreates the channel', async t => {
+  const f = realtimeFixture(); t.after(() => f.session.close());
+  await f.session.join('UXZ83H', 'Guest');
+  const ch = f.channels[0];
+  await ch.cb('CHANNEL_ERROR', new Error('socket closed'));
+  await tick(5); await ch.cb('SUBSCRIBED'); // Automatic rejoin within the grace period.
+  await tick(40);
+  assert.equal(f.channels.length, 1); assert.equal(f.session.diagnostics.reconnects, 0);
+  await ch.cb('TIMED_OUT');
+  await tick(60);
+  assert.equal(f.channels.length, 2); assert.equal(f.session.diagnostics.reconnects, 1);
+});
+
+test('the connection log keeps timestamps and fixed reason categories, never error texts or tokens', async t => {
+  const f = realtimeFixture(); t.after(() => f.session.close());
+  await f.session.join('UXZ83H', 'Guest');
+  await f.channels[0].cb('CHANNEL_ERROR', new Error('Token has expired eyJhbGciOiJIUzI1NiJ9.SECRET_SENTINEL'));
+  const log = f.session.diagnostics.connectionLog;
+  assert.equal(log.at(-1).state, 'CHANNEL_ERROR'); assert.equal(log.at(-1).reason, 'auth_token');
+  assert.ok(!Number.isNaN(Date.parse(log.at(-1).at)));
+  assert.ok(!JSON.stringify(f.session.diagnostics).includes('SECRET_SENTINEL'));
+  assert.equal(connectionReason(new Error('Unauthorized: You do not have permissions')), 'not_authorized');
+  assert.equal(connectionReason(new Error('ChannelRateLimitReached: Too many messages per second')), 'rate_limited');
+  assert.equal(connectionReason(null), null);
+});
+
+test('reconnect() (refresh button while disconnected) rebuilds once even if called repeatedly; close cancels pending reconnects', async t => {
+  const f = realtimeFixture(); t.after(() => f.session.close());
+  await f.session.join('UXZ83H', 'Guest');
+  await f.channels[0].cb('CLOSED');
+  await Promise.all([f.session.reconnect(), f.session.reconnect()]);
+  assert.equal(f.channels.length, 2);
+  await f.channels[1].cb('CLOSED');
+  await f.session.close();
+  await tick(60);
+  assert.equal(f.channels.length, 2); assert.equal(f.session.reconnectTimer, null);
+});
+
+test('an expired Nuvio session is reported instead of reconnecting with an invalid token', async t => {
+  const f = realtimeFixture(), errors = [], states = []; t.after(() => f.session.close());
+  f.session.handlers.error = e => errors.push(e.message); f.session.handlers.connection = s => states.push(s);
+  await f.session.join('UXZ83H', 'Guest');
+  f.client.auth.getSession = async () => ({data: {session: null}});
+  await f.session.reconnect();
+  assert.equal(f.channels.length, 1); assert.equal(states.at(-1), 'CLOSED');
+  assert.match(errors.at(-1), /Anmeldung abgelaufen/);
+});
+
+test('a rejected command with a newer host revision fetches that revision instead of keeping an outdated party state', async t => {
+  const f = await sequenced(t);
+  const entry = f.session.issueCommand({paused: true, positionMs: 1000});
+  const requests = () => f.messages.filter(m => m.event === 'state_request').length, heartbeats = () => f.calls.filter(c => c[0] === 'watch_party_heartbeat').length;
+  const [r, h] = [requests(), heartbeats()];
+  f.emit('ack', ack(entry.command, 'rejected', {reason: 'host_only', seq: 9}));
+  assert.equal(entry.status, 'rejected');
+  assert.equal(requests(), r + 1); assert.equal(heartbeats(), h + 1);
 });

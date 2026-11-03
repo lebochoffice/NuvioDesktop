@@ -24,7 +24,7 @@ Branch `feature/party-premium-ui`, lokal und nicht committet (03.11.2026). Tests
 - **Epoche** = (`host_member_id`, `media_key`). Nach einem Host- oder Medienwechsel werden alte Befehle abgelehnt (`stale_epoch`). Der Browser verwirft dann alle offenen Befehle.
 - **Entscheidung im Host** (`PartyCommands.decide`, Verlauf in `PartyCommandLedger`):
   - Abgelehnt werden: Host-only (`host_only`), Nicht-Mitglied laut letztem Server-Snapshot (`not_member`), falsche Epoche und ungültige ID.
-  - Angenommen wird ein Befehl nur, wenn seit `base_seq` ausschließlich Revisionen dieses Gastes (schnelles Umschalten) oder Koordinator-Wartezustände entstanden sind. Sonst gilt `superseded`: Der zuerst beim Host eingetroffene Befehl gewinnt.
+  - Angenommen wird ein Befehl nur, wenn seit `base_seq` ausschließlich Revisionen dieses Gastes (schnelles Umschalten) oder Koordinator-Wartezustände entstanden sind. Sonst gilt `superseded`: Der zuerst beim Host eingetroffene Befehl gewinnt. *Nach dem Live-Test entfernt: Die Regel lehnte Befehle mit veralteter `base_seq` ab und verursachte die P0-Regression. Jetzt gilt die Ankunftsreihenfolge, siehe `WATCHPARTY_P0_AFTER_0.1.39.md`.*
 - **Annahme:** Der Host veröffentlicht eine normale `state`-Revision mit seiner eigenen `seq` sowie `origin_member_id` und `command_id`. Danach sendet er `ack` mit `accepted`, `rejected` oder später `applied`.
 - **Doppelte Command-ID:** Der Host antwortet mit dem gespeicherten Ergebnis und führt den Befehl nie zweimal aus (64 IDs).
 - **Speicherung:** Der Host speichert wie bisher über sein eigenes, autorisiertes `watch_party_update`. Die Command-Felder sind nur Wire-Felder und werden vor dem Speichern entfernt; das Schema der Datenbankzeile bleibt also unverändert.

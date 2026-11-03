@@ -65,14 +65,25 @@ const session = client ? new PartySession(client, deviceId, {
     showPanel('watch');
   },
   connection: state => {
+    // CONNECTING is transient (initial join or automatic reconnect), not a loss.
+    if (state === 'CONNECTING') {
+      realtimeReconnecting = connectionLost;
+      $('connection').textContent = connectionLost ? 'Verbinde neu …' : 'Verbinde …';
+      renderPlayerUi(); return;
+    }
+    realtimeReconnecting = false;
     connectionLost = state !== 'SUBSCRIBED';
     $('connection').textContent = state === 'SUBSCRIBED' ? 'Verbunden' : 'Verbindung unterbrochen';
     renderPlayerUi();
     if (['CHANNEL_ERROR', 'TIMED_OUT', 'CLOSED'].includes(state)) {
+      if (syncEnabled) resumeAfterReconnect = true;
       syncEnabled = false;
       pauseLocally();
-     
-      status('Privater Realtime-Kanal nicht verbunden. Anmeldung, Backend-Freigabe und Netzwerk prüfen. Nach Wiederverbindung erneut synchronisieren.', true);
+      status('Realtime-Verbindung unterbrochen. Sie wird automatisch neu aufgebaut; danach folgt die Wiedergabe wieder der Party-Zeit.', true);
+    } else if (state === 'SUBSCRIBED' && resumeAfterReconnect) {
+      // Reconnect restores the authoritative party state (state_request + snapshot).
+      resumeAfterReconnect = false;
+      resyncNow();
     }
   },
   playback: () => { updatePersonalHlsReadiness(); applySync(); renderSyncDebug(); },
@@ -117,7 +128,7 @@ const session = client ? new PartySession(client, deviceId, {
 }) : null;
 
 // Transient toast instead of a permanent banner; errors stay a little longer.
-let toastTimer = null, connectionLost = false;
+let toastTimer = null, connectionLost = false, realtimeReconnecting = false, resumeAfterReconnect = false;
 function status(message, error = false) {
   $('message').textContent = message;
   $('message').style.borderColor = error ? '#ff6969' : '';
@@ -579,7 +590,7 @@ function renderPlayerUi() {
   $('ctlSeek').disabled = !seekable;
   for (const id of ['ctlBack10', 'ctlFwd10']) $(id).disabled = !seekable;
   // Badge states come only from the real sync/connection state.
-  const [label, tone] = connectionLost && session?.room ? ['Verbindung unterbrochen', 'lost']
+  const [label, tone] = connectionLost && session?.room ? (realtimeReconnecting ? ['Verbinde neu …', 'warn'] : ['Verbindung unterbrochen', 'lost'])
     : !syncEnabled ? ['Nicht synchron', 'off'] : buffering || waitingForTarget ? ['Puffert …', 'warn'] : ['Synchron', ''];
   $('syncChip').hidden = !loadedStream;
   $('syncChip').textContent = label; $('syncChip').className = tone ? `sync-chip ${tone}` : 'sync-chip';
@@ -952,6 +963,14 @@ $('passwordToggle').addEventListener('click', () => {
 });
 $('loadStream').addEventListener('click', startStream);
 function resyncNow() {
+  // A lost subscription is not repaired by requestState/applySync: rebuild it
+  // first; the party time is applied once it is SUBSCRIBED again.
+  if (connectionLost && session?.room) {
+    resumeAfterReconnect = true;
+    status('Party-Verbindung wird neu aufgebaut …');
+    session.reconnect().catch?.(() => {});
+    return;
+  }
   if (!session?.playback) {
     status('Noch kein Playback-Zustand vorhanden. Prüfe den Desktop-Host.');
     session?.requestState().catch(() => status('Host-Zustand konnte nicht angefragt werden. Realtime-Verbindung prüfen.', true));
@@ -1055,6 +1074,12 @@ function renderSyncDebug() {
   const hostPosition = p ? expectedPositionMs(p, session.now()) / 1000 : null;
   debugOutput.textContent = JSON.stringify({
     realtime: choice(d.connection, ['SUBSCRIBED', 'CHANNEL_ERROR', 'TIMED_OUT', 'CLOSED', 'CONNECTING']),
+    // Status changes with timestamps and fixed reason categories only.
+    realtimeReconnects: number(d.reconnects),
+    realtimeLog: (d.connectionLog || []).slice(-10).map(e => ({at: e.at, state: choice(e.state, ['SUBSCRIBED', 'CHANNEL_ERROR', 'TIMED_OUT', 'CLOSED', 'CONNECTING']),
+      reason: choice(e.reason, ['auth_token', 'not_authorized', 'rate_limited', 'timeout', 'network', 'other'])})),
+    // Distinguishes "connected but no playback received" from a lost channel.
+    msSinceRealtimeState: d.lastRealtimeAt ? number(Date.now() - d.lastRealtimeAt) : null,
     realtimeStateCount: number(d.realtimeStates), snapshotStateCount: number(d.snapshotStates),
     lastRealtimeStateAt: number(d.lastRealtimeAt), lastAcceptedAt: number(d.lastAcceptedAt),
     acceptedSource: choice(d.acceptedSource, ['realtime', 'snapshot', 'command']),

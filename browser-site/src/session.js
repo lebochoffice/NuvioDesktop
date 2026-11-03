@@ -16,10 +16,28 @@ export const COMMAND_PROTOCOL = 1;
 export const ACK_TIMEOUT_MS = 4000;
 const COMMAND_TRANSMISSIONS = 2; // first send + one retry with the same ID
 const COMMAND_LIMIT = 64;
+// 'superseded' is only sent by 0.1.39 hosts; later hosts order by arrival.
 const REJECT_REASONS = ['host_only', 'superseded', 'stale_epoch', 'not_member', 'invalid'];
 // pending → accepted → applied; pending/unknown → accepted/applied/rejected.
 const NEXT_STATUS = {pending: ['accepted', 'applied', 'rejected', 'unknown'], unknown: ['accepted', 'applied', 'rejected'], accepted: ['applied'], applied: [], rejected: []};
 const newCommandId = () => globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+// realtime-js drops a CLOSED channel for good (RealtimeChannel removes itself
+// from the socket) and retries CHANNEL_ERROR/TIMED_OUT on its own. A closed or
+// still-failing channel is therefore recreated here with bounded backoff.
+export const REJOIN_GRACE_MS = 10000;
+const RECONNECT_MAX_MS = 30000;
+const CONNECTION_LOG_LIMIT = 20;
+// Fixed categories only: realtime error texts may echo tokens or topics.
+export function connectionReason(error) {
+  const text = String(error?.message ?? error ?? '').toLowerCase();
+  if (!text) return null;
+  if (/jwt|token|expired/.test(text)) return 'auth_token';
+  if (/unauthori[sz]ed|permission|denied|forbidden|policy|rls/.test(text)) return 'not_authorized';
+  if (/rate|too many|limit/.test(text)) return 'rate_limited';
+  if (/timeout|timed out/.test(text)) return 'timeout';
+  if (/network|socket|disconnect|closed|offline/.test(text)) return 'network';
+  return 'other';
+}
 
 // Uses only RPCs and channel events present in Nuvio Dev PartyApi/PartyChannel.
 // Guests never become coordinators. With host_only=false they control playback:
@@ -35,11 +53,12 @@ export class PartySession {
     this.closing = null;
     this.hostCommands = false; this.commands = new Map(); this.latestCommand = null;
     this.commandTimers = new Set(); this.ackTimeoutMs = ACK_TIMEOUT_MS;
+    this.reconnectTimer = null; this.reconnectAttempts = 0; this.reconnecting = null; this.rejoinGraceMs = REJOIN_GRACE_MS; this.reconnectBaseMs = 1000;
     // Local, allowlisted telemetry only: never retain payloads, identities or URLs.
     this.diagnostics = {connection: 'CLOSED', realtimeStates: 0, snapshotStates: 0,
       lastRealtimeAt: null, lastAcceptedAt: null, acceptedSource: null,
       lastSource: null, lastDecision: null, candidateSeq: null, realtimeLatencyMs: null,
-      commands: 0, lastCommandResult: null};
+      commands: 0, lastCommandResult: null, reconnects: 0, connectionLog: []};
   }
   // Authoritative DB snapshot only (join/heartbeat); never a broadcast claim.
   canControl() {
@@ -189,7 +208,12 @@ export class PartySession {
       if (entry.status !== 'accepted') this.settleCommand(entry, 'accepted', {seq});
       this.settleCommand(entry, 'applied', {seq});
     }
-    else if (ack.status === 'rejected') this.settleCommand(entry, 'rejected', {reason: ack.reason});
+    else if (ack.status === 'rejected') {
+      this.settleCommand(entry, 'rejected', {reason: ack.reason});
+      // The host's revision is newer than ours: fetch it instead of falling
+      // back to a stale local party state.
+      if (seq != null && (!this.playback || seq > this.playback.seq)) { this.requestState().catch(() => {}); this.refresh(); }
+    }
   }
   // The guest's own preview, as long as no other member's newer revision
   // superseded it. The guest's own earlier commands do not end the preview
@@ -246,26 +270,81 @@ export class PartySession {
     } catch (e) { if (gen === this.generation) await this.close(); throw e; }
   }
   attachRealtime(gen) {
-    this.diagnostics.connection = 'CONNECTING';
     const room = this.room;
     const ch = this.client.channel(`watch-party:${room.info.id}`, {
       config: {private: true, broadcast: {ack: false, self: false}, presence: {key: room.memberId}},
     });
     this.channel = ch;
+    this.noteConnection('CONNECTING');
+    this.emit('connection', 'CONNECTING');
     for (const event of ['state', 'stream', 'media', 'control', 'chat', 'ended', 'member_left', 'member_joined', 'state_request', 'status', 'ack']) {
       ch.on('broadcast', {event}, ({payload}) => {
-        if (gen === this.generation && this.room === room) this.receive(event, payload);
+        if (gen === this.generation && this.room === room && this.channel === ch) this.receive(event, payload);
       });
     }
     ch.subscribe(async (state, error) => {
-      if (gen !== this.generation) return;
-      this.diagnostics.connection = ['SUBSCRIBED', 'CHANNEL_ERROR', 'TIMED_OUT', 'CLOSED'].includes(state) ? state : 'CONNECTING';
+      // Callbacks of a replaced or removed channel are stale.
+      if (gen !== this.generation || this.channel !== ch) return;
+      this.noteConnection(state, error);
       this.emit('connection', state);
       if (error) this.emit('error', new Error('Privater Realtime-Kanal nicht verbunden. Anmeldung und Netzwerk prüfen.'));
-      if (state !== 'SUBSCRIBED') return;
+      if (state !== 'SUBSCRIBED') { this.scheduleReconnect(gen, state); return; }
+      this.reconnectAttempts = 0;
+      if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
       try { await Promise.all([this.sendPresence(), this.requestState(), this.refresh()]); }
       catch (e) { this.emit('error', e); }
     });
+  }
+  // Status changes with fixed reason categories and timestamps; never the
+  // error text, tokens, topics or URLs.
+  noteConnection(state, error) {
+    const d = this.diagnostics;
+    d.connection = ['SUBSCRIBED', 'CHANNEL_ERROR', 'TIMED_OUT', 'CLOSED'].includes(state) ? state : 'CONNECTING';
+    d.connectionLog.push({at: new Date().toISOString(), state: d.connection, reason: connectionReason(error)});
+    if (d.connectionLog.length > CONNECTION_LOG_LIMIT) d.connectionLog.shift();
+  }
+  // CLOSED is final in realtime-js: recreate after a short backoff. For
+  // CHANNEL_ERROR/TIMED_OUT realtime-js rejoins itself; recreate only if that
+  // did not succeed within the grace period.
+  scheduleReconnect(gen, state) {
+    if (this.reconnectTimer || this.reconnecting) return;
+    const backoff = Math.min(RECONNECT_MAX_MS, this.reconnectBaseMs * 2 ** this.reconnectAttempts);
+    const delay = state === 'CLOSED' ? backoff : Math.max(this.rejoinGraceMs, backoff);
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      if (gen === this.generation && this.room && this.diagnostics.connection !== 'SUBSCRIBED') this.reconnect();
+    }, delay);
+    this.reconnectTimer?.unref?.(); // Node test runs only.
+  }
+  // Fresh channel and token (getSession refreshes an expired session). Also
+  // used by the refresh button when the connection is lost.
+  reconnect() {
+    if (this.reconnecting) return this.reconnecting;
+    const room = this.room, gen = this.generation, old = this.channel;
+    if (!room) return Promise.resolve();
+    if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
+    this.diagnostics.reconnects++;
+    this.reconnectAttempts++;
+    this.channel = null; // Silences the old channel's callbacks before removal.
+    this.reconnecting = (async () => {
+      try {
+        if (old) await this.client.removeChannel(old).catch(() => {});
+        const {data: {session} = {}, error} = await this.client.auth.getSession();
+        if (gen !== this.generation || room !== this.room) return;
+        if (error || !session?.access_token) {
+          this.noteConnection('CLOSED', error || new Error('token'));
+          this.emit('connection', 'CLOSED');
+          this.emit('error', new Error('Nuvio-Anmeldung abgelaufen. Bitte neu anmelden, um die Party-Verbindung wiederherzustellen.'));
+          return;
+        }
+        await this.client.realtime.setAuth(session.access_token);
+        if (gen !== this.generation || room !== this.room) return;
+        this.attachRealtime(gen);
+      } catch (e) {
+        if (gen === this.generation && room === this.room) { this.emit('error', e); this.scheduleReconnect(gen, 'CLOSED'); }
+      } finally { this.reconnecting = null; }
+    })();
+    return this.reconnecting;
   }
   receive(event, payload) {
     if (event === 'state') { this.acceptPlayback(payload, 'realtime'); return; }
@@ -407,6 +486,8 @@ export class PartySession {
     this.room = null; this.channel = null; this.playback = null;
     this.hostCommands = false; this.commands.clear(); this.latestCommand = null;
     this.commandTimers.forEach(clearTimeout); this.commandTimers.clear();
+    if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
+    this.reconnectAttempts = 0;
     this.diagnostics.connection = 'CLOSED';
     this.timers.forEach(clearInterval); this.timers = [];
     this.chatCursor = null; this.seenMessages.clear(); this.presence = {status: 'browsing'};

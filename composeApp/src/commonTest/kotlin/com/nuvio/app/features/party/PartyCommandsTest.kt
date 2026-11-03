@@ -6,7 +6,6 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlinx.serialization.json.jsonObject
 
-// Written for 0.1.39; not executed while implementing (run locally).
 class PartyCommandsTest {
     private val media = PartyMedia(type = "movie", metaId = "tt1", metaType = "movie")
     private val otherMedia = PartyMedia(type = "movie", metaId = "tt2", metaType = "movie")
@@ -37,93 +36,59 @@ class PartyCommandsTest {
         host: String = "host",
     ) = PartyCommand(commandId = id, memberId = member, paused = paused, positionMs = 5_000, baseSeq = base, mediaKey = mediaKey, hostMemberId = host)
 
-    private fun decide(command: PartyCommand, ledger: PartyCommandLedger, current: PartyPlayback?, party: ActiveParty = party()) =
-        PartyCommands.decide(command, party, current, ledger.revisions())
-
-    private fun PartyCommandLedger.accepted(seq: Long, actor: String, system: Boolean = false) = apply { record(seq, actor, system) }
+    private fun decide(command: PartyCommand, current: PartyPlayback?, party: ActiveParty = party()) =
+        PartyCommands.decide(command, party, current)
 
     @Test
-    fun browserPauseOnCurrentRevisionIsAccepted() {
-        assertEquals(PartyCommandDecision.Accept, decide(command(paused = true), PartyCommandLedger(), state(10)))
+    fun browserPausePlayAndSeekOnTheCurrentRevisionAreAccepted() {
+        assertEquals(PartyCommandDecision.Accept, decide(command(paused = true), state(10)))
+        assertEquals(PartyCommandDecision.Accept, decide(command(paused = false), state(10, paused = true)))
+        assertEquals(PartyCommandDecision.Accept, decide(command(id = "seek-0000001", paused = false), state(10)))
+    }
+
+    // Regression 0.1.39: a stale base revision (lost/delayed broadcast,
+    // reconnect, host action in between) rejected the command as "superseded",
+    // and the browser fell back to an outdated party state.
+    @Test
+    fun staleOrMissingBaseRevisionIsNoReasonToRejectAnAbsoluteCommand() {
+        assertEquals(PartyCommandDecision.Accept, decide(command(base = 3), state(12)))
+        assertEquals(PartyCommandDecision.Accept, decide(command(base = null), state(12)))
+        assertEquals(PartyCommandDecision.Accept, decide(command(base = 13), state(12))) // Host lagged behind a guest revision.
+        assertEquals(PartyCommandDecision.Accept, decide(command(base = 1), state(10L + 1_000L)))
     }
 
     @Test
-    fun browserPlayAndSeekOnCurrentRevisionAreAccepted() {
-        assertEquals(PartyCommandDecision.Accept, decide(command(paused = false), PartyCommandLedger(), state(10, paused = true)))
-        assertEquals(PartyCommandDecision.Accept, decide(command(id = "seek-0000001", paused = false), PartyCommandLedger(), state(10)))
+    fun hostLocalActionAndBrowserCommandAreOrderedByArrivalAtTheHost() {
+        // Host pressed Play (seq 11); the browser Pause (seen seq 10) arrives later: it is the newer action.
+        assertEquals(PartyCommandDecision.Accept, decide(command(paused = true), state(11)))
+        // Browser Pause accepted as seq 11; the host's own Play (seq 12) is newer everywhere.
+        assertTrue(PartySync.isNewer(state(12), state(11, actor = "guest", paused = true)))
     }
 
     @Test
-    fun rapidTogglesOfTheSameGuestChainOnTheSameBase() {
-        // Pause (base 10) became seq 11; the following Play still carries base 10.
-        val ledger = PartyCommandLedger().accepted(11, "guest")
-        assertEquals(PartyCommandDecision.Accept, decide(command(id = "cmd-00000002", paused = false), ledger, state(11, actor = "guest", paused = true)))
-        ledger.accepted(12, "guest")
-        assertEquals(PartyCommandDecision.Accept, decide(command(id = "cmd-00000003", paused = true), ledger, state(12, actor = "guest")))
-    }
-
-    @Test
-    fun hostLocalActionAfterTheGuestsBaseSupersedesTheGuestCommand() {
-        // Browser pressed Pause while it still saw seq 10; the host pressed Play (seq 11) first.
-        val ledger = PartyCommandLedger().accepted(11, "host")
-        assertEquals(PartyCommandDecision.Reject("superseded"), decide(command(paused = true), ledger, state(11)))
-    }
-
-    @Test
-    fun desktopPlayRightAfterAcceptedBrowserPauseIsANewerRevision() {
-        // Browser Pause accepted as seq 11; the host's own Play is seq 12 and wins everywhere.
-        val ledger = PartyCommandLedger().accepted(11, "guest").accepted(12, "host")
-        val hostPlay = state(12)
-        assertTrue(PartySync.isNewer(hostPlay, state(11, actor = "guest", paused = true)))
-        // A late retry of the old pause with base 10 must not undo the host's Play.
-        assertEquals(PartyCommandDecision.Reject("superseded"), decide(command(id = "cmd-00000009"), ledger, hostPlay))
-    }
-
-    @Test
-    fun simultaneousBrowserCommandsFirstWinsSecondIsRejected() {
-        val ledger = PartyCommandLedger().accepted(11, "guest")
-        assertEquals(PartyCommandDecision.Reject("superseded"), decide(command(id = "cmd-guest2-1", member = "guest2", paused = false), ledger, state(11, actor = "guest", paused = true)))
-    }
-
-    @Test
-    fun coordinatorWaitsDoNotConflictWithGuestCommands() {
-        val ledger = PartyCommandLedger().accepted(11, "host", system = true)
-        assertEquals(PartyCommandDecision.Accept, decide(command(paused = false), ledger, state(11, paused = true)))
-    }
-
-    @Test
-    fun outOfOrderOrUnknownBaseIsRejected() {
-        val ledger = PartyCommandLedger().accepted(12, "guest") // seq 11 is not covered
-        assertEquals(PartyCommandDecision.Reject("superseded"), decide(command(), ledger, state(12, actor = "guest")))
-        assertEquals(PartyCommandDecision.Reject("stale_epoch"), decide(command(base = 13), ledger, state(12, actor = "guest")))
-        assertEquals(PartyCommandDecision.Reject("superseded"), decide(command(base = null), ledger, state(12, actor = "guest")))
-        assertEquals(PartyCommandDecision.Reject("superseded"), decide(command(base = 1), ledger, state(10L + PartyCommands.HISTORY_LIMIT)))
+    fun simultaneousBrowserCommandsAreBothExecutedInArrivalOrder() {
+        assertEquals(PartyCommandDecision.Accept, decide(command(id = "cmd-guest-01"), state(10)))
+        assertEquals(PartyCommandDecision.Accept, decide(command(id = "cmd-guest2-1", member = "guest2", paused = false), state(11, actor = "guest", paused = true)))
     }
 
     @Test
     fun hostOnlyMembershipAndRoleAreEnforcedByTheHost() {
-        val ledger = PartyCommandLedger()
-        assertEquals(PartyCommandDecision.Reject("host_only"), decide(command(), ledger, state(10), party(hostOnly = true)))
-        assertEquals(PartyCommandDecision.Reject("not_member"), decide(command(member = "stranger"), ledger, state(10)))
-        assertEquals(PartyCommandDecision.Reject("not_member"), decide(command(member = "host"), ledger, state(10)))
+        assertEquals(PartyCommandDecision.Reject("host_only"), decide(command(), state(10), party(hostOnly = true)))
+        assertEquals(PartyCommandDecision.Reject("not_member"), decide(command(member = "stranger"), state(10)))
+        assertEquals(PartyCommandDecision.Reject("not_member"), decide(command(member = "host"), state(10)))
         // Non-host desktops never sequence.
-        assertEquals(PartyCommandDecision.Reject("stale_epoch"), decide(command(), ledger, state(10), party(memberId = "desk")))
-        assertEquals(PartyCommandDecision.Reject("invalid"), decide(command(id = "bad id"), ledger, state(10)))
+        assertEquals(PartyCommandDecision.Reject("stale_epoch"), decide(command(), state(10), party(memberId = "desk")))
+        assertEquals(PartyCommandDecision.Reject("invalid"), decide(command(id = "bad id"), state(10)))
     }
 
     @Test
     fun hostChangeAndMediaChangeEndTheEpoch() {
-        val ledger = PartyCommandLedger()
-        assertEquals(PartyCommandDecision.Reject("stale_epoch"), decide(command(host = "old-host"), ledger, state(10)))
-        assertEquals(PartyCommandDecision.Reject("stale_epoch"), decide(command(mediaKey = otherMedia.key), ledger, state(10)))
+        assertEquals(PartyCommandDecision.Reject("stale_epoch"), decide(command(host = "old-host"), state(10)))
+        assertEquals(PartyCommandDecision.Reject("stale_epoch"), decide(command(mediaKey = otherMedia.key), state(10)))
         // After the film changed, a command for the previous film is never valid.
-        assertEquals(
-            PartyCommandDecision.Reject("stale_epoch"),
-            decide(command(), ledger, state(0, mediaKey = otherMedia.key), party(partyMedia = otherMedia)),
-        )
-        ledger.accepted(11, "host")
-        ledger.resetRevisions()
-        assertEquals(PartyCommandDecision.Reject("superseded"), decide(command(base = 10), ledger, state(11)))
+        assertEquals(PartyCommandDecision.Reject("stale_epoch"), decide(command(), state(0, mediaKey = otherMedia.key), party(partyMedia = otherMedia)))
+        // The host's own revision still belongs to the previous film.
+        assertEquals(PartyCommandDecision.Reject("stale_epoch"), decide(command(mediaKey = otherMedia.key), state(3), party(partyMedia = otherMedia)))
     }
 
     @Test
@@ -131,8 +96,11 @@ class PartyCommandsTest {
         val ledger = PartyCommandLedger()
         ledger.remember("cmd-00000001", PartyCommandResult(accepted = true, seq = 11))
         assertEquals(PartyCommandResult(accepted = true, seq = 11), ledger.result("cmd-00000001"))
-        repeat(PartyCommands.PROCESSED_LIMIT) { ledger.remember("cmd-x-${it.toString().padStart(4, '0')}", PartyCommandResult(false, 1, "superseded")) }
+        repeat(PartyCommands.PROCESSED_LIMIT) { ledger.remember("cmd-x-${it.toString().padStart(4, '0')}", PartyCommandResult(false, 1, "host_only")) }
         assertNull(ledger.result("cmd-00000001"))
+        ledger.remember("cmd-00000002", PartyCommandResult(accepted = true, seq = 12))
+        ledger.clear()
+        assertNull(ledger.result("cmd-00000002"))
     }
 
     @Test

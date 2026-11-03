@@ -1190,3 +1190,38 @@ test('a host without the announcement keeps desktop-parity control (state broadc
   h.get('ctlPlay').fire('click'); await settlePlayback();
   assert.deepEqual(c.sends.map(s => s.event), ['state']);
 });
+
+// --- P0 after 0.1.39: realtime recovery in the player. Written, not executed here. ---
+test('lost realtime: playback pauses, a reconnect shows "Verbinde neu …", and SUBSCRIBED restores the party time without a click', async () => {
+  const h = await playingGuest();
+  assert.equal(h.sync(), true); assert.equal(h.player.paused, false);
+  h.session.handlers.connection('CHANNEL_ERROR');
+  assert.equal(h.sync(), false); assert.equal(h.player.paused, true);
+  assert.equal(h.get('syncChip').textContent, 'Verbindung unterbrochen');
+  h.session.handlers.connection('CONNECTING');
+  assert.equal(h.get('syncChip').textContent, 'Verbinde neu …'); assert.equal(h.get('connection').textContent, 'Verbinde neu …');
+  h.session.handlers.connection('SUBSCRIBED'); await settlePlayback();
+  assert.equal(h.sync(), true); assert.equal(h.player.paused, false); // Party time restored automatically.
+  assert.equal(h.get('connection').textContent, 'Verbunden');
+});
+
+test('the refresh button rebuilds a lost subscription instead of only re-applying the old state', async () => {
+  const h = await playingGuest(); let reconnects = 0;
+  h.session.reconnect = () => { reconnects++; return Promise.resolve(); };
+  h.session.handlers.connection('CLOSED');
+  h.get('resync').disabled = false; h.get('resync').fire('click');
+  assert.equal(reconnects, 1); assert.equal(h.sync(), false); // Nothing is followed until the channel is back.
+  assert.match(h.get('message').textContent, /neu aufgebaut/);
+  h.session.handlers.connection('SUBSCRIBED'); await settlePlayback();
+  assert.equal(h.sync(), true);
+  h.get('resync').fire('click'); assert.equal(reconnects, 1); // Connected: normal resync, no rebuild.
+});
+
+test('a deliberate local pause before the connection loss is not overridden by the reconnect', async () => {
+  const h = await playingGuest();
+  h.get('ctlBack').fire('click'); // Back to the invitation: local pause, sync off.
+  assert.equal(h.sync(), false);
+  h.session.handlers.connection('CHANNEL_ERROR');
+  h.session.handlers.connection('SUBSCRIBED'); await settlePlayback();
+  assert.equal(h.sync(), false); assert.equal(h.player.paused, true);
+});

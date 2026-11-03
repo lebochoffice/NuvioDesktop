@@ -218,11 +218,7 @@ object PartyRepository {
                 _playback.value
             } else {
                 nextPlayback(party, paused = false, positionMs = positionMs, rate = 1f, waiting = false, mediaKey = media.key, at = clock.nowMs())
-                    .also {
-                        _playback.value = it
-                        commands.resetRevisions()
-                        commands.record(it.seq, party.memberId, system = false)
-                    }
+                    .also { _playback.value = it }
             }
             persistJob?.cancel()
             val snapshot = runRemote { PartyApi.update(party.id, deviceId(), media, next) }
@@ -411,8 +407,13 @@ object PartyRepository {
             return
         }
         val current = _playback.value
-        val result = when (val decision = PartyCommands.decide(command, party, current, commands.revisions())) {
+        val result = when (val decision = PartyCommands.decide(command, party, current)) {
             PartyCommandDecision.Accept -> {
+                // Remember before publishing: publish suspends while sending,
+                // and a retry arriving meanwhile must not execute again. The
+                // seq is assigned synchronously (single-threaded dispatcher).
+                val accepted = PartyCommandResult(accepted = true, seq = (current?.seq ?: 0L) + 1L)
+                commands.remember(command.commandId, accepted)
                 publish(
                     paused = command.paused,
                     positionMs = command.positionMs,
@@ -421,17 +422,17 @@ object PartyRepository {
                     origin = command.memberId,
                     commandId = command.commandId,
                 )
-                val next = _playback.value
+                val next = _playback.value?.takeIf { it.commandId == command.commandId }
                 if (next != null) {
                     val action = PartySync.actionOf(current, next)
                     val name = party.member(command.memberId)?.displayName
                     if (action != null && name != null) _notices.tryEmit(PartyNotice(name, action, next.positionMs, next.rate))
                 }
-                PartyCommandResult(accepted = true, seq = next?.seq)
+                accepted
             }
             is PartyCommandDecision.Reject -> PartyCommandResult(accepted = false, seq = current?.seq, reason = decision.reason)
+                .also { commands.remember(command.commandId, it) }
         }
-        commands.remember(command.commandId, result)
         runCatching { channel?.send("ack", ackPayload(party, command.commandId, command.memberId, result)) }
     }
 
@@ -539,7 +540,6 @@ object PartyRepository {
         val changed = media.key != party.media.key
         updateParty { it.copy(media = media) }
         if (changed) {
-            commands.resetRevisions()
             _playback.value = playback?.takeIf { it.mediaKey == null || it.mediaKey == media.key }
             if (_sharedStream.value?.mediaKey != media.key) _sharedStream.value = null
             ignoredWaiting.clear()
@@ -561,7 +561,6 @@ object PartyRepository {
             if (current.waiting) ignoredWaiting += PartySync.waitingMemberIds(party, emptySet())
         }
         _playback.value = candidate
-        commands.record(candidate.seq, candidate.actorId, system = candidate.waiting)
         if (candidate.actorId == party.memberId) return
         val action = PartySync.actionOf(current, candidate) ?: return
         val name = party.member(candidate.actorId)?.displayName ?: return
@@ -576,14 +575,12 @@ object PartyRepository {
         at: Long = clock.nowMs(),
         origin: String? = null,
         commandId: String? = null,
-        system: Boolean = false,
     ) {
         val party = _state.value.party ?: return
         if (!party.canControl) return
         val current = _playback.value
         val next = nextPlayback(party, paused, positionMs, rate, waiting, party.media.key, at)
             .copy(originMemberId = origin, commandId = commandId)
-        commands.record(next.seq, next.actorId, system = system || waiting)
         if (current != null && current.paused && !paused) {
             resumedAt = clock.mark()
             if (current.waiting && !waiting) ignoredWaiting += PartySync.waitingMemberIds(party, emptySet())
@@ -664,14 +661,14 @@ object PartyRepository {
                 val graceOver = resumedAt?.let { it.elapsedNow() > RESUME_GRACE } ?: true
                 if (waiting.isNotEmpty() && graceOver) {
                     val position = PartySync.expectedPositionMs(playback, clock.nowMs())
-                    publish(paused = true, positionMs = position, rate = playback.rate, waiting = true, system = true)
+                    publish(paused = true, positionMs = position, rate = playback.rate, waiting = true)
                     waitStartedAt = clock.mark()
                 }
             } else if (playback.waiting) {
                 val started = waitStartedAt ?: clock.mark().also { waitStartedAt = it }
                 if (waiting.isEmpty() || started.elapsedNow() > WAIT_LIMIT) {
                     ignoredWaiting += waiting
-                    publish(paused = false, positionMs = playback.positionMs, rate = playback.rate, waiting = false, system = true)
+                    publish(paused = false, positionMs = playback.positionMs, rate = playback.rate, waiting = false)
                 }
             }
         }
