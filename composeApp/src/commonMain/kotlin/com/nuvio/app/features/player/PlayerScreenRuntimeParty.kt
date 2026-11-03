@@ -447,6 +447,12 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
         var publishedInitial = false
         var seekLeadMs = 0L
         var measureSeekLead = false
+        // Final paused position (host only): mpv seeks to keyframes
+        // ("absolute+keyframes", hr-seek=no), so a paused target can be missed
+        // by a GOP. Once settled, the host confirms where it really stands,
+        // at most once per revision, so every member shows the same frame.
+        var confirmedPausedSeq: Pair<Long, String?>? = null
+        var lastPausedPosition: Long? = null
         var wasBehind = false
         while (isActive) {
             delay(PARTY_TICK)
@@ -612,6 +618,22 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
             mismatchSince = null
 
             val settled = lastSeek?.let { it.elapsedNow() > SEEK_SETTLE } ?: true
+            val stablePosition = lastPausedPosition?.let { abs(it - snapshot.positionMs) <= POSITION_STABLE_MS } == true
+            lastPausedPosition = snapshot.positionMs.takeIf { playback.paused && !snapshot.isPlaying }
+            if (PartySync.shouldConfirmPausedPosition(
+                    isHost = party.isHost,
+                    playback = playback,
+                    isPlaying = snapshot.isPlaying,
+                    settled = settled,
+                    stable = stablePosition,
+                    actualMs = snapshot.positionMs,
+                    alreadyConfirmed = confirmedPausedSeq == identity,
+                )) {
+                confirmedPausedSeq = identity
+                partyLog.i { "Confirming paused keyframe position ${snapshot.positionMs} for target ${playback.positionMs}" }
+                PartyRepository.publishPlayback(paused = true, positionMs = snapshot.positionMs, rate = playback.rate)
+                continue
+            }
             val due = lastCorrection?.let { it.elapsedNow() >= CORRECTION_INTERVAL } ?: true
             if (!settled || !due) continue
             lastCorrection = clock.markNow()
@@ -814,6 +836,7 @@ private val BUFFERING_REPORT_DELAY = 1_000.milliseconds
 private val OUTSIDE_TOGGLE_DELAY = 1_200.milliseconds
 private const val MAX_APPLY_RETRIES = 3
 private val POSITION_REPORT_INTERVAL = 10_000.milliseconds
+private const val POSITION_STABLE_MS = 50L
 private val SEEK_SETTLE = 2_500.milliseconds
 private val CORRECTION_INTERVAL = 500.milliseconds
 private const val MAX_SEEK_LEAD_MS = 3_000L

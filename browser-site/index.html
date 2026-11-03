@@ -121,22 +121,23 @@
     <p id="controlInfo" class="muted small">Steuerung: nur der Host.</p>
     <section class="drawer-block"><h4>Teilnehmer</h4><ul id="memberList" class="members"></ul></section>
     <details id="chatPanel" class="drawer-block"><summary>Chat</summary><div id="chatLog" class="chat" aria-live="polite"></div><form id="chatForm" class="chat-form"><input id="chatText" maxlength="500" placeholder="Nachricht schreiben …" aria-label="Chatnachricht" required><button type="submit" class="btn primary small">Senden</button></form></details>
+    <section id="personalHlsPanel" class="drawer-block video-link">
+      <h4>Video-Link</h4>
+      <form id="personalHlsForm" class="stack compact" autocomplete="off">
+        <label class="sr-only" for="personalHlsUrl">Video-Link (HTTPS-HLS-Playlist)</label>
+        <input id="personalHlsUrl" type="url" inputmode="url" autocomplete="off" spellcheck="false" maxlength="16384" placeholder="https://…/playlist.m3u8" aria-describedby="personalHlsStatus videoLinkFormats" required>
+        <div class="button-row"><button id="loadPersonalHls" class="btn primary small" type="submit">Video laden</button><button id="useDesktopStream" type="button" class="btn ghost small" hidden>Zur Host-Quelle zurück</button></div>
+      </form>
+      <p id="personalHlsStatus" class="muted small" role="status" aria-live="polite">Die Eingabe wird nach dem Laden geleert und nicht dauerhaft gespeichert.</p>
+      <p id="videoLinkFormats" class="muted small">Unterstützt: HLS-Playlists (.m3u8) über HTTPS, keine Livestreams, dieselbe Filmfassung wie der Host. Keine Webseiten-Links (z. B. YouTube), kein DRM, keine lokalen Adressen. Der Link bleibt in diesem Browser und wird nicht an die Party gesendet.</p>
+    </section>
     <details class="drawer-block"><summary>Technik</summary>
       <div class="setting-row">
         <label class="setting-text" for="autoHostStream"><span class="setting-title">Host-Stream automatisch verwenden</span><span class="setting-desc">Neue Folgen und freigegebene Streams automatisch laden.</span></label>
         <span class="switch"><input id="autoHostStream" type="checkbox" role="switch"><span class="switch-track" aria-hidden="true"></span></span>
       </div>
-      <p id="autoHostNote" class="muted small setting-note">Beim Laden erhält der Anbieter der Quelle deine IP-Adresse, wie bei einem manuellen Start. Eine eigene HLS-Quelle wird dabei ersetzt.</p>
-      <p id="streamInfo" class="muted small">Nutze eine Desktop-Freigabe („Share my stream“) oder deine eigene zulässige HLS-Quelle (Beta).</p>
-      <details id="personalHlsPanel" class="nested">
-        <summary>Eigene HLS-URL (Beta)</summary>
-        <p class="muted small">Eigener zulässiger Zugang, dieselbe Filmfassung wie der Host. Die URL bleibt nur in diesem Browser und wird nicht an die Party gesendet.</p>
-        <form id="personalHlsForm" class="stack" autocomplete="off">
-          <label class="field"><span>HTTPS-HLS-Playlist</span><input id="personalHlsUrl" type="url" inputmode="url" autocomplete="off" spellcheck="false" maxlength="16384" placeholder="https://…" aria-describedby="personalHlsStatus" required></label>
-          <div class="button-row"><button id="loadPersonalHls" class="btn primary small" type="submit">Eigene HLS-Quelle laden</button><button id="useDesktopStream" type="button" class="btn ghost small" hidden>Zur Desktop-Freigabe zurück</button></div>
-        </form>
-        <p id="personalHlsStatus" class="muted small" role="status" aria-live="polite">Die Eingabe wird nach dem Laden geleert und nicht dauerhaft gespeichert.</p>
-      </details>
+      <p id="autoHostNote" class="muted small setting-note">Beim Laden erhält der Anbieter der Quelle deine IP-Adresse, wie bei einem manuellen Start. Ein eigener Video-Link wird dabei ersetzt.</p>
+      <p id="streamInfo" class="muted small">Nutze eine Desktop-Freigabe („Share my stream“) oder einen eigenen Video-Link.</p>
       <p class="muted small">Debrid-Links und Tokens können beim Teilen für Party-Mitglieder sichtbar sein.</p>
     </details>
     <button id="leaveButton" type="button" class="btn ghost leave">Party verlassen</button>

@@ -30,6 +30,13 @@ try {
   deviceId = sessionStorage.getItem('nuvio-party-device') || crypto.randomUUID();
   sessionStorage.setItem('nuvio-party-device', deviceId);
 } catch { deviceId = crypto.randomUUID(); }
+// Rejoin after a page reload: only the party code of an active membership is
+// kept for this tab (never URLs, tokens or keys). Cleared on leave, sign-out,
+// removal and party end, so none of those is undone by a reload.
+const JOINED_PARTY_KEY = 'nuvio-party-joined';
+const rememberJoinedParty = code => { try { sessionStorage.setItem(JOINED_PARTY_KEY, code); } catch { /* Session only. */ } };
+const forgetJoinedParty = () => { try { sessionStorage.removeItem?.(JOINED_PARTY_KEY); sessionStorage.setItem(JOINED_PARTY_KEY, ''); } catch { /* Session only. */ } };
+const joinedPartyCode = () => { try { return sessionStorage.getItem(JOINED_PARTY_KEY) || ''; } catch { return ''; } };
 let hls = null, selectedStream = null, loadedStream = null, syncEnabled = false;
 let suppressUntil = 0, loading = false, buffering = false;
 let pendingChat = null;
@@ -114,14 +121,14 @@ const session = client ? new PartySession(client, deviceId, {
     // only by a playable host source; never by a revocation or pending HLS.
     if (personalHls.active) {
       if (!autoHostStream || !offered || streamProblem(offered)) return;
-      resetVideo('Automatischer Modus: Die eigene HLS-Quelle wurde durch die Host-Freigabe ersetzt.');
+      resetVideo('Automatischer Modus: Der eigene Video-Link wurde durch die Host-Freigabe ersetzt.');
     }
     stream = offered;
     if (!stream) {
       resetVideo();
       $('streamInfo').textContent = !browserPending ? 'Keine aktive Streamfreigabe. Der Desktop-Host muss „Share my stream“ aktivieren.'
-        : browserState === 'denied' ? 'Browser-HLS nicht möglich: TorBox hat den Zugriff verweigert (Tarif oder Berechtigung). Eigene HLS-Quelle verwenden.'
-        : browserState === 'failed' ? 'Browser-HLS konnte am Desktop nicht vorbereitet werden. Der Host kann „HLS erstellen / aktualisieren“ drücken, oder du lädst eine eigene HLS-Quelle.'
+        : browserState === 'denied' ? 'Browser-HLS nicht möglich: TorBox hat den Zugriff verweigert (Tarif oder Berechtigung). Eigenen Video-Link verwenden.'
+        : browserState === 'failed' ? 'Browser-HLS konnte am Desktop nicht vorbereitet werden. Der Host kann „HLS erstellen / aktualisieren“ drücken, oder du lädst einen eigenen Video-Link.'
         : 'Desktop-Quelle freigegeben. Browser-HLS wird vorbereitet; bei automatischem Laden startet sie danach von selbst.';
       if (browserPending) $('noStream').textContent = browserState === 'preparing' ? 'Browser-HLS wird am Desktop vorbereitet …' : 'Keine abspielbare Browserquelle vom Host.';
       return;
@@ -141,7 +148,7 @@ const session = client ? new PartySession(client, deviceId, {
       // (e.g. an addon stream, even if its name says "TB+"), so the browser
       // only has the original. Say so instead of pretending automation works.
       $('noStream').textContent = 'Diese Quelle kann der Browser nicht abspielen. Der Host kann eine andere Quelle teilen.';
-      $('streamInfo').textContent = 'Die freigegebene Host-Quelle ist für Browser nicht geeignet (z. B. MKV). Browser-HLS gibt es nur für Quellen aus der integrierten TorBox-Auflösung des Hosts; ein Addon-Name wie „TB+“ reicht dafür nicht. Alternativ eine eigene HLS-Quelle laden.';
+      $('streamInfo').textContent = 'Die freigegebene Host-Quelle ist für Browser nicht geeignet (z. B. MKV). Browser-HLS gibt es nur für Quellen aus der integrierten TorBox-Auflösung des Hosts; ein Addon-Name wie „TB+“ reicht dafür nicht. Alternativ einen eigenen Video-Link laden.';
       status(problem, true);
     }
     else if (autoHostStream && soloMode && soloResume) {
@@ -174,6 +181,7 @@ const session = client ? new PartySession(client, deviceId, {
     $('chatLog').replaceChildren(); pendingChat = null; $('connection').textContent = 'Nicht verbunden'; renderControlInfo();
   },
   ended: (message, reason) => {
+    forgetJoinedParty(); // Party end or removal: a reload must not rejoin.
     if (keepAfterPartyEnd(reason)) {
       continueLocally(`${message} Die geladene Quelle läuft lokal weiter, bis sie abläuft oder du sie schließt. Es gibt keine gemeinsame Party mehr.`);
       return;
@@ -324,7 +332,7 @@ function resetVideo(reason = 'Persönliche Quelle entfernt. Für diesen Film kan
   pauseLocally(); player.removeAttribute('src'); player.load();
   $('noStream').hidden = false; $('loadStream').hidden = true;
   $('noStream').textContent = 'Warte auf eine freigegebene Streamquelle des Hosts …';
-  $('streamInfo').textContent = 'Warte auf eine Desktop-Freigabe oder lade eine eigene zulässige HLS-Quelle (Beta).';
+  $('streamInfo').textContent = 'Warte auf eine Desktop-Freigabe oder lade einen eigenen Video-Link.';
   $('resync').disabled = true;
   renderSoloUi();
 }
@@ -1041,7 +1049,7 @@ function renderAuthState(signedIn) {
   $('accountLine').hidden = !signedIn;
 }
 let joining = false;
-async function joinParty() {
+async function joinParty({auto = false} = {}) {
   if (!session) return status(configProblem, true);
   // Already a member (came back via the back arrow): return without re-joining.
   if (session.room) {
@@ -1076,19 +1084,22 @@ async function joinParty() {
     $('joinButton').textContent = 'Party wird betreten …';
     const name = await accountDisplayName(auth.user, profileIndex);
     await session.join(code, name, profileIndex);
-    status('Beigetreten. Warte auf die Streamfreigabe durch den Desktop-Host.');
+    if (session.room) rememberJoinedParty(code);
+    status(auto ? 'Party nach dem Neuladen wieder betreten. Host-Freigabe und Party-Zeit werden übernommen …' : 'Beigetreten. Warte auf die Streamfreigabe durch den Desktop-Host.');
   } catch (err) {
     showPanel('join');
     // Expired or revoked session: show the sign-in fields again.
     if (err?.code === 'PGRST301' || err?.status === 401 || /jwt|expired|not authenticated/i.test(String(err?.message || ''))) {
       renderAuthState(false); status('Deine Sitzung ist abgelaufen. Bitte erneut mit deinem Nuvio-Konto anmelden.', true);
     } else status('Beitritt fehlgeschlagen: ' + friendlyError(err), true);
+    // A definitive answer ends the automatic rejoin for this tab.
+    if (['party_not_found', 'party_full', 'removed', 'not_member', 'party_ended', 'unavailable'].includes(err?.code)) forgetJoinedParty();
   }
   finally { joining = false; $('joinButton').disabled = false; $('joinButton').textContent = session.room ? 'Zurück zur Party' : 'Jetzt ansehen'; }
 }
 $('joinForm').addEventListener('submit', e => { e.preventDefault(); joinParty(); });
 // Sign out: visible only with a session (inside the account line).
-$('logoutButton').addEventListener('click', async () => { await session?.close(); await client?.auth.signOut(); renderAuthState(false); showPanel('join'); status('Abgemeldet.'); });
+$('logoutButton').addEventListener('click', async () => { forgetJoinedParty(); await session?.close(); await client?.auth.signOut(); renderAuthState(false); showPanel('join'); status('Abgemeldet.'); });
 $('invitePlay').addEventListener('click', () => joinParty());
 $('passwordToggle').addEventListener('click', () => {
   const show = $('password').type === 'password';
@@ -1280,7 +1291,7 @@ setInterval(() => {
   }
   if (session?.room && !$('infoDrawer').hidden) renderMembers(session.room);
 }, 1000);
-$('leaveButton').addEventListener('click', async () => { await session?.close(); showPanel('join'); status('Party verlassen.'); });
+$('leaveButton').addEventListener('click', async () => { forgetJoinedParty(); await session?.close(); showPanel('join'); status('Party verlassen.'); });
 $('chatForm').addEventListener('submit', async e => {
   e.preventDefault(); const body = $('chatText').value.trim();
   if (!session?.room || !body) return;
@@ -1295,7 +1306,7 @@ $('chatForm').addEventListener('submit', async e => {
 });
 client?.auth.onAuthStateChange((event, authSession) => {
   // Avoid awaited Supabase calls inside the auth callback (SDK lock).
-  if (event === 'SIGNED_OUT') setTimeout(async () => { await session.close(false); renderAuthState(false); showPanel('join'); status('Sitzung beendet. Bitte erneut mit deinem Nuvio-Konto anmelden.'); }, 0);
+  if (event === 'SIGNED_OUT') setTimeout(async () => { forgetJoinedParty(); await session.close(false); renderAuthState(false); showPanel('join'); status('Sitzung beendet. Bitte erneut mit deinem Nuvio-Konto anmelden.'); }, 0);
 });
 (async () => {
   if (!client) { showPanel('join'); $('joinButton').disabled = true; status(configProblem, true); return; }
@@ -1306,5 +1317,11 @@ client?.auth.onAuthStateChange((event, authSession) => {
     renderAuthState(usableSession(auth));
     showPanel('join');
     await preview();
+    // Reload of an active membership in this tab: join the same party again.
+    const code = partyCodeFromPath(location.pathname);
+    if (code && usableSession(auth) && joinedPartyCode() === code && !session?.room) {
+      status('Party wird nach dem Neuladen wieder betreten …');
+      await joinParty({auto: true});
+    }
   } catch (e) { renderAuthState(false); showPanel('join'); status(friendlyError(e), true); }
 })();

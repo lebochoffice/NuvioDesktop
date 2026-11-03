@@ -36,7 +36,9 @@ class FakeHls {
 }
 // autoHost: stored preference ('0'/'1'); null = first visit (default on). The
 // existing tests keep the manual flow, so the default here is a stored 'off'.
-async function harness({debug = false, guestControl = false, guestJoin = false, rpc = null, path = '/', autoHost = false} = {}) {
+// joined: party code remembered in this tab (reload rejoin); fakeJoin records
+// joins instead of calling the backend and leaves the room empty until then.
+async function harness({debug = false, guestControl = false, guestJoin = false, rpc = null, path = '/', autoHost = false, joined = null, fakeJoin = false} = {}) {
   const elements = new Map(), storageWrites = [], sent = [];
   let clock = 0, tick = () => {};
   const get = id => { if (!elements.has(id)) elements.set(id, new Element()); return elements.get(id); };
@@ -50,8 +52,11 @@ async function harness({debug = false, guestControl = false, guestJoin = false, 
     canPlayType() { return ''; },
   });
   let session;
+  const joins = [];
+  const fakeRoom = () => ({info: {code: 'UXZ83H', media: {meta_type: 'movie', meta_id: 'tt1'}, host_member_id: 'host', host_only: true}, members: []});
   class FakeSession extends ActualPartySession {
     constructor(client, device, handlers) { super(client, device, handlers); session = this; }
+    join(...args) { if (!fakeJoin) return super.join(...args); joins.push(args); this.room = fakeRoom(); return Promise.resolve(); }
     now() { return 1000; }
     sendPresence(...args) { sent.push(args); return Promise.resolve(); }
     requestState() { return Promise.resolve(); }
@@ -74,7 +79,7 @@ async function harness({debug = false, guestControl = false, guestJoin = false, 
     env: {VITE_SUPABASE_URL: 'https://backend.example.test', VITE_SUPABASE_ANON_KEY: 'sb_publishable_TEST', ...(guestControl === true ? {VITE_PARTY_GUEST_CONTROL: '1'} : typeof guestControl === 'string' ? {VITE_PARTY_GUEST_CONTROL: guestControl} : {}), ...(guestJoin ? {VITE_PARTY_GUEST_JOIN: '1'} : {})},
     document: {getElementById: get, createElement: () => new Element()}, location: {pathname: path, origin: 'https://watch.example.test'},
     window: {addEventListener: (event, callback) => windowEvents.set(event, callback)},
-    sessionStorage: {getItem: key => key === 'nuvio-party-debug' ? (debug ? '1' : null) : 'test-device', setItem: (...args) => storageWrites.push(args)},
+    sessionStorage: {getItem: key => key === 'nuvio-party-debug' ? (debug ? '1' : null) : key === 'nuvio-party-joined' ? joined : 'test-device', setItem: (...args) => storageWrites.push(args)},
     localStorage: {getItem: key => key === 'nuvio-party-auto-host-stream' && autoHost !== null ? (autoHost ? '1' : '0') : null, setItem: (...args) => storageWrites.push(args)},
     crypto: {randomUUID: () => 'test-id'}, performance: {now: () => clock},
     setInterval: callback => { tick = callback; return 1; }, clearInterval() {}, setTimeout: () => 1,
@@ -83,12 +88,14 @@ async function harness({debug = false, guestControl = false, guestJoin = false, 
     .replace(/^import[\s\S]*?;\r?\n/gm, '').replaceAll('import.meta.env', 'env');
   vm.runInContext(code, context);
   await Promise.resolve();
-  session.room = {info: {code: 'UXZ83H', media: {meta_type: 'movie', meta_id: 'tt1'}, host_member_id: 'host', host_only: true}, members: []};
-  session.playback = playback; session.handlers.room(session.room);
+  if (!fakeJoin) {
+    session.room = fakeRoom();
+    session.playback = playback; session.handlers.room(session.room);
+  }
   const source = () => vm.runInContext('personalHls', context);
   const enter = () => { get('personalHlsUrl').value = privateUrl; get('personalHlsForm').fire('submit'); };
   const metadata = () => { player.readyState = 1; player.duration = 120; player.currentSrc = 'blob:local-test'; player.fire('loadedmetadata'); };
-  return {get, player, session, source, enter, metadata, sent, storageWrites, windowEvents, anonymousSignIns, logins,
+  return {get, player, session, source, enter, metadata, sent, storageWrites, windowEvents, anonymousSignIns, logins, joins,
     tick: () => tick(),
     advance: ms => { clock += ms; }, sync: () => vm.runInContext('syncEnabled', context),
     desktopHls: () => vm.runInContext('hls', context), run: code => vm.runInContext(code, context)};
@@ -1479,4 +1486,58 @@ test('the periodic position report is a status event only, about every 10 s, and
   h.tick(); h.advance(5000); h.tick(); assert.equal(c.statuses.length, 1); // Not more often than every 10 s.
   h.advance(5000); h.tick(); assert.equal(c.statuses.length, 2);
   assert.ok(!JSON.stringify(c.statuses).includes('INTEGRATION_PRIVATE_SENTINEL'));
+});
+
+// --- Reload rejoin and the Video-Link block. Written, not executed here. ---
+const signedIn = {session: {access_token: 'test', user: {id: 'u1', is_anonymous: false, email: 'me@example.test', user_metadata: {}}}};
+const joinedWrites = h => h.storageWrites.filter(([key]) => key === 'nuvio-party-joined').map(([, value]) => value);
+
+test('reload: an active membership of this tab rejoins the same party once, without credentials', async () => {
+  const h = await harness({path: '/party/UXZ83H', rpc: signedIn, joined: 'UXZ83H', fakeJoin: true}); await settlePlayback();
+  assert.equal(h.joins.length, 1); assert.equal(h.joins[0][0], 'UXZ83H'); assert.equal(h.logins.length, 0);
+  assert.match(h.get('message').textContent, /wieder betreten/);
+  assert.deepEqual(joinedWrites(h), ['UXZ83H']); // Only the code is kept; no URL or token.
+  h.get('invitePlay').fire('click'); await settlePlayback();
+  assert.equal(h.joins.length, 1); // Already a member: no second join.
+});
+
+test('reload: no automatic join for another party, without a session, or after leaving', async () => {
+  const other = await harness({path: '/party/UXZ83H', rpc: signedIn, joined: 'ABC234', fakeJoin: true}); await settlePlayback();
+  assert.equal(other.joins.length, 0);
+  const none = await harness({path: '/party/UXZ83H', rpc: signedIn, joined: '', fakeJoin: true}); await settlePlayback();
+  assert.equal(none.joins.length, 0);
+  const signedOut = await harness({path: '/party/UXZ83H', joined: 'UXZ83H', fakeJoin: true}); await settlePlayback();
+  assert.equal(signedOut.joins.length, 0); assert.equal(signedOut.logins.length, 0);
+});
+
+test('leave, sign-out, removal and party end forget the membership, so a reload does not rejoin', async () => {
+  const h = await harness({path: '/party/UXZ83H', rpc: signedIn, joined: 'UXZ83H', fakeJoin: true}); await settlePlayback();
+  h.session.close = async () => {};
+  h.get('leaveButton').fire('click'); await settlePlayback();
+  assert.equal(joinedWrites(h).at(-1), '');
+  const e = await harness({path: '/party/UXZ83H', rpc: signedIn, joined: 'UXZ83H', fakeJoin: true}); await settlePlayback();
+  e.session.handlers.ended('Die Party wurde beendet.', 'ended');
+  assert.equal(joinedWrites(e).at(-1), '');
+  const o = await harness({path: '/party/UXZ83H', rpc: signedIn, joined: 'UXZ83H', fakeJoin: true}); await settlePlayback();
+  o.session.close = async () => {};
+  o.get('logoutButton').fire('click'); await settlePlayback();
+  assert.equal(joinedWrites(o).at(-1), '');
+});
+
+test('reload rejoin: a party that is full or gone ends the automatic rejoin with a clear message', async () => {
+  const h = await harness({path: '/party/UXZ83H', rpc: signedIn, joined: '', fakeJoin: true}); await settlePlayback();
+  h.session.join = async () => { throw Object.assign(new Error('party_full'), {code: 'party_full'}); };
+  h.session.room = null; h.get('invitePlay').fire('click'); await settlePlayback();
+  assert.match(h.get('message').textContent, /Beitritt fehlgeschlagen/);
+  assert.equal(joinedWrites(h).at(-1), '');
+});
+
+test('Video-Link: its own drawer block with input, "Video laden", status and "Zur Host-Quelle zurück"; formats stated honestly', () => {
+  const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
+  const block = html.slice(html.indexOf('<section id="personalHlsPanel"'), html.indexOf('</section>', html.indexOf('<section id="personalHlsPanel"')));
+  assert.match(block, /<h4>Video-Link<\/h4>/);
+  assert.match(block, /id="personalHlsUrl"/); assert.match(block, />Video laden</); assert.match(block, />Zur Host-Quelle zurück</);
+  assert.match(block, /id="personalHlsStatus"/); assert.match(block, /HLS-Playlists \(\.m3u8\) über HTTPS[\s\S]*Keine Webseiten-Links[\s\S]*kein DRM/);
+  assert.ok(!html.includes('Eigene HLS-URL (Beta)'));
+  assert.ok(html.indexOf('id="personalHlsPanel"') < html.indexOf('<summary>Technik</summary>')); // Not nested in "Technik".
 });

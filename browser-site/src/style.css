@@ -312,3 +312,9 @@ input[type=range]:disabled { cursor: default; opacity: .5; }
 
 /* Estimated sync state per member in the drawer. */
 .member-sync { margin-left: auto; font-size: 12px; color: var(--text-2); white-space: nowrap; }
+
+/* "Video-Link" block in the drawer: compact, no horizontal overflow on phones. */
+.video-link .compact { gap: 8px; }
+.video-link input { padding: 11px 12px; font-size: 15px; min-width: 0; }
+.video-link .button-row { display: flex; flex-wrap: wrap; gap: 8px; }
+.video-link p { overflow-wrap: anywhere; }

@@ -102,7 +102,9 @@ internal object PartySync {
     fun pendingApply(pendingPaused: Boolean, shouldPlay: Boolean, isPlaying: Boolean, driftMs: Long): PendingApply = when {
         shouldPlay == pendingPaused -> PendingApply.Superseded
         isPlaying == pendingPaused -> PendingApply.Waiting
-        abs(driftMs) > SEEK_THRESHOLD_MS -> PendingApply.Seeking
+        // Paused: "applied" means the paused frame is within the paused
+        // tolerance, not merely the play state (playing keeps the seek threshold).
+        abs(driftMs) > (if (pendingPaused) PAUSED_TOLERANCE_MS else SEEK_THRESHOLD_MS) -> PendingApply.Seeking
         else -> PendingApply.Applied
     }
 
@@ -159,6 +161,24 @@ internal object PartySync {
             "$sign${seconds / 60}:${(seconds % 60).toString().padStart(2, '0')}"
         }
     }
+
+    /**
+     * The host confirms its real paused position once per revision when the
+     * player settled (no seek within SEEK_SETTLE, position stable, not
+     * buffering) but stands more than PAUSED_TOLERANCE_MS from the target,
+     * typically a keyframe before it. Not for coordinator waits; bounded, so
+     * no seek or publish loop.
+     */
+    fun shouldConfirmPausedPosition(
+        isHost: Boolean,
+        playback: PartyPlayback,
+        isPlaying: Boolean,
+        settled: Boolean,
+        stable: Boolean,
+        actualMs: Long,
+        alreadyConfirmed: Boolean,
+    ): Boolean = isHost && playback.paused && !playback.waiting && !isPlaying && settled && stable && !alreadyConfirmed &&
+        abs(actualMs - playback.positionMs) > PAUSED_TOLERANCE_MS
 
     fun ownSeek(targetMs: Long, partyPositionMs: Long, behind: Boolean): OwnSeek = when {
         targetMs < partyPositionMs - REJOIN_GAP_MS -> OwnSeek.Behind(targetMs)
