@@ -3,7 +3,9 @@ import Hls from 'hls.js';
 import './style.css';
 import {normalizeCode, validCode, partyCodeFromPath, mediaKey, expectedPositionMs, isNewerPlayback, streamProblem, streamIsHls, browserPartyStream, publicConfigProblem, memberSync, memberSyncLabel, shareWorkerOrigin, withFamilyToken} from './protocol.js';
 import {PartySession, callRpc} from './session.js';
-import {PersonalHlsSource, personalHlsUrlProblem} from './personal-hls.js';
+import {PersonalHlsSource} from './personal-hls.js';
+import {classifyVideoLink} from './smart-video-link.js';
+import {YouTubePlayerAdapter} from './youtube-player.js';
 import {SYNC, HLS_TUNING, bufferedRanges, bufferAhead, correctionFor, seekTarget, SeekLead, StallTracker, qualityOptions} from './sync-policy.js';
 
 const $ = id => document.getElementById(id);
@@ -43,6 +45,8 @@ const rememberJoinedParty = code => { try { sessionStorage.setItem(JOINED_PARTY_
 const forgetJoinedParty = () => { try { sessionStorage.removeItem?.(JOINED_PARTY_KEY); sessionStorage.setItem(JOINED_PARTY_KEY, ''); } catch { /* Session only. */ } };
 const joinedPartyCode = () => { try { return sessionStorage.getItem(JOINED_PARTY_KEY) || ''; } catch { return ''; } };
 let hls = null, selectedStream = null, loadedStream = null, syncEnabled = false;
+let localSmartSource = null;
+const smartLinkLabels = {youtube: 'YouTube', hls: 'HLS', mp4: 'MP4', webm: 'WebM', unsupported: 'Nicht unterstützt'};
 let suppressUntil = 0, loading = false, buffering = false;
 let pendingChat = null;
 let pendingSeek = null, internalHlsSeek = null, pendingPlay = null, ownSeek = null;
@@ -73,6 +77,7 @@ const personalHls = new PersonalHlsSource(Hls, player, {
 });
 const session = client ? new PartySession(client, deviceId, {
   room: room => {
+    if (localSmartSource && (localSmartSource.room !== room || localSmartSource.mediaKey !== mediaKey(room.info.media))) resetVideo();
     if (personalHls.active && personalHls.mediaKey !== mediaKey(room.info.media)) resetVideo('Filmkennung geändert. Bitte eine eigene Quelle für den neuen Film laden.');
     $('movieTitle').textContent = playerTitle(room.info.media);
     renderMembers(room);
@@ -122,6 +127,7 @@ const session = client ? new PartySession(client, deviceId, {
     if (stream && stream.media_key !== mediaKey(session.room?.info.media)) return;
     const previousOffer = lastHostStreamEvent;
     lastHostStreamEvent = stream; // Memory only, for enabling auto mode later.
+    if (localSmartSource) return; // Only an explicit return resumes the party source.
     const browserPending = !!stream && Object.hasOwn(stream, 'browser_hls');
     // Optional desktop hint while browser_hls has no URL yet (older hosts send none).
     const browserState = browserPending ? String(stream.browser_hls?.state || 'preparing') : null;
@@ -240,11 +246,12 @@ let autoStarting = false, autoStartPhase = null, awaitingPartyState = false;
 let soloMode = false, soloResume = null;
 try { autoHostStream = globalThis.localStorage?.getItem(AUTO_HOST_STREAM_KEY) !== '0'; } catch { /* Preference unavailable: default. */ }
 function status(message, error = false) {
-  $('message').textContent = message;
-  $('message').style.borderColor = error ? '#ff6969' : '';
-  $('message').hidden = !message;
+  const notice = localSmartSource ? $('localPartyNotice') : $('message');
+  notice.textContent = message;
+  notice.style.borderColor = error ? '#ff6969' : '';
+  notice.hidden = !message;
   globalThis.clearTimeout?.(toastTimer);
-  toastTimer = setTimeout(() => { $('message').hidden = true; }, error ? 9000 : 4500);
+  toastTimer = setTimeout(() => { notice.hidden = true; }, error ? 9000 : 4500);
 }
 function showPanel(name) {
   for (const panel of ['join', 'watch']) $(panel + 'Section').hidden = panel !== name;
@@ -316,13 +323,13 @@ function renderMembers(room) {
   $('participantCount').textContent = room.members.length === 1 ? '1 Person' : `${room.members.length} Personen`;
   $('movieInfo').textContent = `Host: ${room.members.find(m => m.id === room.info.host_member_id)?.display_name || 'Unbekannt'}`;
   $('drawerCode').textContent = room.info.code || '–';
-  $('loadAndSuggest').hidden = !room.memberId || !room.info.host_member_id || room.memberId === room.info.host_member_id;
-  $('suggestNotice').hidden = $('loadAndSuggest').hidden;
+  renderSmartLink();
 }
 // Own row from the live player; others from their last status report.
 function memberSyncFor(room, member) {
   const now = session?.now?.() ?? Date.now(), current = mediaKey(room.info.media);
   if (member.id === room.memberId) {
+    if (localSmartSource) return {state: 'solo'};
     if (!loadedStream) return {state: 'unknown'};
     const status = soloMode || !syncEnabled ? 'behind' : buffering || waitingForTarget || loading ? 'buffering' : 'ready';
     return memberSync({status, solo: soloMode, media_key: current, position_ms: player.currentTime * 1000, position_at: now, playing: !player.paused}, session.playback, current, now);
@@ -361,6 +368,7 @@ function pauseLocally() {
   player.pause();
 }
 function resetVideo(reason = 'Persönliche Quelle entfernt. Für diesen Film kann eine neue eigene Quelle geladen werden.') {
+  clearLocalSmartSource();
   cancelPersonalAutoSync();
   pendingSeek = internalHlsSeek = pendingPlay = ownSeek = null;
   waitingForTarget = false;
@@ -370,6 +378,7 @@ function resetVideo(reason = 'Persönliche Quelle entfernt. Für diesen Film kan
   personalHls.clear();
   personalReadinessMessage = '';
   $('personalHlsUrl').value = '';
+  renderSmartLink();
   $('useDesktopStream').hidden = true;
   $('personalHlsStatus').textContent = reason;
   $('suggestStatus').textContent = '';
@@ -442,7 +451,7 @@ function presence() {
   if (loading && !syncEnabled) state = 'browsing';
   const gap = session.playback ? Math.max(5000, expectedPositionMs(session.playback, session.now()) - player.currentTime * 1000) : 5000;
   const behind = state === 'behind' ? Math.round(gap / 5000) * 5000 : undefined;
-  const solo = soloMode && !!loadedStream;
+  const solo = !!localSmartSource || (soloMode && !!loadedStream);
   const signature = `${state}:${behind ?? ''}:${solo}`;
   if (presenceRoom === session.room && lastPresence === signature) return;
   presenceRoom = session.room; lastPresence = signature;
@@ -883,7 +892,8 @@ function openDrawer(view, opener) {
   $('infoDrawer').hidden = false; $('drawerScrim').hidden = false;
   $('partyApp').inert = true;
   $('membersButton').setAttribute?.('aria-expanded', String(participants));
-  $('ctlSettings').setAttribute?.('aria-expanded', String(!participants));
+  $('ctlSettings').setAttribute?.('aria-expanded', String(!participants && !localSmartSource));
+  $('localSmartSettings').setAttribute?.('aria-expanded', String(!participants && !!localSmartSource));
   $('drawerResync').disabled = $('resync').disabled;
   $('drawerClose').focus?.();
 }
@@ -893,6 +903,7 @@ function closeDrawer() {
   $('partyApp').inert = false;
   $('membersButton').setAttribute?.('aria-expanded', 'false');
   $('ctlSettings').setAttribute?.('aria-expanded', 'false');
+  $('localSmartSettings').setAttribute?.('aria-expanded', 'false');
   if (!$('watchSection').hidden) drawerOpener?.focus?.();
   drawerOpener = null;
 }
@@ -913,6 +924,8 @@ $('ctlFullscreen').addEventListener('click', toggleFullscreen);
 $('ctlSolo').addEventListener('click', toggleSolo);
 $('ctlBack').addEventListener('click', backToInvite);
 $('ctlSettings').addEventListener('click', () => openDrawer('settings', $('ctlSettings')));
+$('localSmartSettings').addEventListener('click', () => openDrawer('settings', $('localSmartSettings')));
+$('localSmartReturn').addEventListener('click', returnToHostSource);
 $('membersButton').addEventListener('click', () => openDrawer('participants', $('membersButton')));
 $('participantSettings').addEventListener('click', () => openDrawer('settings'));
 for (const [index, name] of drawerTabs.entries()) {
@@ -1019,6 +1032,7 @@ const REJECTED_TEXT = {
   stale_epoch: 'Host oder Film hat gewechselt. Der Befehl gilt nicht mehr.',
 };
 function commandSettled(entry) {
+  if (localSmartSource) return;
   // Only the latest gesture speaks; older ones were already overtaken.
   if (entry === session.latestCommand) {
     if (entry.status === 'accepted' && !entry.stale) status(entry.kind === 'seek' ? 'Gesprungen für alle.' : entry.command.paused ? 'Pause für alle.' : 'Wiedergabe für alle.');
@@ -1030,7 +1044,7 @@ function commandSettled(entry) {
 // Local user gesture → shared command. Coalesced: one RPC in flight, the
 // latest gesture queued. Confirmed states arrive via acceptPlayback.
 function sendControl(paused, seconds, kind = 'toggle') {
-  if (!guestControl() || soloMode) return false;
+  if (localSmartSource || !guestControl() || soloMode) return false;
   if (session.canSequence()) return sendSequenced(paused, seconds, kind);
   const request = {paused, seconds};
   if (pendingCommand) { queuedCommand = request; return true; }
@@ -1159,18 +1173,117 @@ async function fetchFamilyStream(offer, attempt = 0) {
   session.handlers.stream({media_key: offer.media_key, url: '', stream_type: 'hls', browser_hls: {url, label: 'TorBox (Familie)'}});
 }
 
+function canSuggestHls(room) {
+  return !!room?.memberId && !!room.info.host_member_id && room.memberId !== room.info.host_member_id;
+}
+
+function renderSmartLink() {
+  const value = $('personalHlsUrl').value.trim();
+  const source = classifyVideoLink(value);
+  const type = $('smartLinkType');
+  type.textContent = value ? smartLinkLabels[source.kind] : '';
+  type.hidden = !value;
+  $('loadAndSuggest').hidden = source.kind !== 'hls' || !canSuggestHls(session?.room);
+  $('suggestNotice').hidden = $('loadAndSuggest').hidden;
+  $('tryOpaqueHls').hidden = !source.hlsCandidate;
+  $('smartLinkHint').textContent = source.kind === 'youtube' ? 'Nur lokal. Beim Laden wird eine Verbindung zu YouTube aufgebaut.'
+    : source.kind === 'mp4' || source.kind === 'webm' ? 'Nur lokale Wiedergabe ohne Party-Sync.'
+    : source.kind === 'hls' ? 'HLS-VOD derselben Filmfassung wie die Party.'
+    : source.reason === 'youtube_live' ? 'YouTube-Live-Links werden nicht unterstützt.'
+    : source.hlsCandidate ? 'Falls dies eine HLS-Playlist ohne Dateiendung ist, kannst du sie lokal prüfen.'
+    : 'YouTube, HLS, MP4 oder WebM über HTTPS.';
+}
+
+function clearLocalSmartSource() {
+  const previous = localSmartSource;
+  if (!previous) return;
+  localSmartSource = null;
+  if (previous.video) {
+    previous.video.pause();
+    previous.video.removeAttribute('src');
+    previous.video.load();
+  }
+  previous.youtube?.destroy();
+  $('localSmartPlayer').replaceChildren();
+  $('localSmartView').hidden = true;
+  $('playerWrap').hidden = false;
+  $('localPartyNotice').hidden = true;
+}
+
+function loadLocalSmartSource(source, room, key) {
+  resetVideo();
+  familyRequest++; // Ignore any in-flight offer from the previous player.
+  resumeAfterReconnect = false;
+  soloMode = false; soloResume = null;
+  closeDrawer();
+  const current = localSmartSource = {room, mediaKey: key};
+  $('playerWrap').hidden = true;
+  $('message').hidden = true;
+  $('localSmartView').hidden = false;
+  $('localSmartTitle').textContent = `${smartLinkLabels[source.kind]} · Allein schauen`;
+  $('streamInfo').textContent = 'Lokale Wiedergabe. Die Party wird nicht gesteuert.';
+  $('useDesktopStream').hidden = false;
+  $('localSmartReturn').focus?.();
+  const report = message => {
+    if (localSmartSource === current && session?.room === room && mediaKey(room.info.media) === key) {
+      $('localSmartStatus').textContent = message;
+    }
+  };
+  const mount = $('localSmartPlayer');
+  if (source.kind === 'youtube') {
+    current.youtube = new YouTubePlayerAdapter(mount, {origin: location.origin, onStatus: report});
+    void current.youtube.open(source.id);
+  } else {
+    const video = current.video = document.createElement('video');
+    video.controls = true; video.playsInline = true; video.preload = 'metadata';
+    video.addEventListener('loadedmetadata', () => report('Drücke Play zum Abspielen.'));
+    video.addEventListener('waiting', () => report('Video puffert …'));
+    video.addEventListener('playing', () => report(''));
+    video.addEventListener('error', () => report('Video nicht abspielbar. Prüfe Dateiformat und Zugriffsrechte.'));
+    report('Video wird geladen …');
+    mount.replaceChildren(video);
+    video.src = source.url;
+  }
+  presence();
+}
+
+function returnToHostSource() {
+  const wasLocal = !!localSmartSource;
+  resetVideo(); presence();
+  $('streamInfo').textContent = 'Warte auf die aktuelle Desktop-Freigabe.';
+  if (wasLocal && $('infoDrawer').hidden) $('playerWrap').focus?.();
+  if (wasLocal && connectionLost && session?.room) {
+    session.reconnect().catch(() => status('Party-Verbindung konnte nicht wiederhergestellt werden.', true));
+    return;
+  }
+  if (wasLocal && lastHostStreamEvent && session?.room) session.handlers.stream(lastHostStreamEvent, 'apply_current');
+  session?.requestState().catch(() => status('Desktop-Freigabe konnte nicht angefragt werden. Verbindung prüfen.', true));
+}
+
+$('personalHlsUrl').addEventListener('input', renderSmartLink);
 $('personalHlsForm').addEventListener('submit', e => {
   e.preventDefault();
   const value = $('personalHlsUrl').value.trim();
   // Local loading never broadcasts the URL; only the explicit suggestion action does.
   $('personalHlsUrl').value = '';
+  renderSmartLink();
   if (!session?.room) { status('Zuerst als angemeldetes Mitglied einer Party beitreten.', true); return; }
   const media = session.room.info.media;
   const currentMediaKey = media?.meta_type && media?.meta_id ? mediaKey(media) : '';
-  const problem = personalHlsUrlProblem(value) || (!currentMediaKey ? 'Die Party hat noch keine gültige Filmkennung. Bitte den Host prüfen und erneut laden.' : '');
+  const source = classifyVideoLink(value);
+  const opaqueHls = e.submitter === $('tryOpaqueHls') && source.hlsCandidate;
+  const problem = !currentMediaKey ? 'Die Party hat noch keine gültige Filmkennung.'
+    : source.reason === 'youtube_live' ? 'YouTube-Live-Links werden nicht unterstützt.'
+    : source.kind === 'unsupported' && !opaqueHls ? 'Nicht unterstützt. Nutze eine öffentliche HTTPS-Adresse für YouTube, HLS, MP4 oder WebM.' : '';
   if (problem) { $('personalHlsStatus').textContent = problem; status(problem, true); return; }
   const room = session.room;
-  const suggest = e.submitter === $('loadAndSuggest') && room.memberId && room.info.host_member_id && room.memberId !== room.info.host_member_id;
+  if (source.kind === 'youtube' || source.kind === 'mp4' || source.kind === 'webm') {
+    if (e.submitter === $('loadAndSuggest')) { status('Diese Quelle kann derzeit nur lokal angesehen werden.', true); return; }
+    loadLocalSmartSource(source, room, currentMediaKey);
+    return;
+  }
+  const suggest = source.kind === 'hls' && e.submitter === $('loadAndSuggest') && canSuggestHls(room);
+  const hlsUrl = source.url || opaqueHls;
   const solo = soloMode;
   resetVideo();
   cancelPersonalAutoSync();
@@ -1184,31 +1297,27 @@ $('personalHlsForm').addEventListener('submit', e => {
   $('noStream').textContent = 'Persönliche HLS-Playlist wird geprüft …';
   status('Persönliche HLS-Playlist wird geladen und auf VOD geprüft.');
   try {
-    const problem = personalHls.open(value, loadedStream.media_key);
+    const problem = personalHls.open(hlsUrl, loadedStream.media_key);
     if (problem) failVideo(problem);
   } catch { failVideo('Die persönliche HLS-Quelle konnte nicht geöffnet werden. Bitte Link und Browser-Unterstützung prüfen.'); }
   if (suggest && loadedStream === offer) {
     const report = message => {
       if (session.room === room && loadedStream === offer && mediaKey(room.info.media) === currentMediaKey) $('suggestStatus').textContent = message;
     };
-    if (value.length > 4096) report('Link zu lang zum Vorschlagen.');
-    else session.suggestStream(value, currentMediaKey)
+    if (hlsUrl.length > 4096) report('Link zu lang zum Vorschlagen.');
+    else session.suggestStream(hlsUrl, currentMediaKey)
       .then(() => report('Vorschlag gesendet. Der Host entscheidet über die Freigabe.'))
       .catch(() => report('Vorschlag nicht gesendet. Verbindung prüfen.'));
   }
   presence();
 });
-$('useDesktopStream').addEventListener('click', () => {
-  resetVideo(); presence();
-  $('streamInfo').textContent = 'Persönliche Quelle gelöscht. Warte auf die aktuelle Desktop-Freigabe.';
-  session?.requestState().catch(() => status('Desktop-Freigabe konnte nicht angefragt werden. Verbindung prüfen.', true));
-});
+$('useDesktopStream').addEventListener('click', returnToHostSource);
 $('autoHostStream').checked = autoHostStream;
 $('autoHostStream').addEventListener('change', () => {
   autoHostStream = $('autoHostStream').checked === true;
   try { globalThis.localStorage?.setItem(AUTO_HOST_STREAM_KEY, autoHostStream ? '1' : '0'); } catch { /* Session only. */ }
   // Enabling it (a user gesture) applies the host source that is already offered.
-  if (!autoHostStream || !session?.room) return;
+  if (!autoHostStream || !session?.room || localSmartSource) return;
   if (selectedStream && !loadedStream && !$('loadStream').hidden) startStream();
   else if (lastHostStreamEvent) session.handlers.stream(lastHostStreamEvent, 'apply_current');
   else session.requestState().catch(() => {});
@@ -1216,7 +1325,7 @@ $('autoHostStream').addEventListener('change', () => {
 for (const event of ['canplay', 'progress', 'durationchange']) player.addEventListener(event, () => updatePersonalHlsReadiness());
 window.addEventListener('pagehide', () => {
   $('personalHlsUrl').value = '';
-  if (personalHls.active) resetVideo();
+  if (personalHls.active || localSmartSource) resetVideo();
 });
 
 // The code comes only from the invitation link (/party/<CODE>). Manual entry is
@@ -1370,6 +1479,7 @@ $('passwordToggle').addEventListener('click', () => {
 });
 $('loadStream').addEventListener('click', startStream);
 function resyncNow() {
+  if (localSmartSource) { returnToHostSource(); return; }
   // After a party end there is no party time to return to.
   if (!session?.room && soloMode) { status('Die Party ist beendet. Für eine neue Party den Einladungslink öffnen.'); return; }
   // Back to the party time always ends "Allein schauen".

@@ -9,11 +9,12 @@ import vm from 'node:vm';
 // loop turn before asserting rejection side effects; never weaken expectations.
 import {setImmediate as settlePlayback} from 'node:timers/promises';
 import * as protocol from '../src/protocol.js';
-import {PersonalHlsSource, personalHlsUrlProblem} from '../src/personal-hls.js';
+import {PersonalHlsSource} from '../src/personal-hls.js';
+import {classifyVideoLink} from '../src/smart-video-link.js';
 import {PartySession as ActualPartySession} from '../src/session.js';
 import * as syncPolicy from '../src/sync-policy.js';
 
-const privateUrl = 'https://media.example.test/private/master?token=INTEGRATION_PRIVATE_SENTINEL';
+const privateUrl = 'https://media.example.test/private/master.m3u8?token=INTEGRATION_PRIVATE_SENTINEL';
 const vod = {live: false, totalduration: 120, fragments: [{start: 0, duration: 120}]};
 const playback = {seq: 1, member_id: 'host', paused: true, position_ms: 5000, rate: 1, at: 1000, media_key: 'movie|tt1||'};
 
@@ -48,7 +49,7 @@ async function harness({debug = false, guestControl = false, guestJoin = false, 
   const get = id => { if (!elements.has(id)) elements.set(id, new Element()); return elements.get(id); };
   const player = get('player');
   get('resync').disabled = true; // Mirrors the initial HTML attribute.
-  get('subtitleMenu').hidden = true; get('infoDrawer').hidden = true; // Initially hidden in the HTML.
+  get('subtitleMenu').hidden = true; get('infoDrawer').hidden = true; get('localSmartView').hidden = true;
   Object.assign(player, {paused: true, currentTime: 0, readyState: 0, duration: NaN, currentSrc: '', loadCount: 0,
     seekable: {length: 1, start: () => 0, end: () => 120},
     pause() { const changed = !this.paused; this.paused = true; if (changed) this.fire('pause'); }, play() { this.paused = false; return Promise.resolve(); },
@@ -56,6 +57,12 @@ async function harness({debug = false, guestControl = false, guestJoin = false, 
     canPlayType() { return ''; },
   });
   let session;
+  const embeds = [];
+  class FakeYouTube {
+    constructor(_mount, options) { this.report = options.onStatus; embeds.push(this); }
+    async open(id) { this.id = id; this.report('YouTube bereit'); }
+    destroy() { this.destroyed = true; }
+  }
   const joins = [];
   const fakeRoom = () => ({info: {code: 'UXZ83H', media: {meta_type: 'movie', meta_id: 'tt1'}, host_member_id: 'host', host_only: true}, members: []});
   class FakeSession extends ActualPartySession {
@@ -78,7 +85,7 @@ async function harness({debug = false, guestControl = false, guestJoin = false, 
     signInAnonymously: async () => { anonymousSignIns.push(1); return {data: {}}; }}};
   const windowEvents = new Map();
   const context = vm.createContext({
-    ...protocol, ...syncPolicy, PersonalHlsSource, personalHlsUrlProblem, Hls: FakeHls, PartySession: FakeSession,
+    ...protocol, ...syncPolicy, PersonalHlsSource, classifyVideoLink, YouTubePlayerAdapter: FakeYouTube, Hls: FakeHls, PartySession: FakeSession,
     createClient: () => client, callRpc: (_client, name, args) => { if (rpc?.[name]) return rpc[name](args); throw Error('Unexpected RPC'); }, URL, Blob,
     // Family share Worker double: share.handle(action, body, headers) -> {status, body}.
     fetch: async (url, init) => {
@@ -87,7 +94,11 @@ async function harness({debug = false, guestControl = false, guestJoin = false, 
       return {status: reply.status, headers: {get: name => reply.headers?.[name] ?? null}, json: async () => reply.body};
     },
     env: {VITE_SUPABASE_URL: 'https://backend.example.test', VITE_SUPABASE_ANON_KEY: 'sb_publishable_TEST', ...(guestControl === true ? {VITE_PARTY_GUEST_CONTROL: '1'} : typeof guestControl === 'string' ? {VITE_PARTY_GUEST_CONTROL: guestControl} : {}), ...(guestJoin ? {VITE_PARTY_GUEST_JOIN: '1'} : {}), ...(share ? {VITE_PARTY_SHARE_WORKER: 'https://share.example.test'} : {})},
-    document: {getElementById: get, createElement: () => new Element()}, location, history: {replaceState: (_state, _title, url) => { historyCalls.push(url); location.pathname = url; }},
+    document: {getElementById: get, createElement: tag => {
+      const node = new Element();
+      if (tag === 'video') Object.assign(node, {pause() {}, load() {}, removeAttribute() { this.src = ''; }});
+      return node;
+    }}, location, history: {replaceState: (_state, _title, url) => { historyCalls.push(url); location.pathname = url; }},
     window: {addEventListener: (event, callback) => windowEvents.set(event, callback)},
     sessionStorage: {getItem: key => key === 'nuvio-party-debug' ? (debug ? '1' : null) : key === 'nuvio-party-joined' ? joined : 'test-device', setItem: (...args) => storageWrites.push(args)},
     localStorage: {getItem: key => key === 'nuvio-party-auto-host-stream' && autoHost !== null ? (autoHost ? '1' : '0') : null, setItem: (...args) => storageWrites.push(args)},
@@ -107,7 +118,7 @@ async function harness({debug = false, guestControl = false, guestJoin = false, 
   const source = () => vm.runInContext('personalHls', context);
   const enter = (submitter, url = privateUrl) => { get('personalHlsUrl').value = url; get('personalHlsForm').fire('submit', {submitter}); };
   const metadata = () => { player.readyState = 1; player.duration = 120; player.currentSrc = 'blob:local-test'; player.fire('loadedmetadata'); };
-  return {get, player, session, source, enter, metadata, sent, storageWrites, windowEvents, anonymousSignIns, logins, joins, historyCalls,
+  return {get, player, session, source, enter, metadata, sent, storageWrites, windowEvents, anonymousSignIns, logins, joins, historyCalls, embeds,
     runTimers: () => { const due = timers.splice(0); due.forEach(callback => callback?.()); },
     tick: () => tick(),
     advance: ms => { clock += ms; }, sync: () => vm.runInContext('syncEnabled', context),
@@ -1585,10 +1596,10 @@ test('the Stream tab has distinct local and suggestion actions and a short priva
   const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
   const start = html.indexOf('<section id="panelStream"');
   const block = html.slice(start, html.indexOf('</section>', start));
-  assert.match(block, /<h4>Eigene HLS-Quelle<\/h4>/);
-  assert.match(block, /id="personalHlsUrl"/); assert.match(block, />Nur lokal laden</);
+  assert.match(block, /<h4>Smart Video Link<\/h4>/);
+  assert.match(block, /id="personalHlsUrl"/); assert.match(block, />Lokal ansehen</);
   assert.match(block, />Video laden &amp; vorschlagen</); assert.match(block, />Zur Host-Quelle zurück</);
-  assert.match(block, /id="personalHlsStatus"/); assert.match(block, /Nur VOD/);
+  assert.match(block, /id="personalHlsStatus"/); assert.match(block, /id="smartLinkType"/);
   assert.match(block, /Party-Mitglieder den Link samt Tokens sehen/);
   assert.ok(!html.includes('id="suggestToHost"'));
 });
@@ -1708,6 +1719,67 @@ test('only the explicit suggestion action broadcasts a valid guest link and neve
   assert.equal(h.get('loadAndSuggest').hidden, true);
   h.enter(h.get('loadAndSuggest')); await settlePlayback();
   assert.equal(channel.filter(m => m.event === 'stream_suggest').length, 1);
+});
+
+test('YouTube plays in the local view and cannot be suggested or steered by party events', async () => {
+  const h = await harness({autoHost: true}), sent = [];
+  h.session.room.memberId = 'guest';
+  h.session.channel = {send: async event => { sent.push(event); return 'ok'; }};
+  const url = 'https://www.youtube.com/watch?v=M7lc1UVf-VE&si=TRACKING_SENTINEL';
+  h.get('personalHlsUrl').value = url;
+  h.get('personalHlsUrl').fire('input');
+  assert.equal(h.get('smartLinkType').textContent, 'YouTube');
+  assert.equal(h.get('loadAndSuggest').hidden, true);
+  h.enter(h.get('loadAndSuggest'), url);
+  assert.equal(h.embeds.length, 0);
+  h.enter(h.get('loadPersonalHls'), url);
+  const [first] = h.embeds;
+  assert.equal(first.id, 'M7lc1UVf-VE');
+  assert.equal(h.get('localSmartView').hidden, false);
+  assert.equal(h.get('playerWrap').hidden, true);
+  assert.equal(h.sent.at(-1)[2], true);
+  h.session.receive('state', {...playback, paused: false, seq: 10});
+  h.session.handlers.connection('CHANNEL_ERROR');
+  h.session.handlers.connection('SUBSCRIBED');
+  h.session.receive('stream', {member_id: 'host', stream: hostLink()});
+  assert.equal(h.desktopHls(), null);
+  assert.equal(h.sync(), false);
+  assert.equal(first.destroyed, undefined);
+  assert.equal(sent.filter(event => event.event === 'stream_suggest').length, 0);
+  assert.ok(!JSON.stringify(h.storageWrites).includes('TRACKING_SENTINEL'));
+
+  h.get('localSmartReturn').fire('click');
+  assert.equal(first.destroyed, true);
+  assert.equal(h.get('playerWrap').hidden, false);
+  assert.ok(h.desktopHls()); // Explicit return may take the last matching host offer.
+  first.report('late callback');
+  assert.notEqual(h.get('localSmartStatus').textContent, 'late callback');
+});
+
+test('direct files use local native controls; a film change disposes their player', async () => {
+  const h = await harness();
+  h.enter(h.get('loadPersonalHls'), 'https://media.example.test/clip.webm?sig=private');
+  const [video] = h.get('localSmartPlayer').children;
+  assert.equal(video.controls, true);
+  assert.equal(video.src, 'https://media.example.test/clip.webm?sig=private');
+  assert.equal(h.get('resync').disabled, true);
+  assert.equal(h.sync(), false);
+  h.session.handlers.media();
+  assert.equal(h.get('localSmartView').hidden, true);
+  assert.equal(video.src, '');
+  assert.equal(h.get('localSmartPlayer').children.length, 0);
+  video.fire('error');
+  assert.doesNotMatch(h.get('localSmartStatus').textContent, /nicht abspielbar/);
+});
+
+test('an extensionless HTTPS playlist still has an explicit local HLS fallback', async () => {
+  const h = await harness();
+  const opaque = 'https://media.example.test/private/master?sig=private';
+  h.enter(h.get('loadPersonalHls'), opaque);
+  assert.equal(h.source().instance, null);
+  h.enter(h.get('tryOpaqueHls'), opaque);
+  assert.equal(h.source().instance.source, opaque);
+  assert.equal(h.get('localSmartView').hidden, true);
 });
 
 test('a personal VOD follows the party time by itself once it is seekable, with bounded retries', async () => {

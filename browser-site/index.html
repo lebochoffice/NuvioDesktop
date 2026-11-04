@@ -106,6 +106,16 @@
           </div>
         </div>
       </div>
+      <section id="localSmartView" class="local-smart-view" aria-labelledby="localSmartTitle" hidden>
+        <div class="local-smart-toolbar">
+          <h2 id="localSmartTitle">Lokale Wiedergabe</h2>
+          <button id="localSmartReturn" class="btn ghost small" type="button">Zur Party</button>
+          <button id="localSmartSettings" class="btn ghost small" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="infoDrawer">Einstellungen</button>
+        </div>
+        <div id="localSmartPlayer"></div>
+        <p id="localSmartStatus" class="muted small" role="status"></p>
+        <p id="localPartyNotice" class="muted small" role="status"></p>
+      </section>
     </section>
   </main>
 
@@ -133,14 +143,19 @@
         </div>
       </section>
       <section id="panelStream" class="settings-panel video-link" role="tabpanel" aria-labelledby="tabStream" tabindex="0" hidden>
-        <h4>Eigene HLS-Quelle</h4>
+        <h4>Smart Video Link</h4>
         <form id="personalHlsForm" class="stack compact" autocomplete="off">
-          <label class="sr-only" for="personalHlsUrl">Video-Link (HTTPS-HLS-Playlist)</label>
-          <input id="personalHlsUrl" type="url" inputmode="url" autocomplete="off" spellcheck="false" maxlength="16384" placeholder="https://…/playlist.m3u8" aria-describedby="personalHlsStatus videoLinkFormats" required>
-          <div class="button-row"><button id="loadPersonalHls" class="btn ghost small" type="submit">Nur lokal laden</button><button id="loadAndSuggest" class="btn primary small" type="submit" aria-describedby="suggestNotice">Video laden &amp; vorschlagen</button></div>
-          <p id="suggestNotice" class="muted small">Beim Vorschlagen können Party-Mitglieder den Link samt Tokens sehen.</p>
+          <label class="sr-only" for="personalHlsUrl">Smart Video Link</label>
+          <input id="personalHlsUrl" type="url" inputmode="url" autocomplete="off" spellcheck="false" maxlength="16384" placeholder="https://…" aria-describedby="smartLinkType smartLinkHint personalHlsStatus" required>
+          <p id="smartLinkType" class="smart-link-type small" role="status" hidden></p>
+          <p id="smartLinkHint" class="muted small">YouTube, HLS, MP4 oder WebM über HTTPS.</p>
+          <div class="button-row">
+            <button id="loadPersonalHls" class="btn ghost small" type="submit">Lokal ansehen</button>
+            <button id="loadAndSuggest" class="btn primary small" type="submit" aria-describedby="suggestNotice" hidden>Video laden &amp; vorschlagen</button>
+            <button id="tryOpaqueHls" class="btn ghost small" type="submit" hidden>Als HLS prüfen</button>
+          </div>
+          <p id="suggestNotice" class="muted small" hidden>Beim Vorschlagen können Party-Mitglieder den Link samt Tokens sehen.</p>
         </form>
-        <p id="videoLinkFormats" class="sr-only">Öffentliche HTTPS-HLS-Playlist derselben Filmfassung. Nur VOD.</p>
         <p id="personalHlsStatus" class="muted small" role="status"></p>
         <p id="suggestStatus" class="muted small" role="status"></p>
         <button id="useDesktopStream" type="button" class="btn ghost small" hidden>Zur Host-Quelle zurück</button>

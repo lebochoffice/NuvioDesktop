@@ -327,3 +327,14 @@ input[type=range]:disabled { cursor: default; opacity: .5; }
 .video-link input { padding: 11px 12px; font-size: 15px; min-width: 0; }
 .video-link .button-row { display: flex; flex-wrap: wrap; gap: 8px; }
 .video-link p { overflow-wrap: anywhere; }
+.smart-link-type { justify-self: start; padding: 4px 9px; border-radius: 999px; background: var(--surface); color: var(--text); }
+.video-link :is(#smartLinkType, #smartLinkHint) { margin: 0; }
+.watch:has(#localSmartView:not([hidden])) { overflow-y: auto; }
+.local-smart-view { display: grid; width: min(100%, 920px); min-width: 0; gap: 8px; padding: 12px max(12px, var(--safe-r)) 12px max(12px, var(--safe-l)); }
+.local-smart-toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.local-smart-toolbar h2 { flex: 1 1 12rem; margin: 0; font-size: 16px; }
+.local-smart-view p { margin: 0; }
+.local-smart-view p:empty { display: none; }
+#localSmartPlayer iframe, #localSmartPlayer video { display: block; width: 100%; aspect-ratio: 16 / 9; border: 0; background: #000; }
+#localSmartPlayer iframe { min-width: 200px; min-height: 200px; }
+body:has(#infoDrawer:not([hidden])) #localSmartPlayer iframe { visibility: hidden; }
