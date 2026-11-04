@@ -546,14 +546,14 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
     val familyHost = partyState.party?.isHost == true && partyState.party?.media?.key == key
     // Republish when members change, so kicked or departed members lose their grants at once.
     val familyMembers = partyState.party?.members.orEmpty().map { it.id }.sorted()
-    LaunchedEffect(partyId, key, sharing, familyUrl, familyAdmitted, familyHost, familyMembers) {
+    LaunchedEffect(partyId, key, sharing, familyUrl, familyHost, familyMembers) {
         val previous = familySharePartyId
         if (previous != null && previous != partyId) {
             // Host left: no new grants. Guests keep what they already loaded.
             com.nuvio.app.features.party.PartyFamilyShare.revoke(previous)
             familySharePartyId = null
         }
-        if (partyId == null) { familyAdmitted = emptySet(); familyShareRev = null; familyShareStatus = ""; return@LaunchedEffect }
+        if (partyId == null) { familyShareRev = null; familyShareStatus = ""; return@LaunchedEffect }
         if (!com.nuvio.app.features.party.PartyFamilyShare.configured || !familyHost) return@LaunchedEffect
         if (!sharing || familyUrl == null) {
             if (familySharePartyId != null) com.nuvio.app.features.party.PartyFamilyShare.revoke(partyId)
@@ -562,9 +562,10 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
             familyShareStatus = if (familyUrl != null) "Familienfreigabe beendet (Share my stream ist aus)." else ""
             return@LaunchedEffect
         }
-        // Someone who left or was removed is no longer admitted (a rejoin is a new member).
-        val admitted = familyAdmitted.filter { it in familyMembers }.toSet()
-        if (admitted != familyAdmitted) { familyAdmitted = admitted; return@LaunchedEffect } // Restarts with the pruned set.
+        // "Share my stream" is the only switch: every current member except the
+        // host is admitted; joins, kicks and leaves republish (removed members'
+        // grants are deleted by the share service).
+        val admitted = familyMembers.filter { it != partyState.party?.memberId }
         // Short-lived share, renewed while it is on: a crash or host change ends it by itself.
         while (isActive) {
             val propagate = activeHostPartyHls?.familyOnly != true && torboxPropagateToken

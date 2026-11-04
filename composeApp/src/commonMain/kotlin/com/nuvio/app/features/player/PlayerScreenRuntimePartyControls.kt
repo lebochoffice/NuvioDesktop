@@ -148,7 +148,6 @@ internal fun PlayerScreenRuntime.rememberPartyControlsState(): PlayerControlPart
     val storage = "${ServerConfigurationRepository.active.value.backendUrl}/storage/v1/object/"
     val you = stringResource(Res.string.party_you)
     val nowMs = PartyRepository.nowMs()
-    val familyToggles = party.isHost && party.sharing && !elsewhere && com.nuvio.app.features.party.PartyFamilyShare.configured
     val members = party.members.mapIndexed { index, member ->
         val isSelf = member.id == party.memberId
         val label = com.nuvio.app.features.party.partyMemberLabel(member.displayName, index)
@@ -193,7 +192,6 @@ internal fun PlayerScreenRuntime.rememberPartyControlsState(): PlayerControlPart
             presence = party.presenceState(member).name.lowercase(),
             canRemove = party.isHost && !isSelf,
             removeTitle = stringResource(Res.string.party_remove_title, label),
-            familyShare = if (familyToggles && !isSelf) (if (member.id in familyAdmitted) "on" else "off") else "",
         )
     }
     val chat = if (chatVisible) {
@@ -316,10 +314,6 @@ internal fun PlayerScreenRuntime.rememberPartyControlsState(): PlayerControlPart
             com.nuvio.app.features.debrid.DebridSettingsRepository.snapshot().apiKeyFor(com.nuvio.app.features.debrid.DebridProviders.TORBOX_ID).isNotBlank(),
         familyAvailable = party.isHost && !elsewhere && com.nuvio.app.features.party.PartyFamilyShare.configured,
         familyStatus = if (party.isHost) familyShareStatus else "",
-        familyMembers = if (party.isHost && com.nuvio.app.features.party.PartyFamilyShare.configured) party.members
-            .filter { it.id != party.memberId }
-            .map { PlayerControlFamilyMember(id = it.id, name = it.displayName, admitted = it.id in familyAdmitted) }
-        else emptyList(),
         torboxLinkedName = if (torboxManualFor == partyKey) torboxManualName else "",
         torboxChoicesOpen = party.isHost && torboxChoicesFor == partyKey && (torboxChoices != null || torboxChoicesBusy),
         torboxChoicesBusy = torboxChoicesBusy,
@@ -370,15 +364,6 @@ internal fun PlayerScreenRuntime.handlePartyControlsEvent(type: String, value: D
         }.getOrNull()
         // The overlay sends this only after the explicit consent checkbox.
         if (url != null) shareHostPartyHls(url, "Video-Link des Hosts")
-        return true
-    }
-    if (type.startsWith(FAMILY_ADMIT_EVENT)) {
-        // Only current members; the host's own consent is "Share my stream".
-        val memberId = type.removePrefix(FAMILY_ADMIT_EVENT)
-        val party = PartyRepository.state.value.party
-        if (party?.isHost == true && memberId != party.memberId && party.members.any { it.id == memberId }) {
-            familyAdmitted = if (value >= 0.5) familyAdmitted + memberId else familyAdmitted - memberId
-        }
         return true
     }
     if (type.startsWith(TORBOX_PICK_EVENT)) {
@@ -566,7 +551,6 @@ private fun syncAllSummary(
     }
 }
 private const val TORBOX_PICK_EVENT = "partyTorboxPick:"
-private const val FAMILY_ADMIT_EVENT = "partyFamilyAdmit:"
 
 private fun formatTorboxSize(bytes: Long): String = when {
     bytes >= 1L shl 30 -> "${(bytes * 10 / (1L shl 30)) / 10.0} GB"

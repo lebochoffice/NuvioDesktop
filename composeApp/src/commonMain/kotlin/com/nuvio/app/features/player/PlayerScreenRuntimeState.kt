@@ -335,8 +335,6 @@ internal class PlayerScreenRuntime(
     // Family share: the prepared TorBox address carries the account token.
     var torboxFamilyOnly by mutableStateOf(false)
     var torboxPropagateToken by mutableStateOf(false)
-    // Party members the host admitted for the family share (this party only).
-    var familyAdmitted by mutableStateOf<Set<String>>(emptySet())
     var familyShareRev by mutableStateOf<Int?>(null)
     var familyShareStatus by mutableStateOf("")
     // Party of the last published family share, revoked when the host leaves.

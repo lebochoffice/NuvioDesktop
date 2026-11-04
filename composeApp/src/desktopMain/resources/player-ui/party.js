@@ -363,15 +363,12 @@ const buildPartyMembers = party => {
     const tone = partySyncTone(member.syncState);
     copy.appendChild(partyElement("span", tone ? `party-member-status ${tone}` : "party-member-status", member.status || ""));
     row.appendChild(copy);
-    if (member.familyShare) row.appendChild(buildPartyShareToggle(member));
     if (member.canRemove) {
       row.appendChild(partyIconButton("icon-remove", partyLabel("remove"), "muted", `remove:${member.id}`, () => confirmPartyRemoval(member)));
     }
     section.appendChild(row);
   });
   partyKnownMemberIds = new Set(members.map(member => member.id));
-  const familyStatus = String(party.familyStatus || "").trim();
-  if (members.some(member => member.familyShare) && familyStatus) section.appendChild(partyElement("p", "party-detail", familyStatus));
 
   if (members.length < total) {
     const invite = partyAction(partyElement("button", "party-open-seat-row"), "invite", copyPartyInvite);
@@ -466,17 +463,6 @@ const buildPartySmart = party => {
   return content;
 };
 
-// Stream share per member (shield): only members switched on here receive a
-// TorBox stream that carries the account token (family share service).
-const buildPartyShareToggle = member => {
-  const on = member.familyShare === "on";
-  const label = on ? "Stream freigegeben – klicken zum Entziehen" : "Stream für dieses Mitglied freigeben";
-  const toggle = partyIconButton(on ? "icon-shield-check" : "icon-shield", label, on ? "party-share-shield on" : "party-share-shield muted",
-    `family:${member.id}`, () => send(`partyFamilyAdmit:${String(member.id)}`, on ? 0 : 1));
-  toggle.setAttribute("aria-pressed", String(on));
-  return toggle;
-};
-
 const buildPartySwitch = (key, title, description, checked, eventType) => {
   const row = partyAction(partyElement("button", "party-switch-row"), key, () => {
     const next = row.getAttribute("aria-checked") !== "true";
@@ -491,7 +477,7 @@ const buildPartySwitch = (key, title, description, checked, eventType) => {
     if (eventType === "partySharing" && next) {
       showPartyConfirm({
         title: "Stream mit der Party teilen?",
-        message: "Mitglieder können die Quelladresse sehen. TorBox-Streams mit Account-Key erhalten nur Mitglieder, die du in der Liste freigibst.",
+        message: "Alle Party-Mitglieder erhalten deinen Stream automatisch, bei TorBox samt Account-Key in der Adresse.",
         confirmLabel: "Teilen", danger: false, onConfirm: apply,
       });
     } else apply();
@@ -626,6 +612,8 @@ const buildPartyHostSettings = party => {
   const [hlsLabel] = partyHlsPhaseLabels[String(party.hlsPhase || "")] || [""];
   const shareSubtitle = hlsLabel ? `Browser-HLS: ${hlsLabel}` : partyLabel("shareDescription");
   section.appendChild(buildPartySwitch("sharing", "Stream freigeben", shareSubtitle, party.sharing, "partySharing"));
+  const familyStatus = String(party.familyStatus || "").trim();
+  if (party.sharing && familyStatus) section.appendChild(partyElement("p", "party-detail", familyStatus));
   if (party.torboxChoicesOpen) section.appendChild(buildPartyTorboxLink(party));
   else if (party.streamTitle) section.appendChild(buildPartyStreamCard(party));
   const problem = buildPartyStreamStatus(party);

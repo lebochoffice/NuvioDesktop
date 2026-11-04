@@ -73,7 +73,6 @@ data class PlayerControlPartyState(
     // Family share of TorBox addresses with the account token.
     val familyAvailable: Boolean = false,
     val familyStatus: String = "",
-    val familyMembers: List<PlayerControlFamilyMember> = emptyList(),
     val canEnd: Boolean = false,
     val seatsLabel: String = "",
     val maxMembers: Int = 0,
@@ -88,13 +87,6 @@ data class PlayerControlPartyState(
     val messageToken: Long = 0L,
     val labels: Map<String, String> = emptyMap(),
     val chat: PlayerControlChatState = PlayerControlChatState(),
-)
-
-@Serializable
-data class PlayerControlFamilyMember(
-    val id: String = "",
-    val name: String = "",
-    val admitted: Boolean = false,
 )
 
 @Serializable
@@ -116,8 +108,6 @@ data class PlayerControlPartyMember(
     val presence: String = "",
     val canRemove: Boolean = false,
     val removeTitle: String = "",
-    // Family share toggle for the host: "" (none), "off" or "on".
-    val familyShare: String = "",
     // Compact sync state for colours: synced, catching_up, buffering,
     // unsynced, solo, stale, offline or "" (unknown; never assumed synced).
     val syncState: String = "",
