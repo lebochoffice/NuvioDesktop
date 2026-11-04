@@ -84,6 +84,8 @@ internal fun PlayerScreenRuntime.rememberPartyControlsState(): PlayerControlPart
     val playback by PartyRepository.playback.collectAsStateWithLifecycle()
     val available by PartyRepository.available.collectAsStateWithLifecycle()
     val hlsSuggestion by PartyRepository.hlsSuggestion.collectAsStateWithLifecycle()
+    val sharedSource by PartyRepository.sharedSource.collectAsStateWithLifecycle()
+    val linkPlayback by PartyRepository.linkPlayback.collectAsStateWithLifecycle()
     val countdown by PartyRepository.countdown.collectAsStateWithLifecycle()
     val notice = rememberPartyNotice()
     val avatar = rememberProfileAvatar()
@@ -311,6 +313,14 @@ internal fun PlayerScreenRuntime.rememberPartyControlsState(): PlayerControlPart
         hlsSuggestionFrom = pendingSuggestion?.let { it.name.trim().takeIf { name -> name.isNotEmpty() && "://" !in name }?.take(40) ?: "Gast" }.orEmpty(),
         hlsSuggestionHost = pendingSuggestion?.let { com.nuvio.app.features.party.partyHlsDisplayHost(it.url) }.orEmpty(),
         hlsSuggestionId = pendingSuggestion?.id,
+        hlsSuggestionKind = pendingSuggestion?.kind.orEmpty(),
+        linkActive = sharedSource?.partyKey == party.media.key,
+        linkKind = sharedSource?.kind.orEmpty(),
+        linkLabel = sharedSource?.label.orEmpty(),
+        linkPaused = linkPlayback?.paused ?: true,
+        // Party time of the link when this state was built; the panel extrapolates it.
+        linkPositionMs = linkPlayback?.takeIf { it.mediaKey == sharedSource?.key }
+            ?.let { com.nuvio.app.features.party.PartySync.expectedPositionMs(it, PartyRepository.nowMs()) } ?: 0L,
         // Manual linking only when no unique cloud file was found automatically
         // (or to change an existing manual link).
         torboxLinkAvailable = party.isHost && !elsewhere && activeStream != null && activeStream?.torboxPartyFile == null &&
@@ -430,14 +440,24 @@ internal fun PlayerScreenRuntime.handlePartyControlsEvent(type: String, value: D
             if (party?.isHost == true && suggestion != null && value == suggestion.id.toDouble() &&
                 suggestion.mediaKey == party.media.key && party.media.key == partyKey && !hostPartyHlsBusy &&
                 PartyRepository.dismissHlsSuggestion(suggestion)) {
-                shareHostPartyHls(suggestion.url, "Video-Link des Hosts")
+                if (suggestion.kind in com.nuvio.app.features.party.PartyLinks.KINDS) shareSuggestedLink(suggestion)
+                else shareHostPartyHls(suggestion.url, "Video-Link des Hosts")
             }
         }
         "partyHlsSuggestionReject" -> {
             val suggestion = PartyRepository.hlsSuggestion.value
             if (PartyRepository.state.value.party?.isHost == true &&
-                suggestion != null && suggestion.id.toDouble() == value) PartyRepository.dismissHlsSuggestion(suggestion)
+                suggestion != null && suggestion.id.toDouble() == value && PartyRepository.dismissHlsSuggestion(suggestion)) {
+                PartyRepository.answerSuggestion(suggestion, accepted = false)
+            }
         }
+        // Shared separate video: the host drives its party time from here.
+        "partyLinkPlay" -> PartyRepository.controlLink(paused = false)
+        "partyLinkPause" -> PartyRepository.controlLink(paused = true)
+        "partyLinkSeekBy" -> PartyRepository.controlLink(seekByMs = (value * 1000).toLong().coerceIn(-600_000L, 600_000L))
+        "partyLinkRestart" -> PartyRepository.controlLink(paused = true, restart = true)
+        "partyLinkCountdown" -> PartyRepository.startLinkCountdown(partyCountdownSeconds)
+        "partyLinkStop" -> PartyRepository.stopLink()
         "partyTorboxList" -> loadTorboxCloudChoices()
         "partyTorboxClose" -> { torboxChoices = null; torboxChoicesFor = null; torboxChoicesStatus = "" }
         "partyTorboxUnlink" -> {
@@ -613,6 +633,48 @@ private fun PlayerScreenRuntime.shareHostPartyHls(url: String, label: String) {
                     else "Geteilt mit allen Mitgliedern."
             }
         }
+    }
+}
+
+/**
+ * Host accepted a guest's separate video (YouTube/MP4/WebM). YouTube needs no
+ * check here: only the validated video ID is shared and every browser plays it
+ * through the official IFrame player. Files are checked first. The host's own
+ * film pauses, so desktop guests do not watch on while browsers switch.
+ */
+private fun PlayerScreenRuntime.shareSuggestedLink(suggestion: com.nuvio.app.features.party.PartyHlsSuggestion) {
+    val party = PartyRepository.state.value.party ?: return
+    val candidate = com.nuvio.app.features.party.PartyLinks.candidate(suggestion.kind, suggestion.url, suggestion.videoId)
+    if (!party.isHost || party.media.key != partyKey || hostPartyHlsBusy || candidate == null) return
+    val label = when (candidate.kind) {
+        com.nuvio.app.features.party.PartyLinks.YOUTUBE -> "YouTube"
+        else -> "${candidate.kind.uppercase()} · ${com.nuvio.app.features.party.partyHlsDisplayHost(candidate.url)}"
+    }
+    fun share() {
+        if (shouldPlay) applyNativePlaybackState(play = false)
+        PartyRepository.shareLink(candidate, label)
+        PartyRepository.answerSuggestion(suggestion, accepted = true)
+        hostPartyHlsStatus = "Gemeinsames Video ($label) für Browser-Gäste freigegeben. Starte es im Party-Menü."
+    }
+    if (candidate.kind == com.nuvio.app.features.party.PartyLinks.YOUTUBE) { share(); return }
+    val mediaKey = partyKey
+    hostPartyHlsBusy = true
+    hostPartyHlsStatus = "Video wird geprüft …"
+    hostPartyHlsJob = scope.launch {
+        val keys = com.nuvio.app.features.debrid.DebridSettingsRepository.snapshot().providerApiKeys.values.filter { it.isNotBlank() }
+        val problem = try { com.nuvio.app.features.party.PartyLinks.checkFile(candidate, keys) }
+            catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+            catch (_: Exception) { "Unerwarteter Fehler bei der Prüfung. Link kontrollieren und erneut versuchen." }
+        hostPartyHlsBusy = false
+        val current = PartyRepository.state.value.party
+        if (current == null || !current.isHost || current.id != party.id || partyKey != mediaKey || current.media.key != mediaKey) {
+            hostPartyHlsStatus = "Party oder Titel gewechselt. Das Video wurde nicht geteilt."
+            return@launch
+        }
+        if (problem != null) {
+            hostPartyHlsStatus = "Nicht geteilt: $problem"
+            PartyRepository.answerSuggestion(suggestion, accepted = false)
+        } else share()
     }
 }
 

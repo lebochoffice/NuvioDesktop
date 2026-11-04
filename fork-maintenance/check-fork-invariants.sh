@@ -19,7 +19,7 @@ need_text composeApp/src/desktopMain/resources/player-ui/party.js 'nuvio-browser
 need_text composeApp/src/commonMain/kotlin/com/nuvio/app/features/party/PartyRepository.kt 'WATCH_PARTY_BROWSER_ORIGIN = "https://nuvio-watch-friends.pages.dev"'
 # Host-sequenced guest commands (command ID, ack) and event-based remote apply.
 need_file composeApp/src/commonMain/kotlin/com/nuvio/app/features/party/PartyCommands.kt
-need_text composeApp/src/commonMain/kotlin/com/nuvio/app/features/party/PartyChannel.kt '"command")'
+need_text composeApp/src/commonMain/kotlin/com/nuvio/app/features/party/PartyChannel.kt '"chat", "command"'
 need_text composeApp/src/commonMain/kotlin/com/nuvio/app/features/party/PartyRepository.kt 'private suspend fun onCommand('
 need_text composeApp/src/commonMain/kotlin/com/nuvio/app/features/player/PlayerScreenRuntimeParty.kt 'var awaitingApply: PartyPlayback?'
 # Frame-accurate paused party seek (native bridge + party loop) and the stale-bridge guard.
@@ -34,6 +34,10 @@ need_text browser-site/src/session.js 'export const COMMAND_PROTOCOL = 1;'
 # TorBox HLS for browser guests.
 need_file composeApp/src/commonMain/kotlin/com/nuvio/app/features/debrid/TorboxPartyHls.kt
 need_text composeApp/src/commonMain/kotlin/com/nuvio/app/features/party/PartyModels.kt '@SerialName("browser_hls")'
+# Shared separate video (YouTube/MP4/WebM, links protocol 1).
+need_file composeApp/src/commonMain/kotlin/com/nuvio/app/features/party/PartyLinks.kt
+need_text browser-site/src/shared-source.js 'export const LINK_PROTOCOL = 1;'
+need_text composeApp/src/commonMain/kotlin/com/nuvio/app/features/party/PartyChannel.kt '"shared_source"'
 # Intro-skip configuration guard.
 need_text composeApp/build.gradle.kts 'INTRODB_API_URL missing or not https'
 # WebView2 loader guard: SDK path relative to the root, staged runtime checked.

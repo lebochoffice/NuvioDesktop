@@ -13,6 +13,9 @@ import {PersonalHlsSource} from '../src/personal-hls.js';
 import {classifyVideoLink} from '../src/smart-video-link.js';
 import {PartySession as ActualPartySession} from '../src/session.js';
 import * as syncPolicy from '../src/sync-policy.js';
+import * as sharedSourceModule from '../src/shared-source.js';
+import * as linkSync from '../src/link-sync.js';
+import {VideoElementAdapter} from '../src/player-adapters.js';
 
 const privateUrl = 'https://media.example.test/private/master.m3u8?token=INTEGRATION_PRIVATE_SENTINEL';
 const vod = {live: false, totalduration: 120, fragments: [{start: 0, duration: 120}]};
@@ -59,9 +62,22 @@ async function harness({debug = false, guestControl = false, guestJoin = false, 
   let session;
   const embeds = [];
   class FakeYouTube {
-    constructor(_mount, options) { this.report = options.onStatus; embeds.push(this); }
+    constructor(_mount, options) {
+      this.report = options.onStatus; this.onState = options.onState; this.onFailure = options.onFailure; embeds.push(this);
+      this.calls = []; this.ready = false; this.time = 0; this.ytState = -1;
+    }
     async open(id) { this.id = id; this.report('YouTube bereit'); }
+    load(source) { return this.open(source.videoId); }
+    play() { this.calls.push('play'); }
+    pause() { this.calls.push('pause'); }
+    seek(seconds) { this.calls.push(['seek', seconds]); this.time = seconds; }
+    get currentPosition() { return this.ready ? this.time : null; }
+    get duration() { return null; }
+    get state() { return this.ready ? this.ytState : null; }
+    get bufferingState() { return this.ytState === 3; }
+    get playbackState() { return !this.ready ? 'loading' : this.ytState === 1 ? 'playing' : 'paused'; }
     destroy() { this.destroyed = true; }
+    dispose() { this.destroy(); }
   }
   const joins = [];
   const fakeRoom = () => ({info: {code: 'UXZ83H', media: {meta_type: 'movie', meta_id: 'tt1'}, host_member_id: 'host', host_only: true}, members: []});
@@ -85,7 +101,8 @@ async function harness({debug = false, guestControl = false, guestJoin = false, 
     signInAnonymously: async () => { anonymousSignIns.push(1); return {data: {}}; }}};
   const windowEvents = new Map();
   const context = vm.createContext({
-    ...protocol, ...syncPolicy, PersonalHlsSource, classifyVideoLink, YouTubePlayerAdapter: FakeYouTube, Hls: FakeHls, PartySession: FakeSession,
+    ...protocol, ...syncPolicy, ...sharedSourceModule, ...linkSync, VideoElementAdapter,
+    PersonalHlsSource, classifyVideoLink, YouTubePlayerAdapter: FakeYouTube, Hls: FakeHls, PartySession: FakeSession,
     createClient: () => client, callRpc: (_client, name, args) => { if (rpc?.[name]) return rpc[name](args); throw Error('Unexpected RPC'); }, URL, Blob,
     // Family share Worker double: share.handle(action, body, headers) -> {status, body}.
     fetch: async (url, init) => {
@@ -1975,4 +1992,110 @@ test('a TorBox link with token shared directly by the host loads automatically a
   opened.length = 0; instance.config.xhrSetup(xhr, 'https://cdn.example.test/x.ts');
   assert.equal(opened.length, 0);
   assert.ok(!JSON.stringify(h.storageWrites).includes('FAKE_ACCOUNT_TOKEN_FOR_TESTS')); // Memory only.
+});
+
+// --- Shared separate video (links protocol 1) -------------------------------
+const LINK_ID = 'abcdefgh23456789';
+const linkKey = rev => `link:${LINK_ID}:${rev}`;
+const sharedYouTube = (rev = 1) => ({key: linkKey(rev), id: LINK_ID, rev, kind: 'youtube', video_id: 'M7lc1UVf-VE', label: 'YouTube', party_key: 'movie|tt1||'});
+const sharedFile = (rev = 1, url = 'https://media.example.test/clip.mp4?sig=FILE_SENTINEL') => ({key: linkKey(rev), id: LINK_ID, rev, kind: 'mp4', url, label: 'MP4', party_key: 'movie|tt1||'});
+const linkState = (rev, extra = {}) => ({seq: 1, member_id: 'host', paused: false, position_ms: 5000, rate: 1, at: 1000, media_key: linkKey(rev), ...extra});
+const shareLink = (h, source) => h.session.receive('shared_source', {member_id: 'host', media_key: 'movie|tt1||', source});
+
+test('separate videos can be proposed only to a link-capable host; YouTube sends the ID without tracking', async () => {
+  const h = await harness(), sent = [];
+  h.session.room.memberId = 'guest';
+  h.session.channel = {send: async event => { sent.push(event); return 'ok'; }};
+  const url = 'https://youtu.be/M7lc1UVf-VE?si=TRACKING_SENTINEL&t=42';
+  h.get('personalHlsUrl').value = url; h.get('personalHlsUrl').fire('input');
+  assert.equal(h.get('loadAndSuggest').hidden, true); // Host without the links protocol.
+  h.session.receive('status', {member_id: 'host', status: 'ready', commands: 1, links: 1});
+  h.get('personalHlsUrl').value = url; h.get('personalHlsUrl').fire('input');
+  assert.equal(h.get('loadAndSuggest').hidden, false);
+  assert.equal(h.get('loadAndSuggest').textContent, 'Für Party vorschlagen');
+  h.enter(h.get('loadAndSuggest'), url); await settlePlayback();
+  const [proposal] = sent.filter(event => event.event === 'stream_suggest').map(event => event.payload);
+  assert.deepEqual(proposal, {member_id: 'guest', media_key: 'movie|tt1||', url: 'https://www.youtube.com/watch?v=M7lc1UVf-VE', kind: 'youtube', video_id: 'M7lc1UVf-VE'});
+  assert.ok(!JSON.stringify(sent).includes('TRACKING_SENTINEL'));
+  assert.equal(h.embeds.length, 0); // A proposal plays nothing by itself.
+  assert.match(h.get('suggestStatus').textContent, /Host entscheidet/);
+  h.session.receive('stream_suggest_result', {member_id: 'host', target_member_id: 'guest', status: 'declined'});
+  assert.match(h.get('suggestStatus').textContent, /abgelehnt/);
+  h.enter(h.get('loadAndSuggest'), 'https://media.example.test/clip.webm?sig=x'); await settlePlayback();
+  assert.deepEqual(sent.filter(event => event.event === 'stream_suggest').at(-1).payload,
+    {member_id: 'guest', media_key: 'movie|tt1||', url: 'https://media.example.test/clip.webm?sig=x', kind: 'webm'});
+  assert.equal(h.get('localSmartView').hidden, true);
+});
+
+test('shared YouTube follows the party time calmly, ignores film events and late revisions, solo and return work', async () => {
+  const h = await harness({autoHost: true});
+  h.session.room.memberId = 'guest';
+  shareLink(h, sharedYouTube(1));
+  const [first] = h.embeds;
+  assert.equal(first.id, 'M7lc1UVf-VE');
+  assert.equal(h.get('localSmartView').hidden, false); assert.equal(h.get('playerWrap').hidden, true);
+  assert.equal(h.get('localSmartReturn').textContent, 'Allein schauen');
+  assert.equal(h.session.playback, null); // The film's state does not drive the link.
+  h.session.receive('state', linkState(1));
+  first.ready = true; first.ytState = 2; first.time = 0;
+  h.tick();
+  assert.deepEqual(first.calls, [['seek', 5], 'play']);
+  first.ytState = 1;
+  h.tick(); assert.equal(first.calls.length, 2); // In sync: nothing to do.
+  first.time = 0; h.advance(1000);
+  h.tick(); assert.equal(first.calls.length, 2); // Drifted again, but within the cooldown: no seek loop.
+  first.time = 5;
+  h.session.receive('state', {...playback, seq: 50, paused: false}); // Late film state.
+  assert.equal(h.session.playback.media_key, linkKey(1));
+  h.session.receive('stream', {member_id: 'host', stream: hostLink()}); // Film source re-offer.
+  assert.equal(h.desktopHls(), null);
+  // Viewer pauses inside YouTube without guest control: continues alone.
+  first.ytState = 2; h.advance(5000); first.onState(2);
+  assert.equal(h.get('localSmartReturn').textContent, 'Zur Party');
+  assert.deepEqual(h.sent.at(-1), ['behind', undefined, true]);
+  const before = first.calls.length; h.tick(); assert.equal(first.calls.length, before); // Solo: not steered.
+  h.get('localSmartReturn').fire('click');
+  assert.equal(h.get('localSmartReturn').textContent, 'Allein schauen');
+  assert.equal(first.calls.at(-1), 'play'); // Back at the party time.
+  // A new revision replaces the player; events of the old one are ignored.
+  shareLink(h, sharedYouTube(2));
+  const second = h.embeds.at(-1);
+  assert.equal(first.destroyed, true); assert.notEqual(second, first);
+  h.session.receive('state', linkState(1, {seq: 9}));
+  assert.equal(h.session.playback, null);
+  first.onState(2); assert.equal(h.get('localSmartReturn').textContent, 'Allein schauen');
+  // End of the shared video: back to the film's source.
+  shareLink(h, null);
+  assert.equal(second.destroyed, true);
+  assert.equal(h.get('localSmartView').hidden, true); assert.equal(h.get('playerWrap').hidden, false);
+  assert.ok(h.desktopHls()); // The last film offer is applied again.
+});
+
+test('a shared MP4 plays through the HTML5 sync path with its own timeline; the film timeline never moves it', async () => {
+  const h = await harness({autoHost: true});
+  h.session.room.memberId = 'guest';
+  shareLink(h, sharedFile(1));
+  assert.equal(h.player.src, 'https://media.example.test/clip.mp4?sig=FILE_SENTINEL');
+  assert.equal(h.desktopHls(), null); // Never treated as HLS.
+  h.metadata();
+  h.session.receive('state', linkState(1));
+  await settlePlayback();
+  assert.equal(h.sync(), true); assert.equal(h.player.currentTime, 5); assert.equal(h.player.paused, false);
+  h.session.receive('state', {...playback, seq: 99, position_ms: 90000, paused: false});
+  h.tick(); assert.equal(h.player.currentTime, 5); // Film state ignored.
+  assert.ok(!JSON.stringify(h.storageWrites).includes('FILE_SENTINEL'));
+  shareLink(h, null);
+  assert.equal(h.sync(), false); assert.equal(h.player.currentSrc, ''); // Source removed (removeAttribute).
+});
+
+test('a local Smart Video Link is not taken over by a shared video; "Zur Party" switches to it', async () => {
+  const h = await harness({autoHost: true});
+  h.enter(h.get('loadPersonalHls'), 'https://www.youtube.com/watch?v=dQw4w9WgXcQ');
+  const [local] = h.embeds;
+  shareLink(h, sharedYouTube(1));
+  assert.equal(h.embeds.length, 1); assert.equal(local.destroyed, undefined);
+  assert.match(h.get('localPartyNotice').textContent, /gemeinsames Video/);
+  h.get('localSmartReturn').fire('click');
+  assert.equal(local.destroyed, true);
+  assert.equal(h.embeds.at(-1).id, 'M7lc1UVf-VE');
 });

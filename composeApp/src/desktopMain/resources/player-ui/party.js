@@ -678,11 +678,22 @@ const buildPartyHlsSuggestion = party => {
   const from = String(party.hlsSuggestionFrom || "").trim();
   const host = String(party.hlsSuggestionHost || "").trim();
   const title = String(party.streamTitle || "Aktueller Titel");
+  const kind = String(party.hlsSuggestionKind || "hls");
+  const separate = ["youtube", "mp4", "webm"].includes(kind);
+  const kindLabel = kind === "youtube" ? "YouTube" : kind.toUpperCase();
   const card = partyElement("div", "party-section party-card");
-  card.appendChild(partyElement("p", "party-card-title", "Video-Vorschlag"));
-  card.appendChild(partyElement("p", "party-text", `${title} · ${from} · ${host}`));
+  card.appendChild(partyElement("p", "party-card-title", separate ? `${kindLabel}-Vorschlag` : "Video-Vorschlag"));
+  card.appendChild(partyElement("p", "party-text", separate ? `${from} · ${kind === "youtube" ? "youtube.com" : host}` : `${title} · ${from} · ${host}`));
   const actions = partyElement("div", "party-inline-row");
-  const accept = partyCompactButton("Für alle abspielen", "hlsSuggestionAccept", () => showPartyConfirm({
+  const accept = partyCompactButton("Für alle abspielen", "hlsSuggestionAccept", () => showPartyConfirm(separate ? {
+    title: `${kindLabel} für die Party freigeben?`,
+    message: kind === "youtube"
+      ? "Browser-Gäste sehen dieses YouTube-Video gemeinsam im offiziellen YouTube-Player. Du steuerst die Party-Zeit hier im Party-Menü; in NUVIO Desktop selbst wird es nicht abgespielt. Dein Film wird pausiert."
+      : `Das Video von ${host} wird geprüft und für Browser-Gäste freigegeben. Du steuerst die Party-Zeit hier; in NUVIO Desktop selbst wird es nicht abgespielt. Dein Film wird pausiert.`,
+    confirmLabel: kind === "youtube" ? "Freigeben" : "Prüfen und freigeben",
+    danger: false,
+    onConfirm: () => send("partyHlsSuggestionAccept", id),
+  } : {
     title: "Für alle abspielen?",
     message: `Die Quelle von ${host} wird geprüft und als Browser-HLS freigegeben. Enthaltene Tokens sind für Party-Mitglieder sichtbar.`,
     confirmLabel: "Prüfen und freigeben",
@@ -693,6 +704,48 @@ const buildPartyHlsSuggestion = party => {
   actions.appendChild(accept);
   actions.appendChild(partyCompactButton("Ablehnen", "hlsSuggestionReject", () => send("partyHlsSuggestionReject", id)));
   card.appendChild(actions);
+  return card;
+};
+
+// Shared separate video (YouTube/MP4/WebM) for browser members. The host
+// drives its party time here; desktop guests only see a notice, because NUVIO
+// Desktop does not play these sources itself.
+let partyLinkClock = null;
+const formatPartyLinkTime = ms => {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  const h = Math.floor(total / 3600), m = Math.floor((total % 3600) / 60), s = total % 60;
+  return h ? `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}` : `${m}:${String(s).padStart(2, "0")}`;
+};
+const buildPartyLink = party => {
+  const card = partyElement("div", "party-section party-card");
+  const kind = String(party.linkKind || "");
+  const label = String(party.linkLabel || (kind === "youtube" ? "YouTube" : kind.toUpperCase()));
+  card.appendChild(partyElement("p", "party-card-title", `Gemeinsames Video · ${label}`));
+  if (!party.isHost) {
+    card.appendChild(partyElement("p", "party-text", "Der Host zeigt Browser-Gästen gerade ein separates Video. NUVIO Desktop spielt diese Quelle nicht ab; öffne den Browser-Link der Party, um mitzuschauen."));
+    return card;
+  }
+  // Party time of the link, extrapolated locally between state updates.
+  const base = Number(party.linkPositionMs) || 0, paused = party.linkPaused !== false, receivedAt = Date.now();
+  const time = partyElement("p", "party-text", "");
+  const render = () => { time.textContent = `${paused ? "Pausiert" : "Läuft"} · ${formatPartyLinkTime(paused ? base : base + Date.now() - receivedAt)}`; };
+  render();
+  clearInterval(partyLinkClock);
+  partyLinkClock = paused ? null : setInterval(() => { if (time.isConnected) render(); else { clearInterval(partyLinkClock); partyLinkClock = null; } }, 1000);
+  card.appendChild(time);
+  const actions = partyElement("div", "party-inline-row");
+  actions.appendChild(partyCompactButton(paused ? "Abspielen" : "Pause", "linkToggle", () => send(paused ? "partyLinkPlay" : "partyLinkPause", 0), "primary"));
+  actions.appendChild(partyCompactButton("−10 s", "linkBack", () => send("partyLinkSeekBy", -10)));
+  actions.appendChild(partyCompactButton("+10 s", "linkForward", () => send("partyLinkSeekBy", 10)));
+  card.appendChild(actions);
+  const more = partyElement("div", "party-inline-row");
+  if (paused) more.appendChild(partyCompactButton("Mit Countdown starten", "linkCountdown", () => send("partyLinkCountdown", 0)));
+  more.appendChild(partyCompactButton("Von vorn", "linkRestart", () => send("partyLinkRestart", 0)));
+  more.appendChild(partyCompactButton("Beenden", "linkStop", () => send("partyLinkStop", 0), "danger"));
+  card.appendChild(more);
+  card.appendChild(partyElement("p", "party-detail", "Nur Browser-Gäste sehen dieses Video. Du kannst über den Browser-Link der Party selbst mitschauen."));
+  const status = String(party.hostHlsStatus || "").trim();
+  if (status && status.startsWith("Nicht geteilt")) card.appendChild(partyElement("p", "party-detail", status));
   return card;
 };
 
@@ -797,6 +850,7 @@ const buildPartyContent = party => {
   if (partyView === "smart") return buildPartySmart(party);
   const content = partyElement("div", "party-content");
   if (party.isHost && Number.isInteger(party.hlsSuggestionId)) content.appendChild(buildPartyHlsSuggestion(party));
+  if (party.linkActive) content.appendChild(buildPartyLink(party));
   const behind = String(party.behindTitle || "").trim();
   if (behind) {
     const section = partyElement("div", "party-section party-card");

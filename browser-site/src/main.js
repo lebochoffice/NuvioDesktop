@@ -6,6 +6,9 @@ import {PartySession, callRpc} from './session.js';
 import {PersonalHlsSource} from './personal-hls.js';
 import {classifyVideoLink} from './smart-video-link.js';
 import {YouTubePlayerAdapter} from './youtube-player.js';
+import {VideoElementAdapter} from './player-adapters.js';
+import {suggestionFields, sharedFileStream} from './shared-source.js';
+import {LinkSeekGuard, youTubeAction, viewerToggle} from './link-sync.js';
 import {SYNC, HLS_TUNING, bufferedRanges, bufferAhead, correctionFor, seekTarget, SeekLead, StallTracker, qualityOptions} from './sync-policy.js';
 
 const $ = id => document.getElementById(id);
@@ -46,6 +49,10 @@ const forgetJoinedParty = () => { try { sessionStorage.removeItem?.(JOINED_PARTY
 const joinedPartyCode = () => { try { return sessionStorage.getItem(JOINED_PARTY_KEY) || ''; } catch { return ''; } };
 let hls = null, selectedStream = null, loadedStream = null, syncEnabled = false;
 let localSmartSource = null;
+// Separate video shared by the Desktop host (YouTube/MP4/WebM): {source, room,
+// youtube?, solo, own, guard}. Its party time is session.playback (own key).
+let sharedLink = null;
+const videoAdapter = new VideoElementAdapter(player);
 const smartLinkLabels = {youtube: 'YouTube', hls: 'HLS', mp4: 'MP4', webm: 'WebM', unsupported: 'Nicht unterstützt'};
 let suppressUntil = 0, loading = false, buffering = false;
 let pendingChat = null;
@@ -82,6 +89,7 @@ const session = client ? new PartySession(client, deviceId, {
     $('movieTitle').textContent = playerTitle(room.info.media);
     renderMembers(room);
     renderControlInfo();
+    renderSmartLink(); // The host's link capability may have changed.
     showPanel('watch');
   },
   connection: state => {
@@ -109,7 +117,12 @@ const session = client ? new PartySession(client, deviceId, {
   playback: () => {
     updatePersonalHlsReadiness();
     if (awaitingPartyState && loadedStream && !soloMode && session.playback) { awaitingPartyState = false; resyncNow(); }
-    applySync(); renderSyncDebug();
+    applySync(); applyYouTubeSync(); renderSyncDebug();
+  },
+  sharedSource: source => applySharedLink(source),
+  suggestResult: result => {
+    $('suggestStatus').textContent = result === 'accepted' ? 'Der Host hat deinen Vorschlag angenommen.' : 'Der Host hat deinen Vorschlag abgelehnt.';
+    status($('suggestStatus').textContent, result !== 'accepted');
   },
   command: entry => commandSettled(entry),
   members: () => { if (session?.room) renderMembers(session.room); },
@@ -128,6 +141,7 @@ const session = client ? new PartySession(client, deviceId, {
     const previousOffer = lastHostStreamEvent;
     lastHostStreamEvent = stream; // Memory only, for enabling auto mode later.
     if (localSmartSource) return; // Only an explicit return resumes the party source.
+    if (session.sharedSource) return; // The film's source waits until the shared video ends.
     const browserPending = !!stream && Object.hasOwn(stream, 'browser_hls');
     // Optional desktop hint while browser_hls has no URL yet (older hosts send none).
     const browserState = browserPending ? String(stream.browser_hls?.state || 'preparing') : null;
@@ -193,7 +207,8 @@ const session = client ? new PartySession(client, deviceId, {
     const run = ++countdownRun;
     if (payload?.cancel === true) { status('Gemeinsamer Start abgebrochen.'); return; }
     const startAt = Number(payload?.start_at), seconds = Number(payload?.seconds);
-    if (!Number.isFinite(startAt) || !(seconds >= 1 && seconds <= 10) || payload?.media_key !== mediaKey(session.room?.info.media)) return;
+    // Film or shared video: the countdown belongs to whatever plays together now.
+    if (!Number.isFinite(startAt) || !(seconds >= 1 && seconds <= 10) || payload?.media_key !== session.activeMediaKey()) return;
     const tick = () => {
       if (run !== countdownRun || !session?.room) return;
       const left = startAt - session.now();
@@ -246,7 +261,7 @@ let autoStarting = false, autoStartPhase = null, awaitingPartyState = false;
 let soloMode = false, soloResume = null;
 try { autoHostStream = globalThis.localStorage?.getItem(AUTO_HOST_STREAM_KEY) !== '0'; } catch { /* Preference unavailable: default. */ }
 function status(message, error = false) {
-  const notice = localSmartSource ? $('localPartyNotice') : $('message');
+  const notice = localSmartSource || sharedLink?.youtube ? $('localPartyNotice') : $('message');
   notice.textContent = message;
   notice.style.borderColor = error ? '#ff6969' : '';
   notice.hidden = !message;
@@ -327,9 +342,17 @@ function renderMembers(room) {
 }
 // Own row from the live player; others from their last status report.
 function memberSyncFor(room, member) {
-  const now = session?.now?.() ?? Date.now(), current = mediaKey(room.info.media);
+  const now = session?.now?.() ?? Date.now(), current = session?.activeMediaKey?.() || mediaKey(room.info.media);
   if (member.id === room.memberId) {
     if (localSmartSource) return {state: 'solo'};
+    const yt = sharedLink?.youtube;
+    if (yt) {
+      if (sharedLink.solo) return {state: 'solo'};
+      const position = yt.currentPosition;
+      if (!yt.ready || position == null) return {state: yt.failed ? 'unknown' : 'buffering'};
+      return memberSync({status: yt.bufferingState ? 'buffering' : 'ready', media_key: current, position_ms: position * 1000,
+        position_at: now, playing: yt.playbackState === 'playing'}, session.playback, current, now);
+    }
     if (!loadedStream) return {state: 'unknown'};
     const status = soloMode || !syncEnabled ? 'behind' : buffering || waitingForTarget || loading ? 'buffering' : 'ready';
     return memberSync({status, solo: soloMode, media_key: current, position_ms: player.currentTime * 1000, position_at: now, playing: !player.paused}, session.playback, current, now);
@@ -369,6 +392,7 @@ function pauseLocally() {
 }
 function resetVideo(reason = 'Persönliche Quelle entfernt. Für diesen Film kann eine neue eigene Quelle geladen werden.') {
   clearLocalSmartSource();
+  clearSharedLink();
   cancelPersonalAutoSync();
   pendingSeek = internalHlsSeek = pendingPlay = ownSeek = null;
   waitingForTarget = false;
@@ -440,6 +464,7 @@ function cancelPersonalAutoSync() {
 }
 function presence() {
   if (!session?.room) return;
+  if (sharedLink?.youtube) { linkPresence(); return; }
   let state = 'browsing';
   // Only sustained starvation pauses the party (Desktop coordinator waits on
   // "buffering"). Short mobile stalls stay local; hysteresis avoids flapping,
@@ -925,7 +950,11 @@ $('ctlSolo').addEventListener('click', toggleSolo);
 $('ctlBack').addEventListener('click', backToInvite);
 $('ctlSettings').addEventListener('click', () => openDrawer('settings', $('ctlSettings')));
 $('localSmartSettings').addEventListener('click', () => openDrawer('settings', $('localSmartSettings')));
-$('localSmartReturn').addEventListener('click', returnToHostSource);
+$('localSmartReturn').addEventListener('click', () => {
+  // Shared YouTube: the same button toggles "Allein schauen" / "Zur Party".
+  if (sharedLink?.youtube) { if (sharedLink.solo) leaveLinkSolo(); else enterLinkSolo('Du schaust allein weiter. „Zur Party“ übernimmt wieder die Party-Zeit.'); return; }
+  returnToHostSource();
+});
 $('membersButton').addEventListener('click', () => openDrawer('participants', $('membersButton')));
 $('participantSettings').addEventListener('click', () => openDrawer('settings'));
 for (const [index, name] of drawerTabs.entries()) {
@@ -1183,11 +1212,19 @@ function renderSmartLink() {
   const type = $('smartLinkType');
   type.textContent = value ? smartLinkLabels[source.kind] : '';
   type.hidden = !value;
-  $('loadAndSuggest').hidden = source.kind !== 'hls' || !canSuggestHls(session?.room);
+  // Separate videos can be proposed only to a host that shares them (links protocol).
+  const separate = ['youtube', 'mp4', 'webm'].includes(source.kind);
+  const hostLinks = session?.hostLinks === true;
+  $('loadAndSuggest').hidden = !canSuggestHls(session?.room) || (separate ? !hostLinks : source.kind !== 'hls');
+  $('loadAndSuggest').textContent = separate ? 'Für Party vorschlagen' : 'Video laden & vorschlagen';
   $('suggestNotice').hidden = $('loadAndSuggest').hidden;
+  $('suggestNotice').textContent = source.kind === 'youtube' ? 'Der Host erhält nur die YouTube-Video-ID und entscheidet über die Freigabe.'
+    : 'Beim Vorschlagen können Party-Mitglieder den Link samt Tokens sehen.';
   $('tryOpaqueHls').hidden = !source.hlsCandidate;
-  $('smartLinkHint').textContent = source.kind === 'youtube' ? 'Nur lokal. Beim Laden wird eine Verbindung zu YouTube aufgebaut.'
-    : source.kind === 'mp4' || source.kind === 'webm' ? 'Nur lokale Wiedergabe ohne Party-Sync.'
+  $('smartLinkHint').textContent = source.kind === 'youtube' ? (hostLinks ? 'Lokal ansehen oder für die Party vorschlagen. Beim Laden wird eine Verbindung zu YouTube aufgebaut.'
+      : 'Nur lokal: Der Host unterstützt keine gemeinsamen Videos. Beim Laden wird eine Verbindung zu YouTube aufgebaut.')
+    : source.kind === 'mp4' || source.kind === 'webm' ? (hostLinks ? 'Lokal ansehen oder für die Party vorschlagen. Der Host prüft das Video vor der Freigabe.'
+      : 'Nur lokale Wiedergabe: Der Host unterstützt keine gemeinsamen Videos.')
     : source.kind === 'hls' ? 'HLS-VOD derselben Filmfassung wie die Party.'
     : source.reason === 'youtube_live' ? 'YouTube-Live-Links werden nicht unterstützt.'
     : source.hlsCandidate ? 'Falls dies eine HLS-Playlist ohne Dateiendung ist, kannst du sie lokal prüfen.'
@@ -1247,8 +1284,150 @@ function loadLocalSmartSource(source, room, key) {
   presence();
 }
 
+// --- Shared separate video (links protocol 1) --------------------------------
+// The Desktop host shares a YouTube video or an MP4/WebM file for the party.
+// Files play in the HTML5 <video> through the proven applySync path (same
+// drift correction, solo mode, guest commands); YouTube plays in the official
+// IFrame player with the calmer policy of link-sync.js. Either way the party
+// time is session.playback for the link's own key; film states are ignored.
+const sharedLabel = source => source.label || (source.kind === 'youtube' ? 'YouTube' : source.kind.toUpperCase());
+function clearSharedLink() {
+  const link = sharedLink;
+  if (!link) return;
+  sharedLink = null;
+  if (link.youtube) {
+    link.youtube.dispose();
+    $('localSmartView').hidden = true;
+    $('playerWrap').hidden = false;
+    $('localPartyNotice').hidden = true;
+    $('localSmartStatus').textContent = '';
+    $('localSmartReturn').textContent = 'Zur Party';
+    $('localSmartReturn').removeAttribute?.('aria-pressed');
+  }
+}
+function applySharedLink(source) {
+  const room = session?.room;
+  if (!source) {
+    if (!sharedLink) return;
+    resetVideo('Der Host hat das gemeinsame Video beendet.');
+    status('Der Host hat das gemeinsame Video beendet. Die Film-Quelle des Hosts wird wieder verwendet.');
+    if (lastHostStreamEvent && room) session.handlers.stream(lastHostStreamEvent, 'apply_current');
+    return;
+  }
+  // Watching a local link on purpose: never taken over, only announced.
+  if (localSmartSource) {
+    $('localPartyNotice').textContent = `Der Host hat ein gemeinsames Video (${sharedLabel(source)}) gestartet. „Zur Party“ wechselt dorthin.`;
+    $('localPartyNotice').hidden = false;
+    return;
+  }
+  resetVideo('Der Host hat ein gemeinsames Video gestartet. Eigene Quellen für den Film sind bis zu seinem Ende pausiert.');
+  soloMode = false; soloResume = null;
+  const link = sharedLink = {source, room, solo: false, own: -Infinity, guard: new LinkSeekGuard(), signature: null, youtube: null};
+  if (source.kind === 'youtube') { openSharedYouTube(link); return; }
+  selectedStream = sharedFileStream(source);
+  $('streamInfo').textContent = `Gemeinsames Video vom Host: ${sharedLabel(source)}`;
+  $('loadStream').hidden = false;
+  if (autoHostStream) {
+    startStream();
+    status(`Gemeinsames Video (${sharedLabel(source)}) wird geladen. Der Anbieter des Videos erhält dabei deine IP-Adresse.`);
+  } else {
+    $('noStream').textContent = 'Gemeinsames Video bereit. Tippe auf ▶, um mitzuschauen.';
+    status('Der Host hat ein gemeinsames Video freigegeben. Tippe auf ▶ zum Abspielen.');
+  }
+}
+function openSharedYouTube(link) {
+  const {source, room} = link;
+  closeDrawer();
+  $('playerWrap').hidden = true;
+  $('message').hidden = true;
+  $('localSmartView').hidden = false;
+  $('localSmartTitle').textContent = 'YouTube · Gemeinsam mit der Party';
+  $('streamInfo').textContent = 'Gemeinsames YouTube-Video vom Host.';
+  renderLinkSoloUi();
+  const live = () => sharedLink === link && session?.room === room && session.sharedSource?.key === source.key;
+  link.youtube = new YouTubePlayerAdapter($('localSmartPlayer'), {
+    origin: location.origin,
+    onStatus: message => { if (live()) $('localSmartStatus').textContent = message; },
+    onState: state => { if (live()) sharedYouTubeState(link, state); },
+    onFailure: () => { if (live()) linkPresence(); },
+  });
+  void link.youtube.load(source);
+  linkPresence();
+}
+// The viewer pressed play/pause inside the YouTube player. With guest control
+// it becomes a party command; otherwise the viewer continues alone.
+function sharedYouTubeState(link, state) {
+  linkPresence();
+  if (link.solo) return;
+  const p = effectivePlayback();
+  const toggle = viewerToggle({state, partyPaused: p ? p.paused : null, sinceOwnActionMs: performance.now() - link.own});
+  if (toggle) {
+    const position = link.youtube.currentPosition ?? 0;
+    if (guestControl() && session.canSequence()) {
+      try { session.issueCommand({paused: toggle === 'pause', positionMs: position * 1000, kind: 'toggle'}); link.own = performance.now(); return; }
+      catch { /* Falls through to watching alone. */ }
+    }
+    enterLinkSolo(toggle === 'pause' ? 'Du hast im YouTube-Player pausiert und schaust jetzt allein. „Zur Party“ übernimmt wieder die Party-Zeit.'
+      : 'Die Party ist pausiert – du schaust allein weiter. „Zur Party“ übernimmt wieder die Party-Zeit.');
+    return;
+  }
+  applyYouTubeSync();
+}
+function applyYouTubeSync() {
+  const link = sharedLink, yt = link?.youtube;
+  if (!yt?.ready || link.solo || connectionLost) return;
+  const p = effectivePlayback();
+  if (!p || p.media_key !== link.source.key) return;
+  const now = performance.now();
+  const action = youTubeAction({desiredS: expectedPositionMs(p, session.now()) / 1000, positionS: yt.currentPosition,
+    partyPaused: p.paused, state: yt.state, durationS: yt.duration});
+  if (action.kind === 'seek') {
+    if (!link.guard.allow(now)) {
+      if (link.guard.exhausted(now) && !link.behind) { link.behind = true; linkPresence(); status('YouTube holt die Party-Zeit gerade nicht ein (z. B. Werbung oder langsames Laden). Es wird gleich erneut versucht.'); }
+      return;
+    }
+    link.behind = false;
+    link.guard.note(now); link.own = now;
+    yt.seek(action.seconds);
+    if (!p.paused) yt.play();
+  } else if (action.kind === 'play') {
+    if (yt.autoplayBlocked) return; // Only the viewer's tap on Play can start it now.
+    link.own = now; yt.play();
+  } else if (action.kind === 'pause') { link.own = now; yt.pause(); }
+  else if (action.kind === 'in_sync' && link.behind) { link.behind = false; linkPresence(); }
+}
+function linkPresence() {
+  const link = sharedLink, yt = link?.youtube;
+  if (!session?.room || !yt) return;
+  const state = link.solo || link.behind ? 'behind' : !yt.ready ? (yt.failed ? 'browsing' : 'loading') : yt.bufferingState ? 'buffering' : 'ready';
+  const signature = `${link.source.key}:${state}:${link.solo}`;
+  if (link.signature === signature) return;
+  link.signature = signature;
+  session.sendPresence(state, undefined, link.solo).catch(() => { if (link.signature === signature) link.signature = null; });
+}
+function renderLinkSoloUi() {
+  $('localSmartReturn').textContent = sharedLink?.solo ? 'Zur Party' : 'Allein schauen';
+  $('localSmartReturn').setAttribute?.('aria-pressed', String(!!sharedLink?.solo));
+}
+function enterLinkSolo(message) {
+  if (!sharedLink?.youtube) return;
+  sharedLink.solo = true;
+  status(message); renderLinkSoloUi(); linkPresence(); renderPlayerUi();
+}
+function leaveLinkSolo() {
+  const link = sharedLink;
+  if (!link?.youtube) return;
+  link.solo = false; link.behind = false; link.guard.reset(); link.own = -Infinity;
+  renderLinkSoloUi(); linkPresence();
+  session?.requestState().catch(() => {});
+  applyYouTubeSync();
+  status('Zurück bei der Party-Zeit.');
+}
+
 function returnToHostSource() {
   const wasLocal = !!localSmartSource;
+  // A separate video the host shares has priority over the film's source.
+  if (session?.sharedSource && session.room) { resetVideo(); applySharedLink(session.sharedSource); return; }
   resetVideo(); presence();
   $('streamInfo').textContent = 'Warte auf die aktuelle Desktop-Freigabe.';
   if (wasLocal && $('infoDrawer').hidden) $('playerWrap').focus?.();
@@ -1278,9 +1457,24 @@ $('personalHlsForm').addEventListener('submit', e => {
   if (problem) { $('personalHlsStatus').textContent = problem; status(problem, true); return; }
   const room = session.room;
   if (source.kind === 'youtube' || source.kind === 'mp4' || source.kind === 'webm') {
-    if (e.submitter === $('loadAndSuggest')) { status('Diese Quelle kann derzeit nur lokal angesehen werden.', true); return; }
+    if (e.submitter === $('loadAndSuggest')) {
+      // Proposal only: nothing plays before the host shares it for everyone.
+      const fields = suggestionFields(source);
+      if (!session.hostLinks || !canSuggestHls(room) || !fields) { status('Der Host unterstützt keine gemeinsamen Videos. Du kannst es lokal ansehen.', true); return; }
+      if (fields.url.length > 4096) { $('suggestStatus').textContent = 'Link zu lang zum Vorschlagen.'; return; }
+      $('suggestStatus').textContent = 'Vorschlag wird gesendet …';
+      session.suggestStream(fields.url, currentMediaKey, fields).then(() => {
+        if (session.room === room) { $('suggestStatus').textContent = 'Vorschlag gesendet. Der Host entscheidet über die Freigabe.'; status($('suggestStatus').textContent); }
+      }, () => { if (session.room === room) $('suggestStatus').textContent = 'Vorschlag nicht gesendet. Verbindung prüfen.'; });
+      return;
+    }
     loadLocalSmartSource(source, room, currentMediaKey);
     return;
+  }
+  // A personal source belongs to the film; a shared video has its own timeline.
+  if (session.sharedSource) {
+    const message = 'Während der Host ein gemeinsames Video zeigt, sind eigene HLS-Quellen für den Film nicht möglich.';
+    $('personalHlsStatus').textContent = message; status(message, true); return;
   }
   const suggest = source.kind === 'hls' && e.submitter === $('loadAndSuggest') && canSuggestHls(room);
   const hlsUrl = source.url || opaqueHls;
@@ -1645,6 +1839,9 @@ function renderSyncDebug() {
     // Host-sequenced commands: fixed labels only, never IDs.
     hostSequencer: session?.hostCommands === true,
     autoStart: choice(autoStartPhase, ['loaded', 'synced', 'playing', 'blocked', 'muted']), awaitingPartyState, soloMode,
+    // Shared separate video: kind and revision only, never the address or ID.
+    sharedSourceKind: choice(session?.sharedSource?.kind, ['youtube', 'mp4', 'webm']), sharedSourceRev: number(session?.sharedSource?.rev),
+    sharedYouTubeSolo: sharedLink?.youtube ? sharedLink.solo === true : null,
     latestCommandStatus: choice(session?.latestCommand?.status, ['pending', 'accepted', 'applied', 'rejected', 'unknown']),
     latestCommandReason: choice(session?.latestCommand?.reason, ['host_only', 'superseded', 'stale_epoch', 'not_member', 'invalid', 'rejected']),
   }, null, 2);
@@ -1652,11 +1849,15 @@ function renderSyncDebug() {
 // Sparse position report (about every 10 s) for the members' sync display.
 const POSITION_REPORT_MS = 10000;
 let lastPositionReportAt = -Infinity;
-if (session) session.positionProvider = () => loadedStream && Number.isFinite(player.currentTime)
-  ? {position_ms: player.currentTime * 1000, playing: !player.paused} : null;
+// Common player view: the shared YouTube player or the page's <video>.
+const activePlayerAdapter = () => sharedLink?.youtube || (loadedStream ? videoAdapter : null);
+if (session) session.positionProvider = () => {
+  const adapter = activePlayerAdapter(), position = adapter?.currentPosition;
+  return position == null ? null : {position_ms: position * 1000, playing: adapter.playbackState === 'playing'};
+};
 setInterval(() => {
-  applySync(); presence(); renderControlInfo(); renderSyncDebug();
-  if (session?.room && loadedStream && performance.now() - lastPositionReportAt >= POSITION_REPORT_MS) {
+  applySync(); applyYouTubeSync(); presence(); renderControlInfo(); renderSyncDebug();
+  if (session?.room && activePlayerAdapter() && performance.now() - lastPositionReportAt >= POSITION_REPORT_MS) {
     lastPositionReportAt = performance.now();
     session.reportPosition?.().catch?.(() => {});
   }

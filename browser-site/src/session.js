@@ -1,4 +1,5 @@
 import {mediaKey, validPlayback, isNewerPlayback} from './protocol.js';
+import {LINK_PROTOCOL, parseSharedSource} from './shared-source.js';
 
 export async function callRpc(client, name, args = {}) {
   const {data, error} = await client.rpc(name, args);
@@ -52,6 +53,9 @@ export class PartySession {
     this.presence = {status: 'browsing'};
     this.closing = null;
     this.hostCommands = false; this.commands = new Map(); this.latestCommand = null;
+    // Separate video shared by the host (links protocol 1). While it is set,
+    // this.playback is the link's own timeline, never the film's.
+    this.sharedSource = null; this.hostLinks = false;
     this.commandTimers = new Set(); this.ackTimeoutMs = ACK_TIMEOUT_MS;
     // Latest informational status/position report per member (display only).
     this.memberStatus = new Map(); this.positionProvider = null;
@@ -62,6 +66,25 @@ export class PartySession {
       lastSource: null, lastDecision: null, candidateSeq: null, realtimeLatencyMs: null,
       commands: 0, lastCommandResult: null, reconnects: 0, connectionLog: []};
   }
+  // Identity of everything that is currently played together: the shared
+  // link's key while one is active, otherwise the film's media_key.
+  activeMediaKey() { return this.sharedSource?.key || (this.room ? mediaKey(this.room.info.media) : ''); }
+  // A new host source (or its end) starts a new epoch: the previous timeline,
+  // its commands and status reports never apply to the next player.
+  applySharedSource(raw) {
+    const room = this.room;
+    if (!room) return;
+    const next = raw == null ? null : parseSharedSource(raw, mediaKey(room.info.media));
+    if (raw != null && !next) return; // Malformed or for another film: ignored.
+    if ((next?.key ?? null) === (this.sharedSource?.key ?? null)) return; // Re-sent unchanged.
+    this.sharedSource = next;
+    this.playback = null;
+    this.dropCommands('stale_epoch');
+    this.memberStatus.clear(); this.emit('members', this.memberStatus);
+    this.presence = {status: 'browsing'};
+    this.emit('sharedSource', next);
+    this.requestState().catch(() => {});
+  }
   // Authoritative DB snapshot only (join/heartbeat); never a broadcast claim.
   canControl() {
     const room = this.room;
@@ -70,6 +93,8 @@ export class PartySession {
   prepareControl({paused, positionMs}) {
     const room = this.room;
     if (!this.canControl()) throw Object.assign(new Error('host_only'), {code: 'host_only'});
+    // A shared link is steered only through the host's sequencer, never persisted.
+    if (this.sharedSource) throw Object.assign(new Error('no_sequencer'), {code: 'no_sequencer'});
     const base = this.playback;
     const next = {seq: (base?.seq ?? 0) + 1, member_id: room.memberId, paused: paused === true,
       position_ms: Math.max(0, Math.round(Number(positionMs) || 0)), rate: base?.rate ?? 1,
@@ -146,7 +171,7 @@ export class PartySession {
     const base = this.playback, id = newCommandId();
     const command = {command_id: id, member_id: room.memberId, paused: paused === true,
       position_ms: Math.max(0, Math.round(Number(positionMs) || 0)), base_seq: base?.seq ?? null,
-      media_key: mediaKey(room.info.media), host_member_id: room.info.host_member_id};
+      media_key: this.activeMediaKey(), host_member_id: room.info.host_member_id};
     if (!command.media_key || !Number.isSafeInteger(command.position_ms)) throw Object.assign(new Error('invalid_command'), {code: 'invalid_command'});
     // Local preview while the host has not answered; never broadcast.
     const optimistic = {seq: base?.seq ?? 0, member_id: room.memberId, paused: command.paused, position_ms: command.position_ms,
@@ -279,7 +304,7 @@ export class PartySession {
     this.channel = ch;
     this.noteConnection('CONNECTING');
     this.emit('connection', 'CONNECTING');
-    for (const event of ['state', 'stream', 'media', 'control', 'chat', 'ended', 'member_left', 'member_joined', 'state_request', 'status', 'ack', 'countdown']) {
+    for (const event of ['state', 'stream', 'media', 'control', 'chat', 'ended', 'member_left', 'member_joined', 'state_request', 'status', 'ack', 'countdown', 'shared_source', 'stream_suggest_result']) {
       ch.on('broadcast', {event}, ({payload}) => {
         if (gen === this.generation && this.room === room && this.channel === ch) this.receive(event, payload);
       });
@@ -354,11 +379,21 @@ export class PartySession {
     if (event === 'ack') { this.receiveAck(payload); return; }
     // Only the current host's status announces the sequencer capability.
     if (event === 'status') {
-      if (payload.member_id === this.room.info.host_member_id) this.hostCommands = payload.commands === COMMAND_PROTOCOL;
+      if (payload.member_id === this.room.info.host_member_id) {
+        this.hostCommands = payload.commands === COMMAND_PROTOCOL;
+        const links = payload.links === LINK_PROTOCOL;
+        if (links !== this.hostLinks) { this.hostLinks = links; this.emit('room', this.room); }
+      }
       this.noteMemberStatus(payload);
       return;
     }
     if (event === 'stream' && payload.member_id === this.room.info.host_member_id) this.emit('stream', payload.stream ?? null);
+    // Only the current host shares or ends a separate video, and only for this film.
+    if (event === 'shared_source' && payload.member_id === this.room.info.host_member_id &&
+        payload.media_key === mediaKey(this.room.info.media)) this.applySharedSource(payload.source ?? null);
+    // Host decision about this member's own proposal (display only).
+    if (event === 'stream_suggest_result' && payload.member_id === this.room.info.host_member_id &&
+        payload.target_member_id === this.room.memberId && ['accepted', 'declined'].includes(payload.status)) this.emit('suggestResult', payload.status);
     // Shared start announced by the host (server time); display only.
     if (event === 'countdown' && payload.member_id === this.room.info.host_member_id) this.emit('countdown', payload);
     // Database snapshots are authoritative for media, membership and host-only changes.
@@ -381,10 +416,14 @@ export class PartySession {
     d.lastSource = source;
     d.candidateSeq = Number.isSafeInteger(next?.seq) ? next.seq : null;
     const info = this.room?.info;
+    const link = this.sharedSource;
     d.lastDecision = !info ? 'no_room' : !validPlayback(next) ? 'invalid_playback'
-      : next.media_key && next.media_key !== mediaKey(info.media) ? 'wrong_media'
-      : info.host_only && next.member_id !== info.host_member_id ? 'not_host'
-      : !isNewerPlayback(next, this.playback) ? 'not_newer' : 'accepted';
+      // A shared link only follows its own key; the film's states (and states
+      // without a key) wait until the host ends the link.
+      : link ? (next.media_key !== link.key ? 'wrong_media' : next.member_id !== info.host_member_id ? 'not_host' : null)
+      : next.media_key && next.media_key !== mediaKey(info.media) ? 'wrong_media' : null;
+    d.lastDecision = d.lastDecision ?? (info.host_only && next.member_id !== info.host_member_id ? 'not_host'
+      : !isNewerPlayback(next, this.playback) ? 'not_newer' : 'accepted');
     if (d.lastDecision !== 'accepted') return;
     d.lastAcceptedAt = receivedAt; d.acceptedSource = source;
     this.playback = next;
@@ -416,6 +455,9 @@ export class PartySession {
       if (changed || hostChanged) this.dropCommands('stale_epoch');
       if (changed) { this.memberStatus.clear(); this.emit('members', this.memberStatus); }
       if (changed) { this.presence = {status: 'browsing'}; this.emit('media', room.info.media); }
+      // A shared link belongs to its film and its host; a new host announces its own.
+      if ((changed || hostChanged) && this.sharedSource) { this.sharedSource = null; this.emit('sharedSource', null); }
+      if (hostChanged) this.hostLinks = false;
       // A host change is not a revocation by the sharing host; main decides
       // whether an already loaded source may continue locally.
       if (changed || hostChanged) this.emit('stream', null, changed ? 'media_changed' : 'host_changed');
@@ -443,7 +485,7 @@ export class PartySession {
   noteMemberStatus(payload) {
     const room = this.room, id = String(payload?.member_id ?? '');
     if (!room || !id || id === room.memberId || !room.members.some(m => m.id === id)) return;
-    if (payload.media_key && payload.media_key !== mediaKey(room.info.media)) { this.memberStatus.delete(id); return; }
+    if (payload.media_key && payload.media_key !== this.activeMediaKey()) { this.memberStatus.delete(id); return; }
     const number = v => Number.isFinite(v) ? v : undefined;
     this.memberStatus.set(id, {status: ['browsing', 'loading', 'buffering', 'ready', 'behind'].includes(payload.status) ? payload.status : 'browsing',
       media_key: payload.media_key, position_ms: number(payload.position_ms), position_at: number(payload.position_at), playing: payload.playing === true});
@@ -459,14 +501,16 @@ export class PartySession {
     if (!this.room || !this.channel) return;
     const fields = this.positionFields();
     if (!('position_ms' in fields)) return;
-    const payload = {...this.presence, member_id: this.room.memberId, media_key: mediaKey(this.room.info.media), ...fields};
+    const payload = {...this.presence, member_id: this.room.memberId, media_key: this.activeMediaKey(), ...fields};
     await this.channel.send({type: 'broadcast', event: 'status', payload}).catch(() => {});
   }
   async sendPresence(status, behindMs, solo = false) {
     if (!this.room || !this.channel) return;
     // solo: watching alone on purpose (shown as "Allein"); optional field.
     if (status) this.presence = {status, ...(behindMs != null ? {behind_ms: behindMs} : {}), ...(solo ? {solo: true} : {})};
-    const payload = {...this.presence, member_id: this.room.memberId, media_key: mediaKey(this.room.info.media), ...this.positionFields()};
+    // While a shared link plays, reports carry its key: the Desktop host never
+    // pauses the film for a member who is buffering the link.
+    const payload = {...this.presence, member_id: this.room.memberId, media_key: this.activeMediaKey(), ...this.positionFields()};
     const tracked = await this.channel.track(payload);
     if (tracked && tracked !== 'ok') throw new Error('Online-Status nicht bestätigt (' + tracked + '). RPC-Beitritt allein stellt keine Realtime-Verbindung her.');
     const sent = await this.channel.send({type: 'broadcast', event: 'status', payload});
@@ -475,9 +519,14 @@ export class PartySession {
   // Proposal of a video link to the Desktop host (explicit opt-in per link).
   // Never applied by the sender: the host must confirm, and the host's checked
   // stream event is what guests then play.
-  async suggestStream(url, key) {
+  // fields: optional {kind, video_id} (shared-source.js suggestionFields) for a
+  // separate YouTube/MP4/WebM video; older hosts only know HLS proposals.
+  async suggestStream(url, key, fields = {}) {
     if (!this.room || !this.channel) throw new Error('Keine Party-Verbindung.');
-    const result = await this.channel.send({type: 'broadcast', event: 'stream_suggest', payload: {member_id: this.room.memberId, media_key: key, url}});
+    const extra = {};
+    if (typeof fields.kind === 'string') extra.kind = fields.kind;
+    if (typeof fields.video_id === 'string') extra.video_id = fields.video_id;
+    const result = await this.channel.send({type: 'broadcast', event: 'stream_suggest', payload: {member_id: this.room.memberId, media_key: key, url, ...extra}});
     if (result && result !== 'ok') throw new Error('Vorschlag nicht gesendet (' + result + ').');
   }
   async requestState() {
@@ -531,6 +580,7 @@ export class PartySession {
     const old = this.room, ch = this.channel;
     this.room = null; this.channel = null; this.playback = null;
     this.hostCommands = false; this.commands.clear(); this.latestCommand = null; this.memberStatus.clear();
+    this.sharedSource = null; this.hostLinks = false;
     this.commandTimers.forEach(clearTimeout); this.commandTimers.clear();
     if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
     this.reconnectAttempts = 0;

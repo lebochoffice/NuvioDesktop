@@ -65,6 +65,14 @@ data class PlayerControlPartyState(
     val hlsSuggestionFrom: String = "",
     val hlsSuggestionHost: String = "",
     val hlsSuggestionId: Int? = null,
+    // "hls" (same film for browsers) or "youtube"/"mp4"/"webm" (separate video).
+    val hlsSuggestionKind: String = "",
+    // Shared separate video (links protocol 1): host controls, guests a notice.
+    val linkActive: Boolean = false,
+    val linkKind: String = "",
+    val linkLabel: String = "",
+    val linkPaused: Boolean = true,
+    val linkPositionMs: Long = 0L,
     // "Mit TorBox-Datei verknüpfen" for addon streams without TorBox identity.
     val torboxLinkAvailable: Boolean = false,
     val torboxLinkedName: String = "",

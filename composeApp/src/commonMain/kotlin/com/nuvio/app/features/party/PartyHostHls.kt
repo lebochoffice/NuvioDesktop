@@ -33,9 +33,21 @@ internal fun partyEmailName(email: String?): String? =
         ?.filter { it.isLetterOrDigit() || it in "._- " }?.trim('.', '_', '-', ' ')?.take(36)
         ?.takeIf { it.length >= 2 }
 
-/** A guest's proposal; it never replaces the host source without the host's confirmation. */
+/**
+ * A guest's proposal; it never replaces the host source without the host's confirmation.
+ * kind "hls": an alternative browser source of the same film. "youtube"/"mp4"/"webm":
+ * a separate video shared as [PartySharedSource] (videoId only for YouTube).
+ */
 @Serializable
-data class PartyHlsSuggestion(val id: Int, val memberId: String, val name: String, val url: String, val mediaKey: String)
+data class PartyHlsSuggestion(
+    val id: Int,
+    val memberId: String,
+    val name: String,
+    val url: String,
+    val mediaKey: String,
+    val kind: String = "hls",
+    val videoId: String? = null,
+)
 
 internal sealed interface PartyHostHlsCheck {
     /** keyRemoved: the TorBox account key was stripped from the shared address. */

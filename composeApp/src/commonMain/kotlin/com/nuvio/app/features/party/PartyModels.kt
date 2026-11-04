@@ -203,6 +203,8 @@ data class PartyPresence(
     // Watching alone on purpose (local pause/seek, browser "Allein schauen"):
     // shown as "Allein", not as out of sync. Optional; older clients ignore it.
     val solo: Boolean? = null,
+    // Set by a host that can share separate video links (PartyLinks.PROTOCOL).
+    val links: Int? = null,
 )
 
 @Serializable

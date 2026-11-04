@@ -690,3 +690,77 @@ test('end reasons: a host change emits stream(null, "host_changed"); removal and
   await h.session.join('UXZ83H', 'Guest'); await h.session.close();
   assert.equal(closes.at(-1), null); // An explicit leave carries no end reason.
 });
+
+// --- Shared separate video (links protocol 1) -------------------------------
+const LINK_ID = 'abcdefgh23456789';
+const linkSource = (rev = 1, extra = {}) => ({key: `link:${LINK_ID}:${rev}`, id: LINK_ID, rev, kind: 'youtube', video_id: 'M7lc1UVf-VE', label: 'YouTube', party_key: 'movie|tt1||', ...extra});
+const share = (f, source, member = 'host') => f.emit('shared_source', {member_id: member, media_key: 'movie|tt1||', source});
+const linkState = (rev, seq, extra = {}) => ({seq, member_id: 'host', paused: false, position_ms: 5000, rate: 1, at: 1000, media_key: `link:${LINK_ID}:${rev}`, ...extra});
+
+test('a shared link is its own epoch: film states wait, only the host\'s states for the current revision count', async t => {
+  const shared = [], f = await sequenced(t);
+  f.session.handlers.sharedSource = s => shared.push(s);
+  share(f, linkSource(1), 'guest2'); assert.equal(f.session.sharedSource, null); // Only the host shares.
+  f.emit('shared_source', {member_id: 'host', media_key: 'movie|tt9||', source: linkSource(1)}); assert.equal(f.session.sharedSource, null); // Other film.
+  share(f, linkSource(1, {video_id: 'bad'})); assert.equal(f.session.sharedSource, null); // Malformed.
+  share(f, linkSource(1));
+  assert.equal(f.session.sharedSource.key, `link:${LINK_ID}:1`); assert.equal(f.session.playback, null);
+  assert.equal(shared.length, 1); assert.equal(f.session.activeMediaKey(), `link:${LINK_ID}:1`);
+  assert.ok(f.messages.filter(m => m.event === 'state_request').length >= 2); // Asks for the link's state.
+  f.emit('state', {...playback, seq: 50}); assert.equal(f.session.playback, null); // Film state ignored.
+  assert.equal(f.session.diagnostics.lastDecision, 'wrong_media');
+  f.emit('state', linkState(1, 1, {member_id: 'guest2'})); assert.equal(f.session.diagnostics.lastDecision, 'not_host');
+  f.emit('state', linkState(1, 1)); assert.equal(f.session.playback.media_key, `link:${LINK_ID}:1`);
+  share(f, linkSource(1)); assert.equal(shared.length, 1); assert.equal(f.session.playback.seq, 1); // Re-sent: no reset.
+  share(f, linkSource(2));
+  assert.equal(f.session.playback, null); assert.equal(shared.length, 2);
+  f.emit('state', linkState(1, 9)); assert.equal(f.session.playback, null); // Late event of the old revision.
+  f.emit('state', linkState(2, 1)); assert.equal(f.session.playback.seq, 1);
+  share(f, null); assert.equal(f.session.sharedSource, null); assert.equal(f.session.playback, null);
+  f.emit('state', {...playback, seq: 3}); assert.equal(f.session.playback.media_key, 'movie|tt1||'); // Film again.
+});
+
+test('link commands, status reports and countdown identity use the link key; persisted control is refused', async t => {
+  const f = await sequenced(t);
+  share(f, linkSource(3)); f.emit('state', linkState(3, 4));
+  const entry = f.session.issueCommand({paused: true, positionMs: 6000});
+  assert.equal(entry.command.media_key, `link:${LINK_ID}:3`);
+  assert.equal(sentCommands(f).at(-1).media_key, `link:${LINK_ID}:3`);
+  await f.session.sendPresence('buffering');
+  assert.equal(f.tracks.at(-1).media_key, `link:${LINK_ID}:3`); // The host never pauses the film for it.
+  assert.throws(() => f.session.prepareControl({paused: true, positionMs: 0}), e => e.code === 'no_sequencer');
+  f.session.room.members.push({id: 'guest2', display_name: 'G2'});
+  f.emit('status', {member_id: 'guest2', status: 'ready', media_key: 'movie|tt1||'});
+  assert.equal(f.session.memberStatus.has('guest2'), false); // Film report while the link plays.
+  f.emit('status', {member_id: 'guest2', status: 'ready', media_key: `link:${LINK_ID}:3`});
+  assert.equal(f.session.memberStatus.get('guest2').status, 'ready');
+});
+
+test('link capability only from the current host; proposals carry kind and video ID only when given', async t => {
+  const results = [], f = await sequenced(t);
+  f.session.handlers.suggestResult = r => results.push(r);
+  assert.equal(f.session.hostLinks, false);
+  f.emit('status', {member_id: 'guest2', status: 'ready', links: 1}); assert.equal(f.session.hostLinks, false);
+  f.emit('status', {member_id: 'host', status: 'ready', commands: 1, links: 1}); assert.equal(f.session.hostLinks, true);
+  await f.session.suggestStream('https://www.youtube.com/watch?v=M7lc1UVf-VE', 'movie|tt1||', {kind: 'youtube', video_id: 'M7lc1UVf-VE', extra: 'x'});
+  const proposal = f.messages.filter(m => m.event === 'stream_suggest').at(-1).payload;
+  assert.deepEqual(proposal, {member_id: 'guest', media_key: 'movie|tt1||', url: 'https://www.youtube.com/watch?v=M7lc1UVf-VE', kind: 'youtube', video_id: 'M7lc1UVf-VE'});
+  await f.session.suggestStream('https://cdn.example.test/a.m3u8', 'movie|tt1||');
+  assert.deepEqual(Object.keys(f.messages.filter(m => m.event === 'stream_suggest').at(-1).payload), ['member_id', 'media_key', 'url']);
+  f.emit('stream_suggest_result', {member_id: 'guest2', target_member_id: 'guest', status: 'accepted'});
+  f.emit('stream_suggest_result', {member_id: 'host', target_member_id: 'other', status: 'declined'});
+  f.emit('stream_suggest_result', {member_id: 'host', target_member_id: 'guest', status: 'maybe'});
+  f.emit('stream_suggest_result', {member_id: 'host', target_member_id: 'guest', status: 'declined'});
+  assert.deepEqual(results, ['declined']);
+});
+
+test('a host change or film change ends the shared link; close clears it', async t => {
+  const shared = [], f = await sequenced(t);
+  f.session.handlers.sharedSource = s => shared.push(s);
+  share(f, linkSource(1));
+  f.client.rpc = async () => ({data: {...snapshot(), party: {...snapshot().party, host_member_id: 'guest2'}, members: [...snapshot().members, {id: 'guest2', display_name: 'G2'}]}});
+  await f.session.refresh();
+  assert.equal(f.session.sharedSource, null); assert.deepEqual(shared.map(s => s?.key ?? null), [`link:${LINK_ID}:1`, null]);
+  assert.equal(f.session.hostLinks, false);
+  await f.session.close(); assert.equal(f.session.sharedSource, null);
+});
