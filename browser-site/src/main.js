@@ -121,6 +121,7 @@ const session = client ? new PartySession(client, deviceId, {
     // Includes revocations, incompatible URLs and host source changes. Only an
     // authoritative media/room lifecycle event clears a personal source.
     if (stream && stream.media_key !== mediaKey(session.room?.info.media)) return;
+    const previousOffer = lastHostStreamEvent;
     lastHostStreamEvent = stream; // Memory only, for enabling auto mode later.
     const browserPending = !!stream && Object.hasOwn(stream, 'browser_hls');
     // Optional desktop hint while browser_hls has no URL yet (older hosts send none).
@@ -133,17 +134,19 @@ const session = client ? new PartySession(client, deviceId, {
     // only by a playable host source; never by a revocation or pending HLS.
     if (personalHls.active) {
       if (!autoHostStream || !offered || streamProblem(offered)) return;
+      // Toggling the Desktop route can re-send the same browser offer.
+      if (reason !== 'apply_current' && JSON.stringify(offered) === JSON.stringify(browserPartyStream(previousOffer))) return;
       resetVideo('Automatischer Modus: Der eigene Video-Link wurde durch die Host-Freigabe ersetzt.');
     }
     stream = offered;
     if (!stream) {
       resetVideo();
-      $('streamInfo').textContent = !browserPending ? 'Keine aktive Streamfreigabe. Der Desktop-Host muss „Share my stream“ aktivieren.'
+      $('streamInfo').textContent = !browserPending || browserState === 'disabled' ? 'Keine aktive Browser-Freigabe. Der Host kann „Browser-HLS freigeben“ einschalten.'
         : browserState === 'denied' ? 'Browser-HLS nicht möglich: TorBox hat den Zugriff verweigert (Tarif oder Berechtigung). Eigenen Video-Link verwenden.'
         : browserState === 'failed' ? 'Browser-HLS konnte am Desktop nicht vorbereitet werden. Der Host kann „HLS erstellen / aktualisieren“ drücken, oder du lädst einen eigenen Video-Link.'
         : browserState === 'unsupported' ? 'Browser-HLS ist für diese Host-Quelle nicht möglich (TorBox stellt sie nicht sicher teilbar bereit). Eigenen Video-Link verwenden.'
         : browserState === 'processing' ? 'TorBox verarbeitet den Stream noch. Sobald die Playlist fertig ist, startet sie bei automatischem Laden von selbst.'
-        : 'Desktop-Quelle freigegeben. Browser-HLS wird vorbereitet; bei automatischem Laden startet sie danach von selbst.';
+        : 'Browser-HLS wird vorbereitet; bei automatischem Laden startet die Quelle danach von selbst.';
       if (browserPending) $('noStream').textContent = browserState === 'preparing' || browserState === 'processing' ? 'Browser-HLS wird am Desktop vorbereitet …' : 'Keine abspielbare Browserquelle vom Host.';
       return;
     }
@@ -784,7 +787,7 @@ function playLocally() {
 function togglePlay() {
   if (!loadedStream) {
     if (selectedStream && !$('loadStream').hidden) startStream();
-    else status('Noch kein Stream freigegeben. Der Host muss „Share my stream“ aktivieren.');
+    else status('Noch kein Browser-Stream freigegeben. Der Host kann „Browser-HLS freigeben“ einschalten.');
     return;
   }
   if (!player.paused) { markGesture(); player.pause(); return; }
@@ -1131,7 +1134,7 @@ $('autoHostStream').addEventListener('change', () => {
   // Enabling it (a user gesture) applies the host source that is already offered.
   if (!autoHostStream || !session?.room) return;
   if (selectedStream && !loadedStream && !$('loadStream').hidden) startStream();
-  else if (lastHostStreamEvent) session.handlers.stream(lastHostStreamEvent);
+  else if (lastHostStreamEvent) session.handlers.stream(lastHostStreamEvent, 'apply_current');
   else session.requestState().catch(() => {});
 });
 for (const event of ['canplay', 'progress', 'durationchange']) player.addEventListener(event, () => updatePersonalHlsReadiness());

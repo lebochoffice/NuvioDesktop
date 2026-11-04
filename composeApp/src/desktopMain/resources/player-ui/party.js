@@ -474,10 +474,13 @@ const buildPartySwitch = (key, title, description, checked, eventType) => {
       if (activeModal === "party") renderPartyModal();
     }, partySwitchSettleMs);
     };
-    if (eventType === "partySharing" && next) {
+    if (next && (eventType === "partySharing" || eventType === "partyBrowserSharing")) {
+      const browser = eventType === "partyBrowserSharing";
       showPartyConfirm({
-        title: "Stream mit der Party teilen?",
-        message: "Alle Party-Mitglieder erhalten deinen Stream automatisch, bei TorBox samt Account-Key in der Adresse.",
+        title: browser ? "Browser-HLS freigeben?" : "Originalstream für Nuvio freigeben?",
+        message: browser
+          ? "Der HLS-Link wird an die Party gesendet. Bei TorBox kann die Adresse deinen Account-Key enthalten, den Party-Mitglieder dann sehen können."
+          : "Nuvio-Gäste können deine unveränderte Wiedergabequelle nutzen. Die Adresse kann private Zugriffsdaten enthalten.",
         confirmLabel: "Teilen", danger: false, onConfirm: apply,
       });
     } else apply();
@@ -595,25 +598,23 @@ const partyIconTextButton = (icon, label, variant, focusKey, onClick) => {
 const partyCompactButton = (label, focusKey, onClick, variant = "") =>
   partyButtonElement(label, `compact ${variant}`.trim(), focusKey, onClick);
 
-// Technical detail (errors) below the stream card; the short state lives in
-// the "Stream freigeben" subtitle.
+// Browser HLS details below the stream card, separate from the Desktop switch.
 const buildPartyStreamStatus = party => {
   const phase = String(party.hlsPhase || "");
   const detail = String(party.hlsStatus || "").trim();
-  const problem = phase === "error" || (party.sharing && /can't be shared|nicht geteilt/i.test(String(party.shareNote || "")));
-  const note = String(phase === "error" ? detail : party.shareNote || "").trim();
-  return problem && note ? partyElement("p", "party-detail error", note) : null;
+  const problem = phase === "error" || (party.browserSharing && phase === "unavailable");
+  return problem && detail ? partyElement("p", "party-detail error", detail) : null;
 };
 
-// "Stream freigeben" (switch + short HLS state), the stream card (title,
-// source, edit, refresh), the own-link option and "Nur ich steuere".
 const buildPartyHostSettings = party => {
   const section = partyElement("div", "party-host-settings");
   const [hlsLabel] = partyHlsPhaseLabels[String(party.hlsPhase || "")] || [""];
-  const shareSubtitle = hlsLabel ? `Browser-HLS: ${hlsLabel}` : partyLabel("shareDescription");
-  section.appendChild(buildPartySwitch("sharing", "Stream freigeben", shareSubtitle, party.sharing, "partySharing"));
+  section.appendChild(buildPartySwitch("sharing", "Share my stream",
+    party.shareNote || "Originalquelle für Gäste in Nuvio freigeben.", party.sharing, "partySharing"));
+  section.appendChild(buildPartySwitch("browserSharing", "Browser-HLS freigeben",
+    hlsLabel || "HLS-Quelle für Browser-Gäste freigeben.", party.browserSharing, "partyBrowserSharing"));
   const familyStatus = String(party.familyStatus || "").trim();
-  if (party.sharing && familyStatus) section.appendChild(partyElement("p", "party-detail", familyStatus));
+  if (party.browserSharing && familyStatus) section.appendChild(partyElement("p", "party-detail", familyStatus));
   if (party.torboxChoicesOpen) section.appendChild(buildPartyTorboxLink(party));
   else if (party.streamTitle) section.appendChild(buildPartyStreamCard(party));
   const problem = buildPartyStreamStatus(party);
@@ -692,10 +693,10 @@ const buildPartyHostHls = party => {
   const status = String(party.hostHlsStatus || "").trim();
   if (party.hostHlsActive) {
     const row = partyElement("div", "party-inline-row");
-    row.appendChild(partyElement("span", "party-row-label", "Eigener Link aktiv"));
-    row.appendChild(partyCompactButton("Beenden", "hostHlsClear", () => send("partyHostHlsClear", 0), "danger"));
+    row.appendChild(partyElement("span", "party-row-label", party.browserSharing ? "Eigener Link aktiv" : "Eigener Link vorbereitet"));
+    row.appendChild(partyCompactButton("Link entfernen", "hostHlsClear", () => send("partyHostHlsClear", 0), "danger"));
     box.appendChild(row);
-    if (status) box.appendChild(partyElement("p", "party-detail", status));
+    if (party.browserSharing && status) box.appendChild(partyElement("p", "party-detail", status));
     return box;
   }
   const details = partyElement("details", "party-disclosure");
@@ -718,7 +719,7 @@ const buildPartyHostHls = party => {
   check.addEventListener("click", event => event.stopPropagation());
   consent.appendChild(check);
   consent.appendChild(document.createTextNode(" Freigeben – Tokens im Link sind für Empfänger sichtbar"));
-  consent.title = "Der Link wird geprüft und an die Party gesendet; „Share my stream“ wird eingeschaltet. TorBox-Links mit Account-Key gehen nur an freigegebene Mitglieder.";
+  consent.title = "Der Link wird geprüft und für Browser freigegeben. Party-Mitglieder können enthaltene Tokens sehen, bei TorBox auch den Account-Key.";
   details.appendChild(consent);
   const share = partyButtonElement("Teilen", "primary compact", "hostHlsShare", () => {
     const url = input.value.trim();

@@ -75,7 +75,8 @@ export const streamIsHls = s => isHlsUrl(s.url) || /\.m3u8$/i.test(s.filename ||
 export function browserPartyStream(stream) {
   if (!stream || !Object.hasOwn(stream, 'browser_hls')) return stream;
   const browser = stream.browser_hls;
-  if (!browser || typeof browser !== 'object' || Array.isArray(browser) || typeof browser.url !== 'string' || !browser.url) return null;
+  if (!browser || typeof browser !== 'object' || Array.isArray(browser) || browser.state === 'disabled' ||
+      typeof browser.url !== 'string' || !browser.url) return null;
   // label: optional display name of the Desktop host (e.g. its own video link).
   const label = typeof browser.label === 'string' ? browser.label.replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 80) : '';
   return {media_key: stream.media_key, url: browser.url, headers: browser.headers || {},

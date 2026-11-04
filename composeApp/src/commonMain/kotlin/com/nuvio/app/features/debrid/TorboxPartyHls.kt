@@ -337,14 +337,14 @@ enum class TorboxHlsPhase { Unavailable, Preparing, Processing, NotReady, Ready,
 
 /**
  * Panel label. "Sent" is not a phase of its own: a ready source counts as sent
- * only while the host has explicitly enabled "Share my stream".
+ * only while the host has explicitly enabled Browser-HLS sharing.
  */
 internal fun torboxHlsStatusLabel(phase: TorboxHlsPhase, sharing: Boolean): String = when (phase) {
     TorboxHlsPhase.Unavailable -> "Nicht verfügbar"
     TorboxHlsPhase.Preparing -> "HLS wird vorbereitet …"
     TorboxHlsPhase.Processing -> "TorBox verarbeitet den Stream, Playlist noch nicht fertig …"
     TorboxHlsPhase.NotReady -> "Playlist nicht rechtzeitig fertig"
-    TorboxHlsPhase.Ready -> if (sharing) "An Teilnehmer gesendet" else "HLS bereit (Share my stream ist aus)"
+    TorboxHlsPhase.Ready -> if (sharing) "An Teilnehmer gesendet" else "HLS bereit (Browser-HLS-Freigabe ist aus)"
     TorboxHlsPhase.Denied -> "Zugriff verweigert"
     TorboxHlsPhase.Unsupported -> "Quelle nicht unterstützt"
     TorboxHlsPhase.Expired -> "Link abgelaufen – wird erneuert …"

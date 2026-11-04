@@ -63,6 +63,18 @@ test('browser selection leaves the Desktop original intact and inherits its medi
   assert.equal(browserPartyStream(legacy), legacy);
 });
 
+test('a Desktop-only offer blocks browser fallback and browser-only needs no original URL', () => {
+  const media_key = 'movie|tt1||';
+  const browser_hls = {url: 'https://stream.example.test/master.m3u8'};
+  const desktop = {media_key, url: 'https://desktop.example.test/playable.mp4'};
+  const both = browserPartyStream({...desktop, browser_hls});
+  assert.equal(both.url, browser_hls.url);
+  assert.deepEqual(browserPartyStream({media_key, url: '', browser_hls}), both);
+  assert.equal(browserPartyStream({...desktop, browser_hls: {state: 'disabled'}}), null);
+  assert.equal(browserPartyStream({...desktop, browser_hls: {...browser_hls, state: 'disabled'}}), null);
+  assert.equal(browserPartyStream(null), null);
+});
+
 // Member sync display (same rule as Desktop PartySync.memberSync). Written, not executed here.
 test('member sync: synced, catching up, buffering, unsynced (behind), stale and other film', () => {
   const party = {seq: 3, member_id: 'host', paused: false, position_ms: 60000, rate: 1, at: 10000};

@@ -78,7 +78,11 @@ data class PartyStream(
     val badges: List<StreamBadge> = emptyList(),
     @SerialName("browser_hls") val browserHls: PartyBrowserHls? = null,
 ) {
-    fun forDesktop(): PartyStream = if (browserHls == null) this else copy(browserHls = null)
+    fun forDesktop(): PartyStream? = when {
+        !isShareableStreamUrl(url) -> null
+        browserHls == null -> this
+        else -> copy(browserHls = null)
+    }
 
     fun toStreamItem(): StreamItem = StreamItem(
         name = name,
@@ -99,6 +103,19 @@ data class PartyStream(
 }
 
 internal fun isShareableStreamUrl(url: String): Boolean = SHAREABLE_URL.containsMatchIn(url)
+
+// A single offer (or revocation) keeps both routes on the existing stream event.
+// Older Desktop clients ignore browser_hls; an empty top-level URL is not playable.
+internal fun ActiveParty.streamOffer(desktop: PartyStream?, browser: PartyBrowserHls?): PartyStream? {
+    if (!isHost) return null
+    val original = desktop?.takeIf { sharing && it.mediaKey == media.key && isShareableStreamUrl(it.url) }
+    val hls = browser?.takeIf { browserSharing && it.state != "disabled" }
+    return when {
+        original != null -> original.copy(browserHls = hls ?: PartyBrowserHls(state = "disabled"))
+        hls != null -> PartyStream(mediaKey = media.key, url = "", browserHls = hls)
+        else -> null
+    }
+}
 
 // Reject the complete known account key in either transport, including headers.
 // Never log the JSON or the key; a rejected original cannot be silently stripped.
@@ -268,6 +285,7 @@ data class ActiveParty(
     val connected: Boolean,
     val hostOnly: Boolean = false,
     val sharing: Boolean = false,
+    val browserSharing: Boolean = false,
 ) {
     val isHost: Boolean
         get() = memberId == hostMemberId

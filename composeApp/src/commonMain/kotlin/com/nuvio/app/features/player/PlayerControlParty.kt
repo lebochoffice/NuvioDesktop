@@ -17,6 +17,7 @@ data class PlayerControlPartyState(
     val isHost: Boolean = false,
     val hostOnly: Boolean = false,
     val sharing: Boolean = false,
+    val browserSharing: Boolean = false,
     val shareNote: String = "",
     // Browser HLS of the host's TorBox source ("HLS erstellen / aktualisieren").
     val hlsAvailable: Boolean = false,

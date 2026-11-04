@@ -12,7 +12,14 @@ import kotlinx.serialization.Serializable
  * browser source (typed by the host, or a guest suggestion the host accepted).
  * Memory only: never persisted, logged or put into an invitation.
  */
-data class PartyHostHls(val url: String, val mediaKey: String, val label: String, val familyOnly: Boolean = false)
+data class PartyHostHls(
+    val url: String,
+    val mediaKey: String,
+    val label: String,
+    val partyId: String,
+    val memberId: String,
+    val familyOnly: Boolean = false,
+)
 
 private val GENERIC_MEMBER_NAMES = setOf("", "nuvio", "nuvio-mitglied", "nuvio mitglied", "nuvio member", "member", "mitglied", "gast", "guest")
 

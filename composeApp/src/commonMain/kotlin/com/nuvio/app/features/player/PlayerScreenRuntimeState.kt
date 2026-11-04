@@ -332,6 +332,7 @@ internal class PlayerScreenRuntime(
     var hostPartyHls by mutableStateOf<com.nuvio.app.features.party.PartyHostHls?>(null)
     var hostPartyHlsStatus by mutableStateOf("")
     var hostPartyHlsBusy by mutableStateOf(false)
+    var hostPartyHlsJob: Job? = null
     // Family share: the prepared TorBox address carries the account token.
     var torboxFamilyOnly by mutableStateOf(false)
     var torboxPropagateToken by mutableStateOf(false)

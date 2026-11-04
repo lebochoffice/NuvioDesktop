@@ -237,10 +237,10 @@ internal fun PlayerScreenRuntime.rememberPartyControlsState(): PlayerControlPart
         isHost = party.isHost,
         hostOnly = party.hostOnly,
         sharing = party.sharing,
-        // The TorBox status stays visible: "can't be shared" alone hid the reason.
-        shareNote = if (party.sharing && currentPartyStream() == null) {
-            listOf(stringResource(Res.string.party_share_unavailable), torboxPartyStatus).filter { it.isNotBlank() }.joinToString(" ")
-        } else torboxPartyStatus,
+        browserSharing = party.browserSharing,
+        shareNote = if (party.isHost && party.sharing && !elsewhere && currentPartyStream() == null) {
+            stringResource(Res.string.party_share_unavailable)
+        } else "",
         hlsAvailable = party.isHost && !elsewhere && effectiveTorboxFile != null && activeHostPartyHls == null,
         hlsBusy = torboxPartyPhase == com.nuvio.app.features.debrid.TorboxHlsPhase.Preparing,
         browserOrigin = com.nuvio.app.features.party.watchPartyBrowserOrigin,
@@ -275,7 +275,7 @@ internal fun PlayerScreenRuntime.rememberPartyControlsState(): PlayerControlPart
             !party.isHost || elsewhere -> ""
             activeHostPartyHls != null -> if (activeHostPartyHls?.familyOnly == true) "family-link" else "link"
             effectiveTorboxFile != null -> when (torboxPartyPhase) {
-                com.nuvio.app.features.debrid.TorboxHlsPhase.Ready -> if (party.sharing) "sent" else "ready"
+                com.nuvio.app.features.debrid.TorboxHlsPhase.Ready -> if (party.browserSharing) "sent" else "ready"
                 com.nuvio.app.features.debrid.TorboxHlsPhase.Preparing -> "preparing"
                 com.nuvio.app.features.debrid.TorboxHlsPhase.Processing -> "processing"
                 com.nuvio.app.features.debrid.TorboxHlsPhase.Expired -> "renewing"
@@ -292,10 +292,12 @@ internal fun PlayerScreenRuntime.rememberPartyControlsState(): PlayerControlPart
         hlsStatus = when {
             !party.isHost || elsewhere -> ""
             activeHostPartyHls != null -> "Der geteilte Video-Link ersetzt TorBox-HLS, solange er aktiv ist."
-            effectiveTorboxFile != null -> com.nuvio.app.features.debrid.torboxHlsStatusLabel(torboxPartyPhase, party.sharing)
+            effectiveTorboxFile != null -> torboxPartyStatus.takeIf {
+                it.isNotBlank() && (torboxFamilyOnly || torboxPartyPhase != com.nuvio.app.features.debrid.TorboxHlsPhase.Ready)
+            } ?: com.nuvio.app.features.debrid.torboxHlsStatusLabel(torboxPartyPhase, party.browserSharing)
             // A provider name such as "[TB+] …" is no TorBox file identity.
-            party.sharing && activeStream != null -> if (activeTorrentInfoHash.isNullOrBlank())
-                "Nicht verfügbar: Addon-Stream ohne Infohash und ohne TorBox-Dateikennung. „Mit TorBox-Datei verknüpfen“ wählen oder einen Video-Link für alle teilen."
+            party.browserSharing && activeStream != null -> if (activeTorrentInfoHash.isNullOrBlank())
+                "Nicht verfügbar: Addon-Stream ohne Infohash und ohne TorBox-Dateikennung. „Mit TorBox-Datei verknüpfen“ wählen oder einen Video-Link für Browser teilen."
             else
                 "Nicht verfügbar: Kein eindeutiger passender Eintrag in deiner TorBox-Cloud (Infohash und Dateiname). „Mit TorBox-Datei verknüpfen“ wählen oder die Quelle über die TorBox-Cloud starten."
             else -> ""
@@ -349,7 +351,7 @@ internal fun PlayerScreenRuntime.handlePartyControlsEvent(type: String, value: D
             url.length <= 2048 &&
             Regex("^https://[A-Za-z0-9.-]+(?::[0-9]{1,5})?/party/${Regex.escape(party.code)}$").matches(url)) {
             // Invite events are copy-only, including events from older overlays.
-            // Only the existing partySharing switch may change consent.
+            // Copying an invite does not change either sharing choice.
             copyBrowserInvite(url)
         } else {
             showPartyMessage("Invalid browser invite")
@@ -398,6 +400,16 @@ internal fun PlayerScreenRuntime.handlePartyControlsEvent(type: String, value: D
         "partyCopyNuvioLink" -> copyNuvioInvite()
         "partyHostOnly" -> PartyRepository.setHostOnly(value >= 0.5)
         "partySharing" -> PartyRepository.setSharing(value >= 0.5)
+        "partyBrowserSharing" -> {
+            val enabled = value >= 0.5
+            if (!enabled && hostPartyHlsBusy) {
+                hostPartyHlsJob?.cancel()
+                hostPartyHlsJob = null
+                hostPartyHlsBusy = false
+                hostPartyHlsStatus = "Linkprüfung abgebrochen. Browser-HLS-Freigabe ist aus."
+            }
+            PartyRepository.setBrowserSharing(enabled)
+        }
         // Restarts the single HLS producer; ignored while one is preparing.
         // Never changes the sharing consent.
         "partyHlsRefresh" -> {
@@ -560,7 +572,7 @@ private fun formatTorboxSize(bytes: Long): String = when {
 
 /**
  * Checks the link on the desktop (public HTTPS, finished VOD playlist, no
- * debrid key) and only then shares it, turning on "Share my stream" because
+ * debrid key, except for explicitly shared TorBox URLs) and only then turns on Browser-HLS because
  * the host has just consented to sharing this link. The URL is never logged.
  */
 private fun PlayerScreenRuntime.shareHostPartyHls(url: String, label: String) {
@@ -569,29 +581,28 @@ private fun PlayerScreenRuntime.shareHostPartyHls(url: String, label: String) {
     val mediaKey = partyKey
     hostPartyHlsBusy = true
     hostPartyHlsStatus = "Video-Link wird geprüft …"
-    scope.launch {
+    hostPartyHlsJob = scope.launch {
         val settings = com.nuvio.app.features.debrid.DebridSettingsRepository.snapshot()
         val keys = settings.providerApiKeys.values.filter { it.isNotBlank() }
         val torboxKey = settings.apiKeyFor(com.nuvio.app.features.debrid.DebridProviders.TORBOX_ID)
-        // A TorBox stream link whose account key is only its `token` cannot be
-        // shared openly (TorBox rejects it without the token). With the family
-        // share service it goes only to admitted members, never by broadcast.
-        // A TorBox stream link whose account key is only its `token`: shared as
-        // it is with all party members (TorBox rejects it without the token).
+        // Existing TorBox compatibility: an explicitly consented URL may
+        // carry the account key as its token. TorBox rejects it without it.
         val family = torboxKey.isNotBlank() && com.nuvio.app.features.debrid.torboxKeyFreeUrl(url.trim(), torboxKey) != null
         val result = try { com.nuvio.app.features.party.checkPartyHostHls(url, if (family) keys - torboxKey else keys) }
             catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
             catch (_: Exception) { com.nuvio.app.features.party.PartyHostHlsCheck.Problem("Unerwarteter Fehler bei der Prüfung. Link kontrollieren und erneut versuchen.") }
         hostPartyHlsBusy = false
-        if (partyKey != mediaKey || PartyRepository.state.value.party?.media?.key != mediaKey) {
-            hostPartyHlsStatus = "Titel gewechselt. Der Link wurde nicht geteilt."
+        val current = PartyRepository.state.value.party
+        if (current == null || !current.isHost || current.id != party.id || current.memberId != party.memberId ||
+            partyKey != mediaKey || current.media.key != mediaKey) {
+            hostPartyHlsStatus = "Party oder Titel gewechselt. Der Link wurde nicht geteilt."
             return@launch
         }
         when (result) {
             is com.nuvio.app.features.party.PartyHostHlsCheck.Problem -> hostPartyHlsStatus = "Nicht geteilt: ${result.message}"
             is com.nuvio.app.features.party.PartyHostHlsCheck.Ok -> {
-                hostPartyHls = com.nuvio.app.features.party.PartyHostHls(result.url, mediaKey, label, familyOnly = family)
-                if (PartyRepository.state.value.party?.sharing != true) PartyRepository.setSharing(true)
+                hostPartyHls = com.nuvio.app.features.party.PartyHostHls(result.url, mediaKey, label, party.id, party.memberId, familyOnly = family)
+                PartyRepository.setBrowserSharing(true)
                 hostPartyHlsStatus = if (family) "Mit allen Mitgliedern geteilt (TorBox-Link mit Account-Key)."
                     else "Geteilt mit allen Mitgliedern."
             }

@@ -59,6 +59,7 @@ import com.nuvio.app.features.party.PartyPanel
 import com.nuvio.app.features.party.PartyPlayback
 import com.nuvio.app.features.party.PartyRepository
 import com.nuvio.app.features.party.PartySource
+import com.nuvio.app.features.party.PartyBrowserHls
 import com.nuvio.app.features.party.PartyStream
 import com.nuvio.app.features.party.isShareableStreamUrl
 import com.nuvio.app.features.party.PartySync
@@ -234,7 +235,13 @@ internal val PlayerScreenRuntime.effectiveTorboxFile: com.nuvio.app.features.deb
 
 /** The host's shared video link, valid only for the title it was entered for. */
 internal val PlayerScreenRuntime.activeHostPartyHls: com.nuvio.app.features.party.PartyHostHls?
-    get() = hostPartyHls?.takeIf { it.mediaKey == partyKey && PartyRepository.state.value.party?.media?.key == partyKey }
+    get() {
+        val party = PartyRepository.state.value.party ?: return null
+        return hostPartyHls?.takeIf {
+            party.isHost && it.partyId == party.id && it.memberId == party.memberId &&
+                it.mediaKey == partyKey && party.media.key == partyKey
+        }
+    }
 
 private fun configuredDebridKeys(): List<String> =
     com.nuvio.app.features.debrid.DebridSettingsRepository.snapshot().providerApiKeys.values.filter { it.isNotBlank() }
@@ -245,63 +252,10 @@ internal fun PlayerScreenRuntime.torboxMappingKey(): String? =
 
 internal fun PlayerScreenRuntime.currentPartyStream(): PartyStream? {
     val stream = activeStream ?: return null
-    // An explicitly shared host link replaces the TorBox HLS as browser source.
-    val hostLink = activeHostPartyHls?.takeUnless { link -> link.familyOnly || configuredDebridKeys().any { link.url.contains(it) } }
-    val familyHostLink = activeHostPartyHls?.takeIf { it.familyOnly }
-    val torboxFile = effectiveTorboxFile.takeIf { hostLink == null && familyHostLink == null }
-    if (torboxFile != null) {
-        if (PartyRepository.state.value.party?.media?.key != partyKey) return null
-    }
+    if (!isShareableStreamUrl(activeSourceUrl) || activeSourceAudioUrl != null) return null
     val accountKey = com.nuvio.app.features.debrid.DebridSettingsRepository.snapshot()
         .apiKeyFor(com.nuvio.app.features.debrid.DebridProviders.TORBOX_ID)
-    if (torboxFile != null && torboxFile.accountFingerprint != com.nuvio.app.features.debrid.torboxAccountFingerprint(accountKey)) return null
-    val ready = torboxPartyStream?.takeIf { torboxFile != null && it.mediaKey == partyKey && torboxPreparedFile == torboxFile }
-    // TorBox link WITH the account token: the host shares it directly with
-    // all party members through the party channel ("Share my stream" is the
-    // host's decision; owner choice). The key guard below stays for every
-    // other address.
-    val keyedUrl = familyHostLink?.url ?: ready?.url?.takeIf { hostLink == null && torboxFamilyOnly }
-    val keyed = keyedUrl != null
-    val prepared = if (hostLink != null) PartyStream(mediaKey = partyKey, url = hostLink.url, streamType = "hls")
-        else if (keyedUrl != null) PartyStream(mediaKey = partyKey, url = keyedUrl, streamType = "hls")
-        else ready
-    val browserHls = if (hostLink != null) {
-        com.nuvio.app.features.party.PartyBrowserHls(url = hostLink.url, label = hostLink.label)
-    } else if (keyedUrl != null) {
-        com.nuvio.app.features.party.PartyBrowserHls(url = keyedUrl, label = "TorBox HLS",
-            propagateToken = (familyHostLink == null && torboxPropagateToken).takeIf { it })
-    } else if (torboxFile != null) {
-        com.nuvio.app.features.party.PartyBrowserHls(
-            url = prepared?.url,
-            headers = prepared?.headers.orEmpty(),
-            state = if (prepared != null) null else com.nuvio.app.features.debrid.torboxBrowserState(torboxPartyPhase),
-        )
-    } else null
-    // The original cannot be shared (local proxy, separate audio, or a TorBox
-    // download link carrying the account key): share only the prepared,
-    // checked HLS, which desktop guests can play as well. Before it is ready
-    // nothing is shared.
-    val originalShareable = isShareableStreamUrl(activeSourceUrl) && activeSourceAudioUrl == null
-    if (!originalShareable || (accountKey.isNotBlank() && hlsOnlyNeeded(accountKey))) {
-        prepared ?: return null
-        return PartyStream(
-            mediaKey = partyKey,
-            url = prepared.url,
-            headers = prepared.headers,
-            name = stream.name,
-            description = stream.description,
-            addonName = stream.addonName,
-            addonId = stream.addonId,
-            addonLogo = stream.addonLogo,
-            filename = activeSourceFilename ?: stream.behaviorHints.filename,
-            videoSize = stream.behaviorHints.videoSize,
-            bingeGroup = stream.behaviorHints.bingeGroup,
-            streamType = "hls",
-            badges = stream.badges,
-            browserHls = browserHls,
-        ).takeUnless { !keyed && it.containsAccountKey(accountKey) }
-    }
-    val original = PartyStream(
+    return PartyStream(
         mediaKey = partyKey,
         url = activeSourceUrl,
         headers = activeSourceHeaders,
@@ -316,17 +270,39 @@ internal fun PlayerScreenRuntime.currentPartyStream(): PartyStream? {
         bingeGroup = stream.behaviorHints.bingeGroup,
         streamType = activeStreamType,
         badges = stream.badges,
-        browserHls = browserHls,
-    )
-    // The original source itself must never carry the key; only the deliberately
-    // shared TorBox HLS link may.
-    return original.takeUnless { (if (keyed) it.copy(browserHls = null) else it).containsAccountKey(accountKey) }
+    ).takeUnless { it.containsAccountKey(accountKey) }
 }
 
-// Same key check as containsAccountKey, applied to the original source only.
-private fun PlayerScreenRuntime.hlsOnlyNeeded(accountKey: String): Boolean =
-    PartyStream(mediaKey = partyKey, url = activeSourceUrl, headers = activeSourceHeaders, responseHeaders = activeSourceResponseHeaders)
-        .containsAccountKey(accountKey)
+private fun PlayerScreenRuntime.currentPartyBrowserHls(): PartyBrowserHls {
+    // An explicitly shared host link replaces the TorBox HLS as browser source.
+    val hostLink = activeHostPartyHls?.takeUnless { link -> link.familyOnly || configuredDebridKeys().any { link.url.contains(it) } }
+    val familyHostLink = activeHostPartyHls?.takeIf { it.familyOnly }
+    val torboxFile = effectiveTorboxFile.takeIf { hostLink == null && familyHostLink == null }
+    val accountKey = com.nuvio.app.features.debrid.DebridSettingsRepository.snapshot()
+        .apiKeyFor(com.nuvio.app.features.debrid.DebridProviders.TORBOX_ID)
+    if (torboxFile != null && torboxFile.accountFingerprint != com.nuvio.app.features.debrid.torboxAccountFingerprint(accountKey)) {
+        return PartyBrowserHls(state = "unsupported")
+    }
+    val ready = torboxPartyStream?.takeIf { torboxFile != null && it.mediaKey == partyKey && torboxPreparedFile == torboxFile }
+    // TorBox link WITH the account token: the host shares it directly with
+    // party members through the existing channel after Browser-HLS consent.
+    val keyedUrl = familyHostLink?.url ?: ready?.url?.takeIf { hostLink == null && torboxFamilyOnly }
+    val browserHls = if (hostLink != null) {
+        PartyBrowserHls(url = hostLink.url, label = hostLink.label)
+    } else if (keyedUrl != null) {
+        PartyBrowserHls(url = keyedUrl, label = "TorBox HLS",
+            propagateToken = (familyHostLink == null && torboxPropagateToken).takeIf { it })
+    } else if (torboxFile != null) {
+        PartyBrowserHls(
+            url = ready?.url,
+            headers = ready?.headers.orEmpty(),
+            state = if (ready != null) null else com.nuvio.app.features.debrid.torboxBrowserState(torboxPartyPhase),
+        )
+    } else PartyBrowserHls(state = "unsupported")
+    return if (keyedUrl == null && PartyStream(partyKey, "", browserHls = browserHls).containsAccountKey(accountKey)) {
+        PartyBrowserHls(state = "unsupported")
+    } else browserHls
+}
 
 internal fun PlayerScreenRuntime.partyBaseRate(): Float =
     PartyRepository.playback.value?.rate ?: playbackSnapshot.playbackSpeed
@@ -387,10 +363,13 @@ private fun PlayerScreenRuntime.handlePartyMediaChange(media: PartyMedia) {
 internal fun PlayerScreenRuntime.BindPartyEffects() {
     // This binding belongs to the player session, including background PiP.
     val partyState by PartyRepository.state.collectAsState()
-    val partyId = partyState.party?.id
+    val party = partyState.party
+    val partyId = party?.id
     val key = partyKey
-    val sharing = partyState.party?.let { it.isHost && it.sharing } == true
-    val sharedStream = if (sharing) currentPartyStream() else null
+    val sharingHost = party?.takeIf { it.isHost && it.media.key == key }
+    val desktopOffer = if (sharingHost?.sharing == true) currentPartyStream() else null
+    val browserOffer = if (sharingHost?.browserSharing == true) currentPartyBrowserHls() else null
+    val browserSharing = sharingHost?.browserSharing == true
     val debridSettings by com.nuvio.app.features.debrid.DebridSettingsRepository.uiState.collectAsState()
     val torboxKey = debridSettings.apiKeyFor(com.nuvio.app.features.debrid.DebridProviders.Torbox.id)
     // Addon stream without TorBox identity: look for exactly one matching file
@@ -455,8 +434,8 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
                     torboxPartyStream = PartyStream(mediaKey = key, url = result.url, name = "TorBox HLS", streamType = "hls")
                     torboxPartyPhase = com.nuvio.app.features.debrid.TorboxHlsPhase.Ready
                     torboxPartyStatus = if (result.familyOnly)
-                        "TorBox HLS mit Account-Key vorbereitet. Mit „Share my stream“ erhalten ihn alle Party-Mitglieder."
-                    else "TorBox HLS vorbereitet. Freigabe erst mit Share my stream. Mehrgerätezugriff und Browserwiedergabe müssen geprüft werden."
+                        "TorBox HLS mit Account-Key vorbereitet. Bei Browser-HLS-Freigabe erhalten ihn alle Party-Mitglieder."
+                    else "TorBox HLS vorbereitet. Mehrgerätezugriff und Browserwiedergabe müssen geprüft werden."
                     // Renew only after an explicit expiry/access failure, never on
                     // every recomposition, toggle or transient network failure.
                     while (isActive) {
@@ -516,8 +495,10 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
         onDispose { source?.setSystemControlHandler(null) }
     }
 
-    LaunchedEffect(sharing, sharedStream) {
-        if (sharing) PartyRepository.shareStream(sharedStream)
+    LaunchedEffect(sharingHost?.id, sharingHost?.memberId, key, desktopOffer, browserOffer) {
+        if (sharingHost != null) {
+            PartyRepository.shareStream(sharingHost.id, sharingHost.memberId, key, desktopOffer, browserOffer)
+        }
     }
 
     // Shared start: everyone shows the countdown to the server-time start; at
@@ -544,7 +525,7 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
     }
 
     // Family share: publish the token address for the admitted members while
-    // "Share my stream" is on; revoke when it is off, the title changes or the
+    // Browser-HLS sharing is on; revoke when it is off, the title changes or the
     // party ends. Guests that already loaded it keep playing.
     // TorBox links with the key now go directly through the party state, so
     // the family share service is not used (a leftover share is revoked).
@@ -552,7 +533,7 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
     val familyHost = partyState.party?.isHost == true && partyState.party?.media?.key == key
     // Republish when members change, so kicked or departed members lose their grants at once.
     val familyMembers = partyState.party?.members.orEmpty().map { it.id }.sorted()
-    LaunchedEffect(partyId, key, sharing, familyUrl, familyHost, familyMembers) {
+    LaunchedEffect(partyId, key, browserSharing, familyUrl, familyHost, familyMembers) {
         val previous = familySharePartyId
         if (previous != null && previous != partyId) {
             // Host left: no new grants. Guests keep what they already loaded.
@@ -561,15 +542,15 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
         }
         if (partyId == null) { familyShareRev = null; familyShareStatus = ""; return@LaunchedEffect }
         if (!com.nuvio.app.features.party.PartyFamilyShare.configured || !familyHost) return@LaunchedEffect
-        if (!sharing || familyUrl == null) {
+        if (!browserSharing || familyUrl == null) {
             if (familySharePartyId != null) com.nuvio.app.features.party.PartyFamilyShare.revoke(partyId)
             familySharePartyId = null
             familyShareRev = null
-            familyShareStatus = if (familyUrl != null) "Familienfreigabe beendet (Share my stream ist aus)." else ""
+            familyShareStatus = if (familyUrl != null) "Familienfreigabe beendet (Browser-HLS-Freigabe ist aus)." else ""
             return@LaunchedEffect
         }
-        // "Share my stream" is the only switch: every current member except the
-        // host is admitted; joins, kicks and leaves republish (removed members'
+        // Every current member except the host is admitted; joins, kicks and
+        // leaves republish (removed members'
         // grants are deleted by the share service).
         val admitted = familyMembers.filter { it != partyState.party?.memberId }
         // Short-lived share, renewed while it is on: a crash or host change ends it by itself.
@@ -584,9 +565,16 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
         }
     }
 
-    LaunchedEffect(key, partyId) {
+    DisposableEffect(key, partyId, party?.memberId, party?.isHost) {
+        onDispose {
+            hostPartyHlsJob?.cancel()
+            hostPartyHlsJob = null
+            hostPartyHlsBusy = false
+        }
+    }
+    LaunchedEffect(key, partyId, party?.memberId, party?.hostMemberId) {
         // A shared video link and a manual TorBox link belong to one title of one party.
-        if (hostPartyHls != null && (partyId == null || hostPartyHls?.mediaKey != key)) {
+        if (hostPartyHls != null && activeHostPartyHls == null) {
             hostPartyHls = null
             hostPartyHlsStatus = if (partyId == null) "" else "Der geteilte Video-Link galt für den vorherigen Titel und wurde beendet."
         }

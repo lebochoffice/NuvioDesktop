@@ -4,6 +4,8 @@ import com.nuvio.app.features.streams.StreamBadge
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.SerialName
@@ -24,8 +26,42 @@ class PartyStreamTest {
         filename = "movie.mkv",
         videoSize = 1_500_000_000L,
         bingeGroup = "torrentio|720p",
+        streamType = "mkv",
         badges = listOf(StreamBadge(name = "HDR", imageURL = "https://example.com/hdr.png")),
     )
+
+    @Test
+    fun hostConsentProducesFourIndependentStreamOffers() {
+        val party = ActiveParty(
+            id = "party", code = "UXZ83H", memberId = "host", hostMemberId = "host",
+            members = emptyList(), presence = emptyMap(), media = PartyMedia("movie", "tt1", "movie"),
+            maxMembers = 8, connected = true,
+        )
+        val browser = PartyBrowserHls("https://stream.example.test/master.m3u8")
+        assertNull(party.streamOffer(stream, browser))
+
+        val desktopOnly = assertNotNull(party.copy(sharing = true).streamOffer(stream, browser))
+        assertEquals(stream, desktopOnly.forDesktop())
+        assertEquals(PartyBrowserHls(state = "disabled"), desktopOnly.browserHls)
+
+        val browserOnly = assertNotNull(party.copy(browserSharing = true).streamOffer(stream, browser))
+        assertNull(browserOnly.forDesktop())
+        assertEquals("", browserOnly.url)
+        assertEquals(stream.mediaKey, browserOnly.mediaKey)
+        assertEquals(browser, browserOnly.browserHls)
+        assertTrue(browserOnly.headers.isEmpty())
+
+        val both = party.copy(sharing = true, browserSharing = true)
+        val combined = assertNotNull(both.streamOffer(stream, browser))
+        assertEquals(stream, combined.forDesktop())
+        assertEquals(browser, combined.browserHls)
+        assertEquals(desktopOnly, both.copy(browserSharing = false).streamOffer(combined, combined.browserHls))
+        assertEquals(browserOnly, both.copy(sharing = false).streamOffer(combined, combined.browserHls))
+        assertEquals(stream, both.streamOffer(stream, PartyBrowserHls(state = "preparing"))?.forDesktop())
+        assertEquals(browserOnly, both.streamOffer(stream.copy(url = "http://localhost/video"), browser))
+        assertEquals(browserOnly, both.streamOffer(stream.copy(mediaKey = "previous-title"), browser))
+        assertNull(both.copy(hostMemberId = "new-host").streamOffer(stream, browser))
+    }
 
     @Test
     fun remoteLinksCanBeShared() {

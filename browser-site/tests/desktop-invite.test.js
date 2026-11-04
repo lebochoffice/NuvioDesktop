@@ -9,24 +9,27 @@ const desktopPath = desktopCandidates.find(p => existsSync(p));
 const source = desktopPath ? readFileSync(desktopPath, 'utf8') : '';
 const start = source.indexOf('// NUVIO_BROWSER_PARTY_BRIDGE_V1:');
 if (source) assert.ok(start >= 0, 'Desktop bridge must be applied before this integration test');
-const bridge = source.slice(start, source.indexOf('const buildPartyHostSettings', start));
+const bridge = source.slice(start, source.indexOf('const buildPartyStreamCard', start));
 function setup(party, initialStorage = {}) {
   const events = [], confirmations = [];
   const stored = new Map(Object.entries(initialStorage));
-  const element = (tag, className) => ({tag, className, attrs: new Map(), children: [], style: {}, dataset: {}, appendChild(child) {this.children.push(child);}, setAttribute(k, v) {this.attrs.set(k, v);}, getAttribute(k) {return this.attrs.get(k);}, addEventListener() {}});
+  const element = (tag, className, textContent) => ({tag, className, textContent, attrs: new Map(), children: [], style: {}, dataset: {}, appendChild(child) {this.children.push(child);}, setAttribute(k, v) {this.attrs.set(k, v);}, getAttribute(k) {return this.attrs.get(k);}, addEventListener() {}});
   const context = {URL, TextEncoder, btoa, partySwitchSettleMs: 0, window:{setTimeout() {}, localStorage:{getItem:k => stored.get(k), setItem:(k,v) => stored.set(k,v)}}, partyElement: element,
-    partyAction: (el, _key, click) => Object.assign(el, {click}),
+    partyAction: (el, key, click) => Object.assign(el, {key, click}),
+    partyLabel: key => key,
     partyEncodeText: text => Buffer.from(text).toString('base64url'),
     partyButtonElement: (_label, _style, _action, click) => ({click, prepend() {}}), partyIcon: () => ({}),
     send: (type, value) => events.push({type, value}), showPartyConfirm: config => confirmations.push(config)};
   vm.createContext(context);
   const switches = source.slice(source.indexOf('const buildPartySwitch ='), start);
-  vm.runInContext(switches + bridge + '\nglobalThis.buildBridge = buildPartyBrowserShare; globalThis.buildSwitch = buildPartySwitch;', context);
+  vm.runInContext(switches + bridge + '\nglobalThis.buildBridge = buildPartyBrowserShare; globalThis.buildHostSettings = buildPartyHostSettings;', context);
   const section = context.buildBridge(party);
   const input = section.children.find(child => child.tag === 'input' && child.className === 'party-browser-host');
   assert.ok(input, 'The harness must edit the actual browser address input');
   const button = section.children.at(-1), nuvioButton = section.children.at(-2);
-  return {input, button, nuvioButton, events, confirmations, sharingSwitch: () => context.buildSwitch('sharing', 'Share', '', party.sharing, 'partySharing')};
+  return {input, button, nuvioButton, events, confirmations,
+    sharingSwitch: () => context.buildHostSettings(party).children.find(row => row.key === 'sharing'),
+    hostSettings: () => context.buildHostSettings(party)};
 }
 test('host browser invite copies exactly the current code without granting stream consent', {skip: !source && 'Separate browser repository: desktop source unavailable'}, () => {
   const f = setup({code:'UXZ83H', sharing:false});
@@ -48,6 +51,31 @@ test('the existing sharing switch requires confirmation, while copying the defau
   assert.equal(f.events[1].type, 'partySharing'); assert.equal(f.events[1].value, 1);
   toggle.click(); // Revoking sharing requires no additional grant.
   assert.equal(f.events[2].type, 'partySharing'); assert.equal(f.events[2].value, 0);
+  assert.equal(f.confirmations.length, 1);
+});
+
+test('host menu renders separate Desktop and Browser-HLS switches with independent consent', {skip: !source && 'Separate browser repository: desktop source unavailable'}, () => {
+  const f = setup({code: 'UXZ83H', sharing: true, browserSharing: false, hlsPhase: 'ready'});
+  const rows = f.hostSettings().children;
+  const desktop = rows.find(row => row.key === 'sharing');
+  const browser = rows.find(row => row.key === 'browserSharing');
+  assert.ok(desktop && browser);
+  assert.equal(desktop.children[0].children[0].textContent, 'Share my stream');
+  assert.equal(browser.children[0].children[0].textContent, 'Browser-HLS freigeben');
+  assert.equal(desktop.getAttribute('role'), 'switch');
+  assert.equal(browser.getAttribute('role'), 'switch');
+  assert.equal(desktop.getAttribute('aria-checked'), 'true');
+  assert.equal(browser.getAttribute('aria-checked'), 'false');
+
+  browser.click();
+  assert.equal(f.events.length, 0);
+  assert.equal(f.confirmations.length, 1);
+  f.confirmations[0].onConfirm();
+  assert.deepEqual(f.events, [{type: 'partyBrowserSharing', value: 1}]);
+  assert.equal(desktop.getAttribute('aria-checked'), 'true');
+  desktop.click();
+  assert.deepEqual(f.events[1], {type: 'partySharing', value: 0});
+  assert.equal(browser.getAttribute('aria-checked'), 'true');
   assert.equal(f.confirmations.length, 1);
 });
 
