@@ -2,6 +2,14 @@
 
 Lokal, nicht committet. Kein Build, kein Deployment. Production bleibt unverändert.
 
+## Sessiondauer ab der 365-Tage-Änderung
+
+Ein erfolgreicher Login auf dem aktualisierten Preview setzt ein Cookie mit `Max-Age=31536000` (365 Tage) und derselben fest signierten serverseitigen Ablaufzeit. Seitenaufrufe verlängern die Session nicht. Bestehende 30-Tage-Cookies behalten ihren signierten Ablauf. Wer vorher auf 365 Tage wechseln möchte, meldet sich auf demselben Host ab und wieder an.
+
+365 Tage sind die maximale Laufzeit dieser Session. Chrome begrenzt persistente Cookies auf 400 Tage. Browser- und Profilregeln, privates Surfen oder gelöschte Website-Daten können eine erneute Anmeldung früher erforderlich machen. [Chrome-Dokumentation zur Cookie-Laufzeit](https://developer.chrome.com/blog/cookie-max-age-expires)
+
+Für die spätere Übernahme die Middleware, den Preview-Test und diese Doku in einem eigenen Commit bündeln. Nach Freigabe diesen Commit einzeln nach `feature/party-mobile-sync-control` und `feature/torbox-hls-mvp` übernehmen. Beide lokalen Branchstände enthalten die 30-Tage-Middleware und den Login-Fix bereits. Je Branch den Diff auf diese drei Dateien begrenzen und anschließend den gezielten Preview-Test ausführen.
+
 ## 1. Analyse
 
 - **Pages-Projekt `nuvio-watch-friends`:**
@@ -29,7 +37,7 @@ Lokal, nicht committet. Kein Build, kein Deployment. Production bleibt unveränd
     - Vergleich über SHA-256 in konstanter Zeit.
     - Bei Erfolg kommt `303` auf den ursprünglichen Pfad. `next` ist nur ein Pfad derselben Seite: keine fremde Domain, kein `//`, kein `\`, nicht `/__preview/…`. Offene Redirects sind damit ausgeschlossen.
   - **Session-Cookie** `__Host-nuvio_preview`:
-    - `Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=43200` (12 h).
+    - `Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=31536000` (365 Tage für neue Logins).
     - Inhalt: Ablaufzeit plus HMAC-SHA-256 über Host, Ablaufzeit und den Fingerabdruck des Passworts.
     - Folgen: Ein Cookie gilt nur für genau diesen Preview-Host. Ein Passwortwechsel beendet alle Sessions. Ein gefälschtes oder abgelaufenes Cookie wird abgelehnt.
     - `SameSite=Lax`, damit Einladungslinks aus Chat oder Mail ohne erneuten Login öffnen.
@@ -135,7 +143,7 @@ Lokal gilt `127.0.0.1` als Preview-Host, also mit Login.
 | Prüfung | Erwartet |
 |---|---|
 | Login, dann Einladungslink `/party/<Code>` | direkt in der Party, Supabase-Login wie bisher |
-| Reload, neuer Tab | weiter angemeldet (Cookie bis 12 h) |
+| Reload, neuer Tab | weiter angemeldet bis zum ursprünglichen Ablauf, sofern das Browserprofil das Cookie noch speichert |
 | Wiedergabe, Sync, Familienfreigabe | unverändert |
 | Cookie in den DevTools | `__Host-nuvio_preview`, `HttpOnly`, `Secure`, `SameSite=Lax`; keine Klartextwerte |
 | Passwort im Dashboard ändern und neues Deployment | alte Sessions abgelaufen, erneuter Login nötig |

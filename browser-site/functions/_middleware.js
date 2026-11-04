@@ -15,8 +15,8 @@ export const PRODUCTION_HOSTS = ['nuvio-watch-friends.pages.dev'];
 export const COOKIE_NAME = '__Host-nuvio_preview';
 export const LOGIN_PATH = '/__preview/login';
 export const LOGOUT_PATH = '/__preview/logout';
-// One login per device and preview host for 30 days (always with an expiry).
-export const SESSION_S = 30 * 24 * 3600;
+// Fixed lifetime from login. Existing cookies retain their signed expiry.
+export const SESSION_S = 365 * 24 * 3600;
 export const MIN_PASSWORD = 16;
 export const MIN_COOKIE_SECRET = 32;
 export const FAIL_LIMIT = 8;
