@@ -492,7 +492,9 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
     // party ends. Guests that already loaded it keep playing.
     val familyUrl = torboxPartyStream?.url?.takeIf { torboxFamilyOnly && torboxPartyStream?.mediaKey == key }
     val familyHost = partyState.party?.isHost == true && partyState.party?.media?.key == key
-    LaunchedEffect(partyId, key, sharing, familyUrl, familyAdmitted, familyHost) {
+    // Republish when members change, so kicked or departed members lose their grants at once.
+    val familyMembers = partyState.party?.members.orEmpty().map { it.id }.sorted()
+    LaunchedEffect(partyId, key, sharing, familyUrl, familyAdmitted, familyHost, familyMembers) {
         val previous = familySharePartyId
         if (previous != null && previous != partyId) {
             // Host left: no new grants. Guests keep what they already loaded.
@@ -508,12 +510,17 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
             familyShareStatus = if (familyUrl != null) "Familienfreigabe beendet (Share my stream ist aus)." else ""
             return@LaunchedEffect
         }
-        val members = partyState.party?.members.orEmpty().map { it.id }.toSet()
-        val admitted = familyAdmitted.filter { it in members }
-        val result = com.nuvio.app.features.party.PartyFamilyShare.publish(partyId, key, familyUrl, admitted, torboxPropagateToken)
-        familySharePartyId = partyId
-        familyShareRev = result.rev
-        familyShareStatus = result.message
+        // Someone who left or was removed is no longer admitted (a rejoin is a new member).
+        val admitted = familyAdmitted.filter { it in familyMembers }.toSet()
+        if (admitted != familyAdmitted) { familyAdmitted = admitted; return@LaunchedEffect } // Restarts with the pruned set.
+        // Short-lived share, renewed while it is on: a crash or host change ends it by itself.
+        while (isActive) {
+            val result = com.nuvio.app.features.party.PartyFamilyShare.publish(partyId, key, familyUrl, admitted, torboxPropagateToken)
+            familySharePartyId = partyId
+            familyShareRev = result.rev
+            familyShareStatus = result.message
+            delay(com.nuvio.app.features.party.FAMILY_SHARE_RENEW_MS)
+        }
     }
 
     LaunchedEffect(key, partyId) {

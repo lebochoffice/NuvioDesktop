@@ -16,7 +16,9 @@ const HOST_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DEVICE_ID = /^[A-Za-z0-9._:-]{1,128}$/;
 const GRANT = /^[A-Za-z0-9_-]{43}$/;
-export const LIMITS = {url: 4096, body: 16384, admitted: 16, shareDefaultS: 6 * 3600, shareMaxS: 12 * 3600, grantS: 15 * 60};
+// Short lifetimes: the Desktop renews a share every few minutes while it is
+// on, so a crashed host or a host change ends access by itself (S1/S2).
+export const LIMITS = {url: 4096, body: 16384, admitted: 16, shareDefaultS: 30 * 60, shareMaxS: 2 * 3600, grantS: 5 * 60};
 
 export function isTorboxStreamHost(host) {
   const name = String(host || '').toLowerCase();
@@ -99,7 +101,7 @@ export default {
 
     if (action === 'grant') {
       if (isHost) return json(400, {error: 'host'}, cors);
-      return forward({member_id: snapshot.member_id, media_key: mediaKey(snapshot.party.media)});
+      return forward({member_id: snapshot.member_id, media_key: mediaKey(snapshot.party.media), host_member_id: snapshot.party.host_member_id});
     }
     if (!isHost) return json(403, {error: 'not_host'}, cors);
     if (action === 'revoke') return forward({});
@@ -109,7 +111,7 @@ export default {
     const admitted = Array.isArray(body.admitted) ? [...new Set(body.admitted.map(String))] : [];
     if (admitted.length > LIMITS.admitted || admitted.some(id => id === snapshot.member_id || !memberIds.includes(id))) return json(400, {error: 'admitted'}, cors);
     const ttl = Math.min(LIMITS.shareMaxS, Math.max(60, Number.isFinite(Number(body.ttl_s)) ? Number(body.ttl_s) : LIMITS.shareDefaultS));
-    return forward({url: body.url, media_key: body.media_key, admitted, ttl_s: ttl, propagate_token: body.propagate_token === true});
+    return forward({url: body.url, media_key: body.media_key, admitted, ttl_s: ttl, propagate_token: body.propagate_token === true, host_member_id: snapshot.member_id});
   },
 };
 
@@ -133,12 +135,15 @@ export class PartyShare {
 
     if (action === 'share') {
       const expiresAt = now + body.ttl_s * 1000;
+      // A renewal with unchanged content keeps rev, so browsers do not refetch.
+      const same = active && active.url === body.url && active.media_key === body.media_key && active.host_member_id === body.host_member_id &&
+        active.propagate_token === body.propagate_token && JSON.stringify([...active.admitted].sort()) === JSON.stringify([...body.admitted].sort());
       const next = {url: body.url, media_key: body.media_key, admitted: body.admitted, expires_at: expiresAt,
-        rev: (share?.rev || 0) + 1, propagate_token: body.propagate_token};
+        rev: same ? active.rev : (share?.rev || 0) + 1, propagate_token: body.propagate_token, host_member_id: body.host_member_id};
       await storage.put('share', next);
       // Grants of members who are no longer admitted end now.
       for (const [key, grant] of await storage.list({prefix: 'grant:'})) {
-        if (!next.admitted.includes(grant.member_id) || grant.media_key !== next.media_key) await storage.delete(key);
+        if (!next.admitted.includes(grant.member_id) || grant.media_key !== next.media_key || grant.host_member_id !== next.host_member_id) await storage.delete(key);
       }
       await storage.setAlarm(expiresAt);
       return json(200, {ok: true, rev: next.rev, expires_at: expiresAt});
@@ -147,16 +152,18 @@ export class PartyShare {
     if (action === 'grant') {
       if (!active) return json(404, {error: 'no_share'});
       if (active.media_key !== body.media_key) return json(409, {error: 'media'});
+      // Bound to the host who published it: after a host change nothing is granted.
+      if (active.host_member_id !== body.host_member_id) return json(403, {error: 'host_changed'});
       if (!active.admitted.includes(body.member_id)) return json(403, {error: 'not_admitted'});
       const bytes = crypto.getRandomValues(new Uint8Array(32)), grant = toBase64Url(bytes);
       const expiresAt = Math.min(active.expires_at, now + LIMITS.grantS * 1000);
-      await storage.put(`grant:${await sha256Hex(grant)}`, {member_id: body.member_id, media_key: active.media_key, expires_at: expiresAt});
+      await storage.put(`grant:${await sha256Hex(grant)}`, {member_id: body.member_id, media_key: active.media_key, host_member_id: active.host_member_id, expires_at: expiresAt});
       return json(200, {grant, url: active.url, media_key: active.media_key, rev: active.rev, propagate_token: active.propagate_token, expires_at: expiresAt});
     }
     if (action === 'stream') {
       const key = `grant:${await sha256Hex(body.grant)}`, grant = await storage.get(key);
       if (!grant || grant.expires_at <= now) { if (grant) await storage.delete(key); return json(401, {error: 'grant'}); }
-      if (!active || !active.admitted.includes(grant.member_id) || active.media_key !== grant.media_key) {
+      if (!active || !active.admitted.includes(grant.member_id) || active.media_key !== grant.media_key || active.host_member_id !== grant.host_member_id) {
         await storage.delete(key); return json(403, {error: 'revoked'});
       }
       return json(200, {url: active.url, media_key: active.media_key, rev: active.rev, propagate_token: active.propagate_token, expires_at: grant.expires_at});

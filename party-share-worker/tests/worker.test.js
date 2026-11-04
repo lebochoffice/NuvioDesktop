@@ -128,3 +128,28 @@ test('foreign origins get no CORS access; malformed requests are rejected withou
   assert.equal((await h.call('stream', {grant: 'short'}, null)).status, 400);
   assert.equal(h.rpcCalls.length, calls);
 });
+
+test('a share is bound to the host who published it: after a host change nothing is granted', async () => {
+  const h = setup(); await h.share();
+  const {body: {grant}} = await h.call('grant', {}, 'anna-session-aaaaaaaaaaaaaaaa');
+  h.party.host_member_id = 'm-ben'; // Backend promoted another member (old host crashed).
+  const refused = await h.call('grant', {}, 'anna-session-aaaaaaaaaaaaaaaa');
+  assert.equal(refused.status, 403); assert.equal(refused.body.error, 'host_changed');
+  assert.ok(!JSON.stringify(refused.body).includes(FAKE_KEY));
+  // The new host may publish its own share; that ends the old host's grants.
+  assert.equal((await h.call('share', {url: URL_WITH_TOKEN, media_key: 'movie|tt1||', admitted: ['m-anna']}, 'ben-session-bbbbbbbbbbbbbbbbb')).status, 200);
+  assert.equal((await h.call('stream', {grant}, null)).status, 401);
+});
+
+test('short lifetimes: a renewal keeps rev, and an unrenewed share ends within its 30 min default', async () => {
+  assert.equal(LIMITS.grantS, 5 * 60); assert.equal(LIMITS.shareDefaultS, 30 * 60); assert.ok(LIMITS.shareMaxS <= 2 * 3600);
+  const h = setup();
+  assert.equal((await h.share()).body.rev, 1);
+  assert.equal((await h.share()).body.rev, 1); // Same content: browsers do not refetch.
+  assert.equal((await h.share(['m-anna', 'm-ben'])).body.rev, 2);
+  const capped = await h.share(['m-anna'], {ttl_s: 24 * 3600});
+  assert.ok(capped.body.expires_at - 1_000_000 <= LIMITS.shareMaxS * 1000);
+  const fresh = setup(); await fresh.share(['m-anna'], {ttl_s: undefined});
+  fresh.advance(LIMITS.shareDefaultS * 1000 + 1); // Host crashed: no renewal.
+  assert.equal((await fresh.call('grant', {}, 'anna-session-aaaaaaaaaaaaaaaa')).status, 404);
+});

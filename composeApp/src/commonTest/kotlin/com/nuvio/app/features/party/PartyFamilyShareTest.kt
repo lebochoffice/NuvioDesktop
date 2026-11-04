@@ -47,6 +47,8 @@ class PartyFamilyShareTest {
         assertEquals(address, body["url"]!!.jsonPrimitive.content) // Token kept unchanged.
         assertEquals(listOf("m-anna"), body["admitted"]!!.jsonArray.map { it.jsonPrimitive.content })
         assertEquals("true", body["propagate_token"]!!.jsonPrimitive.content)
+        assertEquals(FAMILY_SHARE_TTL_S.toString(), body["ttl_s"]!!.jsonPrimitive.content) // Short-lived, renewed by the host.
+        assertTrue(FAMILY_SHARE_RENEW_MS < FAMILY_SHARE_TTL_S * 1000L)
         assertTrue(fakeToken !in result.message)
     }
 

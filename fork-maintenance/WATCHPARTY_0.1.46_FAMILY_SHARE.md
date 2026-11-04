@@ -30,11 +30,11 @@ Lokal, nicht committet. Kein MSI. Der Worker ist **nicht** deployt. Nicht live g
 
 - **Host → Worker (`/v1/share`, `/v1/revoke`):**
   - Der Desktop meldet sich mit seiner eigenen Nuvio-Session an. Der Worker ruft damit das offizielle `watch_party_heartbeat` auf und verlangt `member_id == host_member_id`.
-  - Erst dann speichert er Adresse, Titel (`media_key`), zugelassene Mitglieder (nur aktuelle Mitglieder, nicht der Host, höchstens 16) und die Ablaufzeit (Standard 6 h, höchstens 12 h).
+  - Erst dann speichert er Adresse, Titel (`media_key`), zugelassene Mitglieder (nur aktuelle Mitglieder, nicht der Host, höchstens 16) und die Ablaufzeit (Standard 30 min, höchstens 2 h; der Desktop verlängert alle 10 min, solange die Freigabe an ist). Gespeichert wird auch, **welcher Host** veröffentlicht hat; nach einem Host-Wechsel gibt es keine Grants mehr.
   - Er nimmt nur HTTPS-Adressen auf TorBox-Hosts an.
 - **Gast → Worker (`/v1/grant`):**
   - Der Browser meldet sich mit seiner eigenen Nuvio-Session an. Der Worker prüft die **aktuelle Mitgliedschaft serverseitig**, über dasselbe offizielle RPC mit dem JWT des Gastes, und dann die Zulassung durch den Host.
-  - Danach gibt er eine **eigene, zufällige Berechtigung** aus (256 Bit). Sie gilt 15 min, liegt nur als SHA-256 gespeichert vor und wird zusammen mit der Adresse übergeben.
+  - Danach gibt er eine **eigene, zufällige Berechtigung** aus (256 Bit). Sie gilt 5 min, liegt nur als SHA-256 gespeichert vor und wird zusammen mit der Adresse übergeben.
   - Der Party-Code allein reicht nicht. Ein Konto, das per Code beigetreten ist, bekommt nichts, solange der Host es nicht zulässt.
 - **Reconnect (`/v1/stream`):** Mit der Berechtigung erhält der Gast die aktuelle Adresse erneut, auch ohne Session. Nach Ablauf holt er sich mit Session eine neue, wieder mit Prüfung der Mitgliedschaft.
 - **Widerruf und Ablauf:**
@@ -42,7 +42,7 @@ Lokal, nicht committet. Kein MSI. Der Worker ist **nicht** deployt. Nicht live g
   - Nimmt der Host ein Mitglied heraus, werden dessen Berechtigungen gelöscht.
   - Bei Ablauf löscht ein Alarm alles.
   - Das Durable Object ist stark konsistent: Ein Widerruf gilt ab der nächsten Anfrage, anders als bei KV.
-- **Gekickte Mitglieder:** Der nächste `/grant` scheitert sofort, weil das RPC sie nicht mehr kennt. Eine schon ausgegebene Berechtigung gilt höchstens noch 15 min, außer der Host nimmt das Mitglied heraus. Dann ist sie sofort weg; der Desktop entfernt entfernte Mitglieder beim nächsten Veröffentlichen.
+- **Gekickte Mitglieder:** Der nächste `/grant` scheitert sofort, weil das RPC sie nicht mehr kennt. Der Desktop veröffentlicht bei jeder Änderung der Mitglieder neu und entfernt Ausgeschiedene aus der Zulassung; ihre Berechtigungen löscht der Worker dabei sofort. Ohne Desktop-Verbindung gilt eine schon ausgegebene Berechtigung höchstens noch 5 min.
 - **Keine Logs:** Der Worker schreibt nichts mit (`observability` aus, kein `console`). Antworten tragen `Cache-Control: no-store`, CORS ist nur für die eingetragenen Browser-Origins offen. Der TorBox-Key steht nie in der Worker-Konfiguration.
 - **Host verlässt die Party:** Neue Abrufe sind gesperrt. Gäste, die die Adresse schon geladen haben, schauen weiter (lokal „Allein“), solange TorBox die Adresse gelten lässt.
 - **Broadcast:** Das Realtime-`stream`-Ereignis enthält in diesem Modus **keine** URL, nur `browser_hls: {state: "family", rev}`. Nicht zugelassene Mitglieder und Fremde im Kanal erfahren nur, dass es eine Familienfreigabe gibt.
@@ -106,7 +106,7 @@ Neue Tests:
 - **Weitergabe des Keys an die Familie:** Siehe die Grenze in Abschnitt 3. Für Fremde gilt: Sie bekommen über unsere Infrastruktur nichts ohne Zulassung durch den Host. Diese Aussage hängt aber am offiziellen `watch_party_heartbeat`, das aktuelle Mitgliedschaft und Host-Rolle korrekt meldet. Das ist plausibel (die App selbst verlässt sich darauf), serverseitig aber nicht einsehbar.
 - **Zulassung pro Party:** Mitglieds-IDs gelten nur für eine Party, deshalb wird die Zulassung nicht gespeichert. Jede neue Party braucht neue Schalter.
 - **Desktop-Gäste:** In diesem Modus bekommen sie keine URL, denn das Original enthält den Key. Sie bräuchten eine eigene Nuvio-Quelle.
-- **Schließen des Players:** Schließt der Host den Player, ohne die Party zu verlassen, bleibt die Freigabe bis zu ihrem Ablauf (höchstens 6 h) bestehen. Neue Abrufe setzen aber weiter eine aktuelle Mitgliedschaft und die Zulassung voraus.
+- **Schließen des Players:** Schließt der Host den Player, ohne die Party zu verlassen, endet die Verlängerung; die Freigabe läuft spätestens nach 30 min ab. Neue Abrufe setzen aber weiter eine aktuelle Mitgliedschaft und die Zulassung voraus.
 - **Missbrauch:** Die Funktion ist nur so sicher wie die Zulassungsliste. Wer zugelassen ist, kann den Key extrahieren.
 - **Ohne Live-Test unbekannt:**
   - ob die Originaladresse mehrere gleichzeitige Geräte zulässt

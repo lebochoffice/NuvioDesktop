@@ -13,6 +13,10 @@ import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.put
 
+/** Lifetime the host asks for, and how often it renews while sharing (Worker caps at 2 h). */
+internal const val FAMILY_SHARE_TTL_S = 30 * 60
+internal const val FAMILY_SHARE_RENEW_MS = 10 * 60 * 1000L
+
 /**
  * Client of the family share Worker (party-share-worker/). The host hands it
  * the TorBox address with the account token over an authenticated request;
@@ -53,6 +57,7 @@ internal object PartyFamilyShare {
             put("url", url)
             put("admitted", buildJsonArray { admitted.forEach { add(JsonPrimitive(it)) } })
             put("propagate_token", propagateToken)
+            put("ttl_s", FAMILY_SHARE_TTL_S)
         }.toString()
         val response = send("share", body) ?: return Result(null, "Familienfreigabe nicht erreichbar. Netzwerk und Anmeldung prüfen.")
         return when (response.status) {
