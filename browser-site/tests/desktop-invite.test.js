@@ -22,15 +22,30 @@ function setup(party, initialStorage = {}) {
     send: (type, value) => events.push({type, value}), showPartyConfirm: config => confirmations.push(config)};
   vm.createContext(context);
   const switches = source.slice(source.indexOf('const buildPartySwitch ='), start);
-  vm.runInContext(switches + bridge + '\nglobalThis.buildBridge = buildPartyBrowserShare; globalThis.buildHostSettings = buildPartyHostSettings;', context);
+  const suggestion = source.slice(source.indexOf('const buildPartyHlsSuggestion ='), source.indexOf('const buildPartyHostHls ='));
+  vm.runInContext(switches + bridge + suggestion + '\nglobalThis.buildBridge = buildPartyBrowserShare; globalThis.buildHostSettings = buildPartyHostSettings; globalThis.buildSuggestion = buildPartyHlsSuggestion;', context);
   const section = context.buildBridge(party);
   const input = section.children.find(child => child.tag === 'input' && child.className === 'party-browser-host');
   assert.ok(input, 'The harness must edit the actual browser address input');
   const button = section.children.at(-1), nuvioButton = section.children.at(-2);
   return {input, button, nuvioButton, events, confirmations,
     sharingSwitch: () => context.buildHostSettings(party).children.find(row => row.key === 'sharing'),
-    hostSettings: () => context.buildHostSettings(party)};
+    hostSettings: () => context.buildHostSettings(party),
+    suggestion: () => context.buildSuggestion(party)};
 }
+
+test('host approval carries the exact proposal ID and the card uses the source hostname', {skip: !source && 'Separate browser repository: desktop source unavailable'}, () => {
+  const f = setup({code: 'UXZ83H', isHost: true, hlsSuggestionId: 42, hlsSuggestionFrom: 'Gast',
+    hlsSuggestionHost: 'stream.example.test', streamTitle: 'Film'});
+  const card = f.suggestion();
+  assert.match(card.children[1].textContent, /Film.*Gast.*stream\.example\.test/);
+  const [accept, reject] = card.children[2].children;
+  accept.click();
+  assert.deepEqual(f.events, []);
+  f.confirmations[0].onConfirm();
+  reject.click();
+  assert.deepEqual(f.events, [{type: 'partyHlsSuggestionAccept', value: 42}, {type: 'partyHlsSuggestionReject', value: 42}]);
+});
 test('host browser invite copies exactly the current code without granting stream consent', {skip: !source && 'Separate browser repository: desktop source unavailable'}, () => {
   const f = setup({code:'UXZ83H', sharing:false});
   f.input.value = 'https://MEINE-SEITE.pages.dev/'; f.button.click();

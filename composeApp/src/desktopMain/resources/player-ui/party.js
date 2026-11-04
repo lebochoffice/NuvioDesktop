@@ -673,23 +673,31 @@ const partyInputElement = (className, label, focusKey) => {
 // Own HLS link for the party, folded away by default. Sent only with the
 // explicit consent tick; the desktop checks it before anything is shared.
 let partyHostHlsOpen = false;
+const buildPartyHlsSuggestion = party => {
+  const id = party.hlsSuggestionId;
+  const from = String(party.hlsSuggestionFrom || "").trim();
+  const host = String(party.hlsSuggestionHost || "").trim();
+  const title = String(party.streamTitle || "Aktueller Titel");
+  const card = partyElement("div", "party-section party-card");
+  card.appendChild(partyElement("p", "party-card-title", "Video-Vorschlag"));
+  card.appendChild(partyElement("p", "party-text", `${title} · ${from} · ${host}`));
+  const actions = partyElement("div", "party-inline-row");
+  const accept = partyCompactButton("Für alle abspielen", "hlsSuggestionAccept", () => showPartyConfirm({
+    title: "Für alle abspielen?",
+    message: `Die Quelle von ${host} wird geprüft und als Browser-HLS freigegeben. Enthaltene Tokens sind für Party-Mitglieder sichtbar.`,
+    confirmLabel: "Prüfen und freigeben",
+    danger: false,
+    onConfirm: () => send("partyHlsSuggestionAccept", id),
+  }), "primary");
+  accept.disabled = Boolean(party.hostHlsBusy);
+  actions.appendChild(accept);
+  actions.appendChild(partyCompactButton("Ablehnen", "hlsSuggestionReject", () => send("partyHlsSuggestionReject", id)));
+  card.appendChild(actions);
+  return card;
+};
+
 const buildPartyHostHls = party => {
   const box = partyElement("div", "party-host-hls");
-  const from = String(party.hlsSuggestionFrom || "").trim();
-  if (from) {
-    const host = String(party.hlsSuggestionHost || "").trim();
-    const suggestion = partyElement("div", "party-inline-row");
-    suggestion.appendChild(partyElement("span", "party-row-label", `Link-Vorschlag von ${from}`));
-    suggestion.appendChild(partyCompactButton("Prüfen", "hlsSuggestionAccept", () => showPartyConfirm({
-      title: "Vorgeschlagenen Link freigeben?",
-      message: `Der Link von ${from} (${host}) wird geprüft und dann geteilt. Enthaltene Tokens sind für die Empfänger sichtbar.`,
-      confirmLabel: "Prüfen und freigeben",
-      danger: false,
-      onConfirm: () => send("partyHlsSuggestionAccept", 0),
-    }), "primary"));
-    suggestion.appendChild(partyCompactButton("Ablehnen", "hlsSuggestionReject", () => send("partyHlsSuggestionReject", 0)));
-    box.appendChild(suggestion);
-  }
   const status = String(party.hostHlsStatus || "").trim();
   if (party.hostHlsActive) {
     const row = partyElement("div", "party-inline-row");
@@ -788,6 +796,7 @@ const closeAndSendParty = type => {
 const buildPartyContent = party => {
   if (partyView === "smart") return buildPartySmart(party);
   const content = partyElement("div", "party-content");
+  if (party.isHost && Number.isInteger(party.hlsSuggestionId)) content.appendChild(buildPartyHlsSuggestion(party));
   const behind = String(party.behindTitle || "").trim();
   if (behind) {
     const section = partyElement("div", "party-section party-card");

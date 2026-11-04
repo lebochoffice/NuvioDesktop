@@ -69,6 +69,21 @@ class PartyHostHlsTest {
     }
 
     @Test
+    fun redirectTargetsAreCheckedBeforeTheDesktopRequestsThem() = runTest {
+        val url = "https://cdn.example.net/movie/index.m3u8"
+        val next = "https://cdn.example.net/movie/vod.m3u8"
+        fun redirect(location: String) = response(url, "", status = 302).copy(headers = mapOf("Location" to location))
+        val fetched = mutableListOf<String>()
+        assertEquals(PartyHostHlsCheck.Ok(url), check(url, mapOf(url to redirect("vod.m3u8"), next to response(next, vod)), fetched))
+        assertEquals(listOf(url, next), fetched)
+        for (target in listOf("https://127.1/a", "https://nas.home.arpa/a", "https://localhost./a", "https://cdn.example.net/a?token=account-secret")) {
+            fetched.clear()
+            assertIs<PartyHostHlsCheck.Problem>(check(url, mapOf(url to redirect(target)), fetched))
+            assertEquals(listOf(url), fetched)
+        }
+    }
+
+    @Test
     fun aTorBoxLinkWithTheKeyInTokenIsSharedOnlyWithoutTheKeyAndOnlyOnTorBoxHosts() = runTest {
         val keyed = "https://flux-007.wnam.tb-cdn.io/stream/p/0/0/0/0?token=account-secret"
         val keyFree = "https://flux-007.wnam.tb-cdn.io/stream/p/0/0/0/0"

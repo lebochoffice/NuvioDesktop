@@ -229,6 +229,7 @@ internal fun PlayerScreenRuntime.rememberPartyControlsState(): PlayerControlPart
         PlayerControlChatState(unread = unread)
     }
     val canSwitch = elsewhere && party.isHost
+    val pendingSuggestion = hlsSuggestion?.takeIf { party.isHost && !elsewhere && it.mediaKey == party.media.key }
     return base.copy(
         active = true,
         synced = !elsewhere,
@@ -307,9 +308,9 @@ internal fun PlayerScreenRuntime.rememberPartyControlsState(): PlayerControlPart
         hostHlsLabel = activeHostPartyHls?.label.orEmpty(),
         hostHlsBusy = hostPartyHlsBusy,
         hostHlsStatus = if (party.isHost) hostPartyHlsStatus else "",
-        hlsSuggestionFrom = hlsSuggestion?.takeIf { party.isHost && it.mediaKey == party.media.key }?.name.orEmpty(),
-        hlsSuggestionHost = hlsSuggestion?.takeIf { party.isHost && it.mediaKey == party.media.key }
-            ?.let { com.nuvio.app.features.party.partyHlsDisplayHost(it.url) }.orEmpty(),
+        hlsSuggestionFrom = pendingSuggestion?.let { it.name.trim().takeIf { name -> name.isNotEmpty() && "://" !in name }?.take(40) ?: "Gast" }.orEmpty(),
+        hlsSuggestionHost = pendingSuggestion?.let { com.nuvio.app.features.party.partyHlsDisplayHost(it.url) }.orEmpty(),
+        hlsSuggestionId = pendingSuggestion?.id,
         // Manual linking only when no unique cloud file was found automatically
         // (or to change an existing manual link).
         torboxLinkAvailable = party.isHost && !elsewhere && activeStream != null && activeStream?.torboxPartyFile == null &&
@@ -331,8 +332,8 @@ internal fun PlayerScreenRuntime.rememberPartyControlsState(): PlayerControlPart
         nowWatching = if (elsewhere) stringResource(Res.string.party_now_watching, party.media.displayTitle()) else "",
         switchLabel = if (canSwitch) stringResource(Res.string.party_switch, playerMedia.displayTitle()) else "",
         switchMessage = if (canSwitch) stringResource(Res.string.party_switch_message, playerMedia.displayTitle()) else "",
-        pillMessage = partyPillMessage(party, playback, notice).orEmpty(),
-        pillPinned = partyPillPinned(party, playback, notice),
+        pillMessage = if (pendingSuggestion != null) "Neuer Video-Vorschlag" else partyPillMessage(party, playback, notice).orEmpty(),
+        pillPinned = pendingSuggestion != null || partyPillPinned(party, playback, notice),
         chat = chat,
     )
 }
@@ -426,12 +427,17 @@ internal fun PlayerScreenRuntime.handlePartyControlsEvent(type: String, value: D
         "partyHlsSuggestionAccept" -> {
             val suggestion = PartyRepository.hlsSuggestion.value
             val party = PartyRepository.state.value.party
-            if (party?.isHost == true && suggestion != null && suggestion.mediaKey == party.media.key) {
-                PartyRepository.dismissHlsSuggestion()
-                shareHostPartyHls(suggestion.url, "Video-Link von ${suggestion.name.take(40)}")
+            if (party?.isHost == true && suggestion != null && value == suggestion.id.toDouble() &&
+                suggestion.mediaKey == party.media.key && party.media.key == partyKey && !hostPartyHlsBusy &&
+                PartyRepository.dismissHlsSuggestion(suggestion)) {
+                shareHostPartyHls(suggestion.url, "Video-Link des Hosts")
             }
         }
-        "partyHlsSuggestionReject" -> PartyRepository.dismissHlsSuggestion()
+        "partyHlsSuggestionReject" -> {
+            val suggestion = PartyRepository.hlsSuggestion.value
+            if (PartyRepository.state.value.party?.isHost == true &&
+                suggestion != null && suggestion.id.toDouble() == value) PartyRepository.dismissHlsSuggestion(suggestion)
+        }
         "partyTorboxList" -> loadTorboxCloudChoices()
         "partyTorboxClose" -> { torboxChoices = null; torboxChoicesFor = null; torboxChoicesStatus = "" }
         "partyTorboxUnlink" -> {

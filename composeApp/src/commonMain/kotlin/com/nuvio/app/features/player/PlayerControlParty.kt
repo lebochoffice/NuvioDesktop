@@ -64,6 +64,7 @@ data class PlayerControlPartyState(
     // Pending guest proposal: name and host name only.
     val hlsSuggestionFrom: String = "",
     val hlsSuggestionHost: String = "",
+    val hlsSuggestionId: Int? = null,
     // "Mit TorBox-Datei verknüpfen" for addon streams without TorBox identity.
     val torboxLinkAvailable: Boolean = false,
     val torboxLinkedName: String = "",

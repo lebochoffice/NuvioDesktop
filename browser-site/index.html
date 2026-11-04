@@ -17,7 +17,7 @@
   <!-- Transient status toast (no permanent banner). -->
   <p id="message" class="toast" role="status" aria-live="polite" hidden></p>
 
-  <main class="app">
+  <main id="partyApp" class="app">
     <!-- Invitation: before joining. -->
     <section id="inviteView" class="invite">
       <article class="invite-card" aria-labelledby="inviteTitle">
@@ -71,7 +71,7 @@
         <div class="player-top">
           <button id="ctlBack" class="icon-btn" type="button" aria-label="Zurück zur Einladung"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 12H6m6-6-6 6 6 6"/></svg></button>
           <!-- Compact participants badge (top right): inside the player, never shrinks it. -->
-          <button id="membersButton" class="members-badge" type="button" aria-controls="infoDrawer" aria-expanded="false"><span id="memberAvatars" class="avatar-stack" aria-hidden="true"></span><span id="memberCount">Teilnehmer</span></button>
+          <button id="membersButton" class="members-badge" type="button" aria-haspopup="dialog" aria-controls="infoDrawer" aria-expanded="false"><span id="memberAvatars" class="avatar-stack" aria-hidden="true"></span><span id="memberCount">Teilnehmer</span></button>
         </div>
 
         <div id="controlsBar" class="controls-bar">
@@ -93,14 +93,14 @@
             <div class="group right">
               <span id="syncChip" class="sync-chip" hidden>Synchron</span>
               <button id="resync" type="button" class="icon-btn resync-btn" aria-label="Party-Zeit aktualisieren" title="Party-Zeit aktualisieren" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.35-5.65M20 4v4.5h-4.5"/></svg></button>
+              <label id="qualityWrap" class="quality" hidden><span class="sr-only">Qualität</span><select id="quality" aria-label="Videoqualität"></select></label>
+              <button id="ctlSolo" class="solo-btn" type="button" aria-pressed="false" title="Lokal ohne Party-Synchronisierung weiterschauen">Allein schauen</button>
               <div class="cc-group">
                 <button id="ctlSubtitles" class="icon-btn" type="button" aria-label="Untertitel" aria-haspopup="menu" aria-expanded="false" aria-controls="subtitleMenu"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="5.5" width="17" height="13" rx="2.5"/><path d="M10.5 10.2a2.2 2.2 0 1 0 0 3.6M16.5 10.2a2.2 2.2 0 1 0 0 3.6"/></svg></button>
                 <div id="subtitleMenu" class="menu" role="menu" aria-label="Untertitel" hidden></div>
                 <input id="subtitleFile" type="file" accept=".vtt,.srt,text/vtt" hidden>
               </div>
-              <label id="qualityWrap" class="quality" hidden><span class="sr-only">Qualität</span><select id="quality" aria-label="Videoqualität"></select></label>
-              <button id="ctlSolo" class="solo-btn" type="button" aria-pressed="false" title="Lokal ohne Party-Synchronisierung weiterschauen">Allein schauen</button>
-              <button id="ctlChat" class="icon-btn" type="button" aria-label="Chat öffnen" aria-controls="infoDrawer"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5.5h16v10.5H9l-5 4z"/><path d="M8 9.5h8M8 12.5h5"/></svg></button>
+              <button id="ctlSettings" class="icon-btn" type="button" aria-label="Einstellungen" aria-haspopup="dialog" aria-expanded="false" aria-controls="infoDrawer"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m10 3-.6 2.6-2 .9L5 5.4 3 8.8l1.9 1.8v2.8L3 15.2l2 3.4 2.4-1.1 2 .9L10 21h4l.6-2.6 2-.9 2.4 1.1 2-3.4-1.9-1.8v-2.8L21 8.8l-2-3.4-2.4 1.1-2-.9L14 3z"/><circle cx="12" cy="12" r="3"/></svg></button>
               <button id="ctlFullscreen" class="icon-btn" type="button" aria-label="Vollbild"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/></svg></button>
             </div>
           </div>
@@ -111,38 +111,59 @@
 
   <!-- Info drawer: right on desktop, bottom sheet on phones. -->
   <div id="drawerScrim" class="scrim" hidden></div>
-  <aside id="infoDrawer" class="drawer" aria-label="Party-Info" hidden>
-    <div class="drawer-head"><h3>Party</h3><button id="drawerClose" class="icon-btn" type="button" aria-label="Schließen"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg></button></div>
-    <dl class="facts">
-      <div><dt>Host</dt><dd id="movieInfo">–</dd></div>
-      <div><dt>Party-Code</dt><dd id="drawerCode">–</dd></div>
-      <div><dt>Qualität</dt><dd id="qualityNote">Automatisch</dd></div>
-    </dl>
-    <p id="controlInfo" class="muted small">Steuerung: nur der Host.</p>
-    <section class="drawer-block"><h4>Teilnehmer</h4><ul id="memberList" class="members"></ul></section>
-    <details id="chatPanel" class="drawer-block"><summary>Chat</summary><div id="chatLog" class="chat" aria-live="polite"></div><form id="chatForm" class="chat-form"><input id="chatText" maxlength="500" placeholder="Nachricht schreiben …" aria-label="Chatnachricht" required><button type="submit" class="btn primary small">Senden</button></form></details>
-    <section id="personalHlsPanel" class="drawer-block video-link">
-      <h4>Video-Link</h4>
-      <form id="personalHlsForm" class="stack compact" autocomplete="off">
-        <label class="sr-only" for="personalHlsUrl">Video-Link (HTTPS-HLS-Playlist)</label>
-        <input id="personalHlsUrl" type="url" inputmode="url" autocomplete="off" spellcheck="false" maxlength="16384" placeholder="https://…/playlist.m3u8" aria-describedby="personalHlsStatus videoLinkFormats" required>
-        <label class="muted small" for="suggestToHost"><input id="suggestToHost" type="checkbox"> Auch dem Host als Party-Quelle vorschlagen. Der Host sieht den Link und kann ihn nach Prüfung für alle freigeben; enthaltene Tokens sind dann für alle sichtbar.</label>
-        <div class="button-row"><button id="loadPersonalHls" class="btn primary small" type="submit">Video laden</button><button id="useDesktopStream" type="button" class="btn ghost small" hidden>Zur Host-Quelle zurück</button></div>
-      </form>
-      <p id="personalHlsStatus" class="muted small" role="status" aria-live="polite">Die Eingabe wird nach dem Laden geleert und nicht dauerhaft gespeichert.</p>
-      <p id="videoLinkFormats" class="muted small">Unterstützt: HLS-Playlists (.m3u8) über HTTPS, keine Livestreams, dieselbe Filmfassung wie der Host. Keine Webseiten-Links (z. B. YouTube), kein DRM, keine lokalen Adressen. Der Link bleibt in diesem Browser und wird nur mit dem Häkchen oben an den Host gesendet.</p>
+  <aside id="infoDrawer" class="drawer" role="dialog" aria-modal="true" aria-labelledby="drawerTitle" hidden>
+    <div class="drawer-head"><h3 id="drawerTitle">Teilnehmer</h3><button id="drawerClose" class="icon-btn" type="button" aria-label="Schließen"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg></button></div>
+    <section id="participantsView" class="drawer-stack">
+      <p id="participantCount" class="muted small"></p>
+      <ul id="memberList" class="members"></ul>
+      <button id="participantSettings" class="btn ghost" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m10 3-.6 2.6-2 .9L5 5.4 3 8.8l1.9 1.8v2.8L3 15.2l2 3.4 2.4-1.1 2 .9L10 21h4l.6-2.6 2-.9 2.4 1.1 2-3.4-1.9-1.8v-2.8L21 8.8l-2-3.4-2.4 1.1-2-.9L14 3z"/><circle cx="12" cy="12" r="3"/></svg>Einstellungen</button>
     </section>
-    <details class="drawer-block"><summary>Technik</summary>
-      <p id="previewLogoutRow" class="muted small" hidden>Passwortgeschützte Testversion. <button type="button" id="previewLogout" class="linklike">Preview abmelden</button></p>
-      <div class="setting-row">
-        <label class="setting-text" for="autoHostStream"><span class="setting-title">Host-Stream automatisch verwenden</span><span class="setting-desc">Neue Folgen und freigegebene Streams automatisch laden.</span></label>
-        <span class="switch"><input id="autoHostStream" type="checkbox" role="switch"><span class="switch-track" aria-hidden="true"></span></span>
+    <section id="settingsView" class="drawer-stack" hidden>
+      <div id="settingsTabs" class="settings-tabs" role="tablist" aria-label="Einstellungen">
+        <button id="tabGeneral" role="tab" type="button" aria-controls="panelGeneral" aria-selected="true">Allgemein</button>
+        <button id="tabStream" role="tab" type="button" aria-controls="panelStream" aria-selected="false" tabindex="-1">Stream</button>
+        <button id="tabParty" role="tab" type="button" aria-controls="panelParty" aria-selected="false" tabindex="-1">Party</button>
+        <button id="tabChat" role="tab" type="button" aria-controls="panelChat" aria-selected="false" tabindex="-1">Chat</button>
+        <button id="tabAdvanced" role="tab" type="button" aria-controls="panelAdvanced" aria-selected="false" tabindex="-1">Erweitert</button>
       </div>
-      <p id="autoHostNote" class="muted small setting-note">Beim Laden erhält der Anbieter der Quelle deine IP-Adresse, wie bei einem manuellen Start. Ein eigener Video-Link wird dabei ersetzt.</p>
-      <p id="streamInfo" class="muted small">Nutze eine Desktop-Freigabe („Share my stream“) oder einen eigenen Video-Link.</p>
-      <p class="muted small">Debrid-Links und Tokens können beim Teilen für Party-Mitglieder sichtbar sein.</p>
-    </details>
-    <button id="leaveButton" type="button" class="btn ghost leave">Party verlassen</button>
+      <section id="panelGeneral" class="settings-panel" role="tabpanel" aria-labelledby="tabGeneral" tabindex="0">
+        <div class="setting-row" title="Beim Laden sieht der Medienanbieter deine IP. Eine neue Host-Quelle kann deinen lokalen Link ersetzen.">
+          <label class="setting-text" for="autoHostStream"><span class="setting-title">Host-Stream automatisch verwenden</span><span class="setting-desc">Neue Streams automatisch laden</span></label>
+          <span class="switch"><input id="autoHostStream" type="checkbox" role="switch"><span class="switch-track" aria-hidden="true"></span></span>
+        </div>
+      </section>
+      <section id="panelStream" class="settings-panel video-link" role="tabpanel" aria-labelledby="tabStream" tabindex="0" hidden>
+        <h4>Eigene HLS-Quelle</h4>
+        <form id="personalHlsForm" class="stack compact" autocomplete="off">
+          <label class="sr-only" for="personalHlsUrl">Video-Link (HTTPS-HLS-Playlist)</label>
+          <input id="personalHlsUrl" type="url" inputmode="url" autocomplete="off" spellcheck="false" maxlength="16384" placeholder="https://…/playlist.m3u8" aria-describedby="personalHlsStatus videoLinkFormats" required>
+          <div class="button-row"><button id="loadPersonalHls" class="btn ghost small" type="submit">Nur lokal laden</button><button id="loadAndSuggest" class="btn primary small" type="submit" aria-describedby="suggestNotice">Video laden &amp; vorschlagen</button></div>
+          <p id="suggestNotice" class="muted small">Beim Vorschlagen können Party-Mitglieder den Link samt Tokens sehen.</p>
+        </form>
+        <p id="videoLinkFormats" class="sr-only">Öffentliche HTTPS-HLS-Playlist derselben Filmfassung. Nur VOD.</p>
+        <p id="personalHlsStatus" class="muted small" role="status"></p>
+        <p id="suggestStatus" class="muted small" role="status"></p>
+        <button id="useDesktopStream" type="button" class="btn ghost small" hidden>Zur Host-Quelle zurück</button>
+        <p id="streamInfo" class="muted small">Warte auf eine Host-Quelle.</p>
+        <p id="qualityNote" class="muted small" hidden></p>
+      </section>
+      <section id="panelParty" class="settings-panel" role="tabpanel" aria-labelledby="tabParty" tabindex="0" hidden>
+        <p id="movieInfo" class="muted small"></p>
+        <div class="party-code-row"><span>Party-Code</span><strong id="drawerCode">–</strong><button id="copyPartyCode" type="button" class="btn ghost small">Kopieren</button></div>
+        <p id="controlInfo" class="sr-only"></p>
+        <button id="drawerResync" type="button" class="btn ghost" disabled>Mich synchronisieren</button>
+        <button id="leaveButton" type="button" class="btn ghost leave">Party verlassen</button>
+      </section>
+      <section id="panelChat" class="settings-panel" role="tabpanel" aria-labelledby="tabChat" tabindex="0" hidden>
+        <div id="chatLog" class="chat" role="log" aria-live="polite"></div>
+        <form id="chatForm" class="chat-form"><input id="chatText" maxlength="500" placeholder="Nachricht schreiben …" aria-label="Chatnachricht" required><button type="submit" class="btn primary small">Senden</button></form>
+      </section>
+      <section id="panelAdvanced" class="settings-panel" role="tabpanel" aria-labelledby="tabAdvanced" tabindex="0" hidden>
+        <div id="previewLogoutRow" hidden><button type="button" id="previewLogout" class="btn ghost small">Preview abmelden</button></div>
+        <button id="showDiagnostics" class="btn ghost small" type="button">Sync-Diagnose anzeigen</button>
+        <div id="diagnosticsPanel"></div>
+      </section>
+    </section>
   </aside>
   <script type="module" src="/src/main.js"></script>
 </body>

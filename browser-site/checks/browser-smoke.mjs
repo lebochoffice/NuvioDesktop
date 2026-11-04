@@ -63,7 +63,8 @@ try {
   await page.locator('#watchSection').waitFor({state:'visible'});
   await page.waitForFunction(() => document.getElementById('connection').textContent === 'Verbunden');
   assert.ok(requests.some(r => r.name === 'watch_party_join' && r.body.p_code === 'UXZ83H'));
-  await page.locator('#ctlChat').click(); // Chat lives in the info drawer.
+  await page.locator('#ctlSettings').click();
+  await page.locator('#tabChat').click();
   await page.getByText('<img src=x onerror=alert(1)>', {exact:false}).waitFor();
   assert.equal(await page.locator('#chatLog img').count(), 0);
   await page.locator('#chatText').fill('Hallo'); await page.locator('#chatForm button').click();

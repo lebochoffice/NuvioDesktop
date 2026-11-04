@@ -19,6 +19,9 @@ const playback = {seq: 1, member_id: 'host', paused: true, position_ms: 5000, ra
 
 class Element {
   constructor() { this.value = ''; this.style = {}; this.children = []; this.listeners = new Map(); this.hidden = false; this.disabled = false; }
+  setAttribute(name, value) { (this.attributes ||= new Map()).set(name, value); }
+  getAttribute(name) { return this.attributes?.get(name); }
+  focus() { this.focused = true; }
   addEventListener(event, callback) { this.listeners.set(event, [...(this.listeners.get(event) || []), callback]); }
   fire(event, details = {}) { for (const callback of this.listeners.get(event) || []) callback({preventDefault() {}, ...details}); }
   append(...elements) { this.children.push(...elements); }
@@ -102,7 +105,7 @@ async function harness({debug = false, guestControl = false, guestJoin = false, 
     session.playback = playback; session.handlers.room(session.room);
   }
   const source = () => vm.runInContext('personalHls', context);
-  const enter = () => { get('personalHlsUrl').value = privateUrl; get('personalHlsForm').fire('submit'); };
+  const enter = (submitter, url = privateUrl) => { get('personalHlsUrl').value = url; get('personalHlsForm').fire('submit', {submitter}); };
   const metadata = () => { player.readyState = 1; player.duration = 120; player.currentSrc = 'blob:local-test'; player.fire('loadedmetadata'); };
   return {get, player, session, source, enter, metadata, sent, storageWrites, windowEvents, anonymousSignIns, logins, joins, historyCalls,
     runTimers: () => { const due = timers.splice(0); due.forEach(callback => callback?.()); },
@@ -409,14 +412,14 @@ test('unreported internal HLS seeking and delayed native pause events do not dis
 });
 
 test('local diagnostics are opt-in, show only allowlisted fields and never reflect raw error or state payloads', async () => {
-  const off = await harness(); off.tick(); assert.equal(off.get('watchSection').children.length, 0);
+  const off = await harness(); off.tick(); assert.equal(off.get('diagnosticsPanel').children.length, 0);
   const h = await harness({debug: true}); h.enter(); h.metadata();
   h.player.play = () => Promise.reject({name: 'NotAllowedError', message: privateUrl});
   h.source().instance.emit(FakeHls.Events.LEVEL_LOADED, {details: vod});
   h.session.diagnostics.url = privateUrl; h.session.diagnostics.error = privateUrl;
   h.session.receive('state', {...playback, seq: 2, paused: false, token: privateUrl}); await settlePlayback();
   h.get('resync').fire('click'); await settlePlayback(); h.tick();
-  const text = h.get('watchSection').children.at(-1).children.at(-1).textContent;
+  const text = h.get('diagnosticsPanel').children.at(-1).children.at(-1).textContent;
   const data = JSON.parse(text);
   assert.equal(data.acceptedSource, 'realtime'); assert.equal(data.playbackSeq, 2);
   assert.equal(data.lastPlaybackError, 'NotAllowedError'); assert.equal(data.syncActive, false);
@@ -607,7 +610,7 @@ test('iOS-style native HLS skips hls.js and quality UI; Android-style hls.js get
   assert.equal(ios.desktopHls(), null); assert.equal(ios.player.src, 'https://stream.example.test/ios.m3u8');
   assert.equal(ios.get('qualityWrap').hidden, true);
   assert.match(ios.get('qualityNote').textContent, /vom Browser gewählt/); assert.equal(ios.get('qualityNote').hidden, false);
-  ios.tick(); assert.equal(JSON.parse(ios.get('watchSection').children.at(-1).children.at(-1).textContent).playbackMode, 'native-hls');
+  ios.tick(); assert.equal(JSON.parse(ios.get('diagnosticsPanel').children.at(-1).children.at(-1).textContent).playbackMode, 'native-hls');
 
   const android = await harness();
   android.session.handlers.stream({media_key: 'movie|tt1||', url: 'https://stream.example.test/android.m3u8'});
@@ -648,7 +651,7 @@ test('VITE_PARTY_GUEST_CONTROL=off: shared browser control is disabled even with
   h.get('ctlPlay').fire('click'); await settlePlayback(); // Player's own pause button.
   assert.equal(c.rpcs.length, 0); assert.equal(c.sends.length, 0); assert.equal(h.sync(), false); // Local only, as in PR #2.
   assert.equal(h.get('syncChip').textContent, 'Nicht synchron');
-  const data = JSON.parse(h.get('watchSection').children.at(-1).children.at(-1).textContent);
+  const data = JSON.parse(h.get('diagnosticsPanel').children.at(-1).children.at(-1).textContent);
   assert.equal(data.guestControl, false); assert.equal(data.controlBlockedReason, 'disabled_in_build');
   // Host commands still apply.
   h.get('resync').fire('click'); h.session.receive('state', {...playback, seq: 2, paused: true});
@@ -669,7 +672,7 @@ test('opt-in test build: the player controls (play, pause, seek bar) send server
   h.player.fire('seeking'); h.player.fire('seeked'); await settlePlayback();
   assert.deepEqual([c.rpcs[2][1].p_playback.position_ms, c.rpcs[2][1].p_playback.paused], [60000, false]);
   delete h.session.room.info.host_only; h.tick(); // A snapshot without the field never grants control.
-  assert.equal(JSON.parse(h.get('watchSection').children.at(-1).children.at(-1).textContent).controlBlockedReason, 'host_only_missing');
+  assert.equal(JSON.parse(h.get('diagnosticsPanel').children.at(-1).children.at(-1).textContent).controlBlockedReason, 'host_only_missing');
 });
 
 test('diagnostics add resolution, bandwidth, buffer, segment timing and realtime latency without URLs', async () => {
@@ -681,7 +684,7 @@ test('diagnostics add resolution, bandwidth, buffer, segment timing and realtime
   Object.assign(h.player, {videoWidth: 1920, videoHeight: 1080, currentTime: 10, buffered: {length: 1, start: () => 0, end: () => 22.5}});
   h.session.now = () => 1250; h.session.receive('state', {...playback, seq: 2, at: 1000});
   h.player.fire('waiting'); h.tick();
-  const text = h.get('watchSection').children.at(-1).children.at(-1).textContent, data = JSON.parse(text);
+  const text = h.get('diagnosticsPanel').children.at(-1).children.at(-1).textContent, data = JSON.parse(text);
   assert.deepEqual([data.playbackMode, data.videoWidth, data.videoHeight, data.bandwidthKbps, data.qualityVariants], ['hls.js', 1920, 1080, 4200, 2]);
   assert.deepEqual([data.bufferAheadSeconds, data.lastSegmentLoadMs, data.lastSegmentDurationSeconds, data.realtimeLatencyMs, data.bufferingEvents], [12.5, 1200, 6, 250, 1]);
   assert.ok(!text.includes('https://') && !text.includes('INTEGRATION_PRIVATE_SENTINEL'));
@@ -828,7 +831,7 @@ test('participant list renders names as text with host and own badges', async ()
   h.session.handlers.room(h.session.room);
   const items = h.get('memberList').children;
   assert.equal(items.length, 2);
-  assert.deepEqual(items.map(item => item.children.map(child => child.textContent)), [['A', 'Alan', 'Host'], ['<', '<img src=x onerror=alert(1)>', 'Du']]);
+  assert.deepEqual(items.map(item => item.children.map(child => child.textContent)), [['A', 'Alan', 'Host', 'Kein Status'], ['<', '<img src=x onerror=alert(1)>', 'Du', 'Kein Status']]);
   assert.equal(h.get('watchSection').hidden, false); assert.equal(h.get('inviteView').hidden, true);
 });
 
@@ -866,7 +869,8 @@ test('page markup: no banner headline, no hint bar, no permanent side column; co
   assert.match(html, /<label id="codeFallback"[^>]*hidden/);
   assert.match(html, /<p id="message"[^>]*hidden/);
   assert.match(html, /<aside id="infoDrawer"[^>]*hidden/);
-  for (const id of ['ctlPlay', 'ctlBack10', 'ctlFwd10', 'ctlMute', 'ctlSeek', 'ctlFullscreen', 'ctlSubtitles', 'ctlChat', 'ctlBack', 'syncChip', 'resync', 'membersButton']) assert.match(html, new RegExp(`id="${id}"`));
+  for (const id of ['ctlPlay', 'ctlBack10', 'ctlFwd10', 'ctlMute', 'ctlSeek', 'ctlFullscreen', 'ctlSubtitles', 'ctlSettings', 'ctlBack', 'syncChip', 'resync', 'membersButton']) assert.match(html, new RegExp(`id="${id}"`));
+  assert.match(html, /id="ctlSolo"[\s\S]*id="ctlSubtitles"[\s\S]*id="ctlSettings"[\s\S]*id="ctlFullscreen"/);
   assert.match(html, /id="resync"[^>]*aria-label="Party-Zeit aktualisieren"[^>]*title="Party-Zeit aktualisieren"[^>]*disabled><svg/); // Refresh icon.
   assert.ok(!html.includes('id="displayName"') && !html.includes('id="authSection"') && !html.includes('id="loginButton"'));
   assert.ok(html.indexOf('id="email"') < html.indexOf('id="password"') && html.indexOf('id="password"') < html.indexOf('id="joinButton"')); // Sign-in inline in the invitation.
@@ -899,10 +903,31 @@ test('own controls: ±10 s, fullscreen, drawer, participants strip and connectio
   h.get('ctlFullscreen').fire('click'); assert.equal(fullscreen, 1);
   h.get('membersButton').fire('click'); assert.equal(h.get('infoDrawer').hidden, false); assert.equal(h.get('drawerScrim').hidden, false);
   h.get('drawerScrim').fire('click'); assert.equal(h.get('infoDrawer').hidden, true);
-  h.get('ctlChat').fire('click'); assert.equal(h.get('chatPanel').open, true); h.get('drawerClose').fire('click');
+  h.get('ctlSettings').fire('click'); h.get('tabChat').fire('click'); assert.equal(h.get('panelChat').hidden, false); h.get('drawerClose').fire('click');
   h.session.handlers.connection('CHANNEL_ERROR'); assert.equal(h.get('syncChip').textContent, 'Verbindung unterbrochen');
   h.session.handlers.connection('SUBSCRIBED'); h.get('resync').fire('click'); h.tick();
   assert.equal(h.get('syncChip').textContent, 'Synchron');
+});
+
+test('participants and settings are separate, tabs support keyboard navigation and Escape restores focus', async () => {
+  const h = await harness();
+  h.get('membersButton').fire('click');
+  assert.equal(h.get('participantsView').hidden, false);
+  assert.equal(h.get('settingsView').hidden, true);
+  assert.equal(h.get('partyApp').inert, true);
+  h.get('participantSettings').fire('click');
+  assert.equal(h.get('participantsView').hidden, true);
+  assert.equal(h.get('settingsView').hidden, false);
+  assert.equal(h.get('panelGeneral').hidden, false);
+  h.get('tabGeneral').fire('keydown', {key: 'ArrowRight'});
+  assert.equal(h.get('panelGeneral').hidden, true);
+  assert.equal(h.get('panelStream').hidden, false);
+  assert.equal(h.get('tabStream').getAttribute('aria-selected'), 'true');
+  assert.equal(h.get('tabStream').focused, true);
+  h.windowEvents.get('keydown')({key: 'Escape', preventDefault() {}});
+  assert.equal(h.get('infoDrawer').hidden, true);
+  assert.equal(h.get('partyApp').inert, false);
+  assert.equal(h.get('membersButton').focused, true);
 });
 
 test('iOS without element fullscreen falls back to the native video fullscreen', async () => {
@@ -1331,7 +1356,7 @@ test('stream URLs are never stored; only the automatic-mode preference may be', 
 });
 
 // --- Automatic start and "Allein schauen". Written, not executed here. ---
-const debugData = h => { h.tick(); return JSON.parse(h.get('watchSection').children.at(-1).children.at(-1).textContent); };
+const debugData = h => { h.tick(); return JSON.parse(h.get('diagnosticsPanel').children.at(-1).children.at(-1).textContent); };
 const hostShare = url => ({media_key: 'movie|tt1||', url, stream_type: 'hls'});
 
 test('autostart: loaded → synced → playing without any click when the browser allows it', async () => {
@@ -1423,8 +1448,8 @@ test('Allein schauen: a renewed host source continues locally at the same positi
 test('the automatic-stream setting is a compact switch: the global full-width input rule cannot stretch it', () => {
   const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
   const css = readFileSync(new URL('../src/style.css', import.meta.url), 'utf8');
-  assert.match(html, /class="setting-row"[\s\S]*Host-Stream automatisch verwenden[\s\S]*Neue Folgen und freigegebene Streams automatisch laden\.[\s\S]*class="switch"><input id="autoHostStream" type="checkbox" role="switch">/);
-  assert.match(html, /id="autoHostNote"[^>]*>[^<]*IP-Adresse/); // Privacy note outside the narrow row.
+  assert.match(html, /class="setting-row"[\s\S]*Host-Stream automatisch verwenden[\s\S]*Neue Streams automatisch laden[\s\S]*class="switch"><input id="autoHostStream" type="checkbox" role="switch">/);
+  assert.match(html, /class="setting-row" title="[^"]*Medienanbieter deine IP/);
   assert.ok(!html.includes('check-row'));
   assert.match(css, /\.switch \{[^}]*flex: none; width: 44px/);
   assert.match(css, /\.switch input \{[^}]*width: 100%; height: 100%; margin: 0; padding: 0; opacity: 0/);
@@ -1447,7 +1472,7 @@ test('an addon stream without browser HLS (e.g. "[TB+] …" MKV) is explained, n
   const h = await harness({autoHost: true});
   h.session.handlers.stream({media_key: 'movie|tt1||', url: 'https://addon.example.test/resolve/film.mkv', name: '[TB+] LeLibrary 4K · HDR', filename: 'film.mkv'});
   assert.equal(h.desktopHls(), null); assert.equal(h.get('loadStream').hidden, true);
-  assert.match(h.get('streamInfo').textContent, /integrierten TorBox-Auflösung[\s\S]*„TB\+“ reicht dafür nicht/);
+  assert.match(h.get('streamInfo').textContent, /Host-Quelle im Browser nicht unterstützt/);
 });
 
 test('browser HLS states from the host are shown separately: preparing, denied, failed, then ready loads automatically', async () => {
@@ -1556,14 +1581,16 @@ test('reload rejoin: a party that is full or gone ends the automatic rejoin with
   assert.equal(joinedWrites(h).at(-1), '');
 });
 
-test('Video-Link: its own drawer block with input, "Video laden", status and "Zur Host-Quelle zurück"; formats stated honestly', () => {
+test('the Stream tab has distinct local and suggestion actions and a short privacy notice', () => {
   const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
-  const block = html.slice(html.indexOf('<section id="personalHlsPanel"'), html.indexOf('</section>', html.indexOf('<section id="personalHlsPanel"')));
-  assert.match(block, /<h4>Video-Link<\/h4>/);
-  assert.match(block, /id="personalHlsUrl"/); assert.match(block, />Video laden</); assert.match(block, />Zur Host-Quelle zurück</);
-  assert.match(block, /id="personalHlsStatus"/); assert.match(block, /HLS-Playlists \(\.m3u8\) über HTTPS[\s\S]*Keine Webseiten-Links[\s\S]*kein DRM/);
-  assert.ok(!html.includes('Eigene HLS-URL (Beta)'));
-  assert.ok(html.indexOf('id="personalHlsPanel"') < html.indexOf('<summary>Technik</summary>')); // Not nested in "Technik".
+  const start = html.indexOf('<section id="panelStream"');
+  const block = html.slice(start, html.indexOf('</section>', start));
+  assert.match(block, /<h4>Eigene HLS-Quelle<\/h4>/);
+  assert.match(block, /id="personalHlsUrl"/); assert.match(block, />Nur lokal laden</);
+  assert.match(block, />Video laden &amp; vorschlagen</); assert.match(block, />Zur Host-Quelle zurück</);
+  assert.match(block, /id="personalHlsStatus"/); assert.match(block, /Nur VOD/);
+  assert.match(block, /Party-Mitglieder den Link samt Tokens sehen/);
+  assert.ok(!html.includes('id="suggestToHost"'));
 });
 
 // --- Double click, URL after join, rejoin + host source. Written, not executed here. ---
@@ -1660,19 +1687,27 @@ test('revoking the shared link stops it; invalid links never load; non-host send
   assert.equal(instance.destroyed, true); assert.equal(h.player.paused, true); assert.equal(h.get('resync').disabled, true);
 });
 
-test('a personal link is suggested to the host only with the explicit checkbox, and never applied by the sender', async () => {
+test('only the explicit suggestion action broadcasts a valid guest link and never applies it for others', async () => {
   const h = await harness(), channel = [];
+  h.session.room.memberId = 'guest';
   h.session.channel = {send: async message => { channel.push(message); return 'ok'; }};
-  h.enter(); await settlePlayback();
-  assert.equal(channel.filter(m => m.event === 'stream_suggest').length, 0); // No checkbox: the link stays private.
-  h.get('suggestToHost').checked = true; h.enter(); await settlePlayback();
+  h.enter(h.get('loadPersonalHls'));
+  h.enter(h.get('loadAndSuggest'), 'https://localhost./secret');
+  await settlePlayback();
+  assert.equal(channel.filter(m => m.event === 'stream_suggest').length, 0);
+  h.enter(h.get('loadAndSuggest')); await settlePlayback();
   const suggestions = channel.filter(m => m.event === 'stream_suggest');
   assert.equal(suggestions.length, 1);
   assert.deepEqual(suggestions[0].payload, {member_id: h.session.room.memberId, media_key: 'movie|tt1||', url: privateUrl});
-  assert.equal(h.get('suggestToHost').checked, false); // Consent covers one link only.
-  assert.match(h.get('message').textContent, /Vorschlag an den Host gesendet/);
+  assert.match(h.get('suggestStatus').textContent, /Vorschlag gesendet/);
   assert.equal(h.desktopHls(), null); // The sender keeps its private source; nothing is shared by itself.
   assert.ok(!JSON.stringify(h.storageWrites).includes('INTEGRATION_PRIVATE_SENTINEL'));
+  assert.ok(!h.get('suggestStatus').textContent.includes('INTEGRATION_PRIVATE_SENTINEL'));
+  h.session.room.memberId = 'host';
+  h.session.handlers.room(h.session.room);
+  assert.equal(h.get('loadAndSuggest').hidden, true);
+  h.enter(h.get('loadAndSuggest')); await settlePlayback();
+  assert.equal(channel.filter(m => m.event === 'stream_suggest').length, 1);
 });
 
 test('a personal VOD follows the party time by itself once it is seekable, with bounded retries', async () => {

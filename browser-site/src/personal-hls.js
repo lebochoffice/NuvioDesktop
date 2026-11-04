@@ -6,7 +6,12 @@ export function personalHlsUrlProblem(value) {
     return 'Bitte eine gültige persönliche HTTPS-HLS-Playlist-URL eintragen.';
   }
   if (!safeStreamUrl(value.trim())) return 'Erlaubt ist nur eine öffentliche HTTPS-Playlist ohne Benutzername/Passwort im URL-Ursprung. Keine lokalen oder HTTP-Adressen.';
-  if (new URL(value.trim()).hash) return 'Die Playlist-URL darf keinen Fragmentteil (#…) enthalten.';
+  const url = new URL(value.trim());
+  const host = url.hostname.toLowerCase().replace(/\.+$/, '');
+  if ((!host.includes('.') && !host.includes(':')) || /(?:^|\.)(localhost|local|internal|home\.arpa)$/.test(host)) {
+    return 'Lokale oder interne Adressen sind für HLS nicht erlaubt.';
+  }
+  if (url.hash) return 'Die Playlist-URL darf keinen Fragmentteil (#…) enthalten.';
   // TorBox playlists can have opaque paths; .m3u8 is not required.
   return '';
 }

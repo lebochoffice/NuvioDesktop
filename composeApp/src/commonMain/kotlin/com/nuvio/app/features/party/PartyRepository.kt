@@ -77,8 +77,10 @@ object PartyRepository {
     // applied solely by the host's explicit confirmation in the party panel.
     private val _hlsSuggestion = MutableStateFlow<PartyHlsSuggestion?>(null)
     val hlsSuggestion: StateFlow<PartyHlsSuggestion?> = _hlsSuggestion.asStateFlow()
+    private var hlsSuggestionId = 0
 
-    fun dismissHlsSuggestion() { _hlsSuggestion.value = null }
+    fun dismissHlsSuggestion(suggestion: PartyHlsSuggestion): Boolean =
+        _hlsSuggestion.compareAndSet(suggestion, null)
 
     // Shared start (host announcement in server time); display only for members.
     private val _countdown = MutableStateFlow<PartyCountdown?>(null)
@@ -501,7 +503,7 @@ object PartyRepository {
                 val member = party.member(memberId)
                 if (!party.isHost || memberId == party.memberId || member == null) return
                 if (payload.string("media_key") != party.media.key || !isPublicHttpsUrl(url)) return
-                _hlsSuggestion.value = PartyHlsSuggestion(memberId, member.displayName, url, party.media.key)
+                _hlsSuggestion.value = PartyHlsSuggestion(++hlsSuggestionId, memberId, member.displayName, url, party.media.key)
             }
             "chat" -> PartyChat.receive(payload)
         }

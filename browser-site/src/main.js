@@ -75,7 +75,6 @@ const session = client ? new PartySession(client, deviceId, {
   room: room => {
     if (personalHls.active && personalHls.mediaKey !== mediaKey(room.info.media)) resetVideo('Filmkennung geändert. Bitte eine eigene Quelle für den neuen Film laden.');
     $('movieTitle').textContent = playerTitle(room.info.media);
-    $('movieInfo').textContent = `Host: ${room.members.find(m => m.id === room.info.host_member_id)?.display_name || 'Unbekannt'} · Bis zu ${room.info.max_members || 3} Personen`;
     renderMembers(room);
     renderControlInfo();
     showPanel('watch');
@@ -141,7 +140,7 @@ const session = client ? new PartySession(client, deviceId, {
     stream = offered;
     if (!stream) {
       resetVideo();
-      $('streamInfo').textContent = !browserPending || browserState === 'disabled' ? 'Keine aktive Browser-Freigabe. Der Host kann „Browser-HLS freigeben“ einschalten.'
+      $('streamInfo').textContent = !browserPending || browserState === 'disabled' ? 'Browser-HLS ist nicht freigegeben.'
         : browserState === 'denied' ? 'Browser-HLS nicht möglich: TorBox hat den Zugriff verweigert (Tarif oder Berechtigung). Eigenen Video-Link verwenden.'
         : browserState === 'failed' ? 'Browser-HLS konnte am Desktop nicht vorbereitet werden. Der Host kann „HLS erstellen / aktualisieren“ drücken, oder du lädst einen eigenen Video-Link.'
         : browserState === 'unsupported' ? 'Browser-HLS ist für diese Host-Quelle nicht möglich (TorBox stellt sie nicht sicher teilbar bereit). Eigenen Video-Link verwenden.'
@@ -157,7 +156,8 @@ const session = client ? new PartySession(client, deviceId, {
     soloResume = soloMode && loadedStream ? {seconds: player.currentTime, playing: !player.paused} : null;
     // Do not keep playing a revoked or superseded source until the next user click.
     resetVideo(); selectedStream = stream;
-    $('streamInfo').textContent = `Freigegebene Quelle: ${stream.name || stream.filename || 'Video'}. Laden überträgt deine IP-Adresse an den Medienanbieter. Die Quelladresse kann private Tokens enthalten.`;
+    const label = String(stream.name || '').trim().slice(0, 80);
+    $('streamInfo').textContent = label && !label.includes('://') ? `Host-Quelle: ${label}` : 'Host-Quelle verfügbar.';
     const problem = streamProblem(stream);
     $('loadStream').hidden = !!problem;
     if (problem) {
@@ -165,7 +165,7 @@ const session = client ? new PartySession(client, deviceId, {
       // (e.g. an addon stream, even if its name says "TB+"), so the browser
       // only has the original. Say so instead of pretending automation works.
       $('noStream').textContent = 'Diese Quelle kann der Browser nicht abspielen. Der Host kann eine andere Quelle teilen.';
-      $('streamInfo').textContent = 'Die freigegebene Host-Quelle ist für Browser nicht geeignet (z. B. MKV). Browser-HLS gibt es nur für Quellen aus der integrierten TorBox-Auflösung des Hosts; ein Addon-Name wie „TB+“ reicht dafür nicht. Alternativ einen eigenen Video-Link laden.';
+      $('streamInfo').textContent = 'Host-Quelle im Browser nicht unterstützt.';
       status(problem, true);
     }
     else if (autoHostStream && soloMode && soloResume) {
@@ -289,13 +289,21 @@ function renderMembers(room) {
   list.replaceChildren(...room.members.map(member => {
     const item = document.createElement('li'), avatar = document.createElement('span'), name = document.createElement('span');
     avatar.className = 'avatar'; renderAvatar(avatar, member);
+    const imageUrl = safeImageUrl(member.avatar_url);
+    if (imageUrl) {
+      const image = document.createElement('img');
+      image.alt = ''; image.referrerPolicy = 'no-referrer'; image.loading = 'lazy';
+      showImage(image, imageUrl); avatar.append(image);
+    }
     name.className = 'name'; name.textContent = member.display_name || 'Gast';
     item.append(avatar, name);
     if (member.id === room.info.host_member_id) { const badge = document.createElement('span'); badge.className = 'badge'; badge.textContent = 'Host'; item.append(badge); }
     if (member.id === room.memberId) { const badge = document.createElement('span'); badge.className = 'badge'; badge.textContent = 'Du'; item.append(badge); }
     // Estimated distance to the party time (display only, never a command).
-    const sync = memberSyncLabel(memberSyncFor(room, member));
-    if (sync) { const note = document.createElement('span'); note.className = 'member-sync'; note.textContent = sync; item.append(note); }
+    const sync = memberSyncFor(room, member), note = document.createElement('span');
+    note.className = `member-sync ${sync.state}`;
+    note.textContent = memberSyncLabel(sync) || 'Kein Status';
+    item.append(note);
     return item;
   }));
   // Compact strip under the player: up to five avatars plus the count.
@@ -305,7 +313,11 @@ function renderMembers(room) {
     return avatar;
   }));
   $('memberCount').textContent = `${room.members.length}/${room.info.max_members || 3} Teilnehmer`;
+  $('participantCount').textContent = room.members.length === 1 ? '1 Person' : `${room.members.length} Personen`;
+  $('movieInfo').textContent = `Host: ${room.members.find(m => m.id === room.info.host_member_id)?.display_name || 'Unbekannt'}`;
   $('drawerCode').textContent = room.info.code || '–';
+  $('loadAndSuggest').hidden = !room.memberId || !room.info.host_member_id || room.memberId === room.info.host_member_id;
+  $('suggestNotice').hidden = $('loadAndSuggest').hidden;
 }
 // Own row from the live player; others from their last status report.
 function memberSyncFor(room, member) {
@@ -360,6 +372,7 @@ function resetVideo(reason = 'Persönliche Quelle entfernt. Für diesen Film kan
   $('personalHlsUrl').value = '';
   $('useDesktopStream').hidden = true;
   $('personalHlsStatus').textContent = reason;
+  $('suggestStatus').textContent = '';
   syncEnabled = false; loading = false; buffering = false;
   selectedStream = loadedStream = null;
   if (hls) { hls.destroy(); hls = null; }
@@ -847,16 +860,41 @@ function toggleFullscreen() {
   if (wrap.requestFullscreen) Promise.resolve(wrap.requestFullscreen()).catch(() => {});
   else player.webkitEnterFullscreen?.(); // iOS Safari: native fullscreen player.
 }
-function openDrawer(section = 'info') {
+const drawerTabs = ['General', 'Stream', 'Party', 'Chat', 'Advanced'];
+let drawerOpener = null;
+function selectDrawerTab(selected, focus = false) {
+  for (const name of drawerTabs) {
+    const tab = $(`tab${name}`);
+    tab.setAttribute?.('aria-selected', String(name === selected));
+    tab.tabIndex = name === selected ? 0 : -1;
+    $(`panel${name}`).hidden = name !== selected;
+  }
+  if (focus) $(`tab${selected}`).focus?.();
+}
+function openDrawer(view, opener) {
   if (document.fullscreenElement) document.exitFullscreen?.(); // The drawer lives outside the player.
+  closeSubtitleMenu();
+  if ($('infoDrawer').hidden) drawerOpener = opener;
+  const participants = view === 'participants';
+  $('drawerTitle').textContent = participants ? 'Teilnehmer' : 'Einstellungen';
+  $('participantsView').hidden = !participants;
+  $('settingsView').hidden = participants;
+  if (!participants) selectDrawerTab('General');
   $('infoDrawer').hidden = false; $('drawerScrim').hidden = false;
-  $('membersButton').setAttribute?.('aria-expanded', 'true');
-  if (section === 'chat') { $('chatPanel').open = true; $('chatText').focus?.(); }
-  else $('drawerClose').focus?.();
+  $('partyApp').inert = true;
+  $('membersButton').setAttribute?.('aria-expanded', String(participants));
+  $('ctlSettings').setAttribute?.('aria-expanded', String(!participants));
+  $('drawerResync').disabled = $('resync').disabled;
+  $('drawerClose').focus?.();
 }
 function closeDrawer() {
+  if ($('infoDrawer').hidden) return;
   $('infoDrawer').hidden = true; $('drawerScrim').hidden = true;
+  $('partyApp').inert = false;
   $('membersButton').setAttribute?.('aria-expanded', 'false');
+  $('ctlSettings').setAttribute?.('aria-expanded', 'false');
+  if (!$('watchSection').hidden) drawerOpener?.focus?.();
+  drawerOpener = null;
 }
 // Back arrow: to the invitation without leaving the party. Local playback
 // pauses; "Zurück zur Party" re-joins the party time.
@@ -874,8 +912,27 @@ $('ctlFwd10').addEventListener('click', () => skip(10));
 $('ctlFullscreen').addEventListener('click', toggleFullscreen);
 $('ctlSolo').addEventListener('click', toggleSolo);
 $('ctlBack').addEventListener('click', backToInvite);
-$('ctlChat').addEventListener('click', () => openDrawer('chat'));
-$('membersButton').addEventListener('click', () => openDrawer('info'));
+$('ctlSettings').addEventListener('click', () => openDrawer('settings', $('ctlSettings')));
+$('membersButton').addEventListener('click', () => openDrawer('participants', $('membersButton')));
+$('participantSettings').addEventListener('click', () => openDrawer('settings'));
+for (const [index, name] of drawerTabs.entries()) {
+  const tab = $(`tab${name}`);
+  tab.addEventListener('click', () => selectDrawerTab(name));
+  tab.addEventListener('keydown', event => {
+    const target = {ArrowLeft: (index + drawerTabs.length - 1) % drawerTabs.length,
+      ArrowRight: (index + 1) % drawerTabs.length, Home: 0, End: drawerTabs.length - 1}[event.key];
+    if (target === undefined) return;
+    event.preventDefault();
+    selectDrawerTab(drawerTabs[target], true);
+  });
+}
+$('copyPartyCode').addEventListener('click', async () => {
+  const code = session?.room?.info.code;
+  if (!code || !validCode(code)) return;
+  try { await navigator.clipboard.writeText(code); status('Party-Code kopiert.'); }
+  catch { status('Kopieren nicht möglich. Der Party-Code steht im Menü.', true); }
+});
+$('drawerResync').addEventListener('click', () => { if (!$('resync').disabled) resyncNow(); });
 $('drawerClose').addEventListener('click', closeDrawer);
 $('drawerScrim').addEventListener('click', closeDrawer);
 $('ctlMute').addEventListener('click', () => { player.muted = !player.muted; if (!player.muted && autoStartPhase === 'muted') autoStartPhase = 'playing'; renderPlayerUi(); });
@@ -911,7 +968,21 @@ $('playerWrap').addEventListener('keydown', e => {
   else if (e.key === 'f' || e.key === 'F') toggleFullscreen();
   else if (e.key === 'm' || e.key === 'M') { player.muted = !player.muted; renderPlayerUi(); }
 });
-window.addEventListener('keydown', e => { if (e.key === 'Escape' && !$('infoDrawer').hidden) closeDrawer(); });
+window.addEventListener('keydown', e => {
+  if ($('infoDrawer').hidden) {
+    if (e.key === 'Escape' && !$('subtitleMenu').hidden) { closeSubtitleMenu(); $('ctlSubtitles').focus?.(); }
+    return;
+  }
+  if (e.key === 'Escape') { e.preventDefault(); closeDrawer(); return; }
+  if (e.key !== 'Tab') return;
+  const items = [...($('infoDrawer').querySelectorAll?.('button, input, select, summary, [tabindex]') || [])]
+    .filter(item => !item.disabled && item.tabIndex >= 0 && !item.closest('[hidden]'));
+  const first = items[0], last = items.at(-1);
+  if (e.shiftKey ? document.activeElement === first : document.activeElement === last) {
+    e.preventDefault();
+    (e.shiftKey ? last : first)?.focus();
+  }
+});
 // Mouse: single click = play/pause, double click = fullscreen. The single
 // click waits briefly, so a double click never sends two play/pause commands.
 // Touch keeps tap = show/hide controls (fullscreen via its button).
@@ -1091,35 +1162,40 @@ async function fetchFamilyStream(offer, attempt = 0) {
 $('personalHlsForm').addEventListener('submit', e => {
   e.preventDefault();
   const value = $('personalHlsUrl').value.trim();
-  // Never place the URL in selectedStream, PartySession, a broadcast or storage.
+  // Local loading never broadcasts the URL; only the explicit suggestion action does.
   $('personalHlsUrl').value = '';
   if (!session?.room) { status('Zuerst als angemeldetes Mitglied einer Party beitreten.', true); return; }
   const media = session.room.info.media;
   const currentMediaKey = media?.meta_type && media?.meta_id ? mediaKey(media) : '';
   const problem = personalHlsUrlProblem(value) || (!currentMediaKey ? 'Die Party hat noch keine gültige Filmkennung. Bitte den Host prüfen und erneut laden.' : '');
   if (problem) { $('personalHlsStatus').textContent = problem; status(problem, true); return; }
-  const suggest = $('suggestToHost').checked === true;
-  $('suggestToHost').checked = false; // Consent applies to this one link only.
-  if (suggest) {
-    session.suggestStream(value, currentMediaKey)
-      .then(() => status('Vorschlag an den Host gesendet. Er wird erst nach seiner Prüfung und Freigabe für alle verwendet.'))
-      .catch(() => status('Vorschlag konnte nicht gesendet werden. Party-Verbindung prüfen.', true));
-  }
+  const room = session.room;
+  const suggest = e.submitter === $('loadAndSuggest') && room.memberId && room.info.host_member_id && room.memberId !== room.info.host_member_id;
   const solo = soloMode;
   resetVideo();
   cancelPersonalAutoSync();
   if (!solo) personalAutoSync = {tries: 0, timer: null};
   loadedStream = {personal: true, media_key: currentMediaKey};
   loading = true;
+  const offer = loadedStream;
   $('useDesktopStream').hidden = false;
-  $('streamInfo').textContent = 'Persönliche HLS-Quelle gewählt. Desktop-Streammeldungen ersetzen sie nicht. Bei einem Filmwechsel wird sie gelöscht.';
-  $('personalHlsStatus').textContent = 'Playlist wird geprüft. Erreichbarkeit allein bestätigt weder Codec, Seek noch Wiedergabe.';
+  $('streamInfo').textContent = 'Persönliche HLS-Quelle';
+  $('personalHlsStatus').textContent = 'Playlist wird geprüft …';
   $('noStream').textContent = 'Persönliche HLS-Playlist wird geprüft …';
   status('Persönliche HLS-Playlist wird geladen und auf VOD geprüft.');
   try {
     const problem = personalHls.open(value, loadedStream.media_key);
     if (problem) failVideo(problem);
   } catch { failVideo('Die persönliche HLS-Quelle konnte nicht geöffnet werden. Bitte Link und Browser-Unterstützung prüfen.'); }
+  if (suggest && loadedStream === offer) {
+    const report = message => {
+      if (session.room === room && loadedStream === offer && mediaKey(room.info.media) === currentMediaKey) $('suggestStatus').textContent = message;
+    };
+    if (value.length > 4096) report('Link zu lang zum Vorschlagen.');
+    else session.suggestStream(value, currentMediaKey)
+      .then(() => report('Vorschlag gesendet. Der Host entscheidet über die Freigabe.'))
+      .catch(() => report('Vorschlag nicht gesendet. Verbindung prüfen.'));
+  }
   presence();
 });
 $('useDesktopStream').addEventListener('click', () => {
@@ -1272,11 +1348,16 @@ $('joinForm').addEventListener('submit', e => { e.preventDefault(); joinParty();
 // Preview password gate (functions/_middleware.js): the logout POST must carry
 // the real Origin, which "no-referrer" pages would send as "null"; this one
 // request therefore uses referrerPolicy "same-origin". Not on production.
-const PRODUCTION_HOST = 'nuvio-watch-friends.pages.dev';
-$('previewLogoutRow').hidden = !globalThis.location?.hostname || globalThis.location.hostname === PRODUCTION_HOST;
+$('previewLogoutRow').hidden = !globalThis.location?.hostname?.endsWith('.nuvio-watch-friends.pages.dev');
 $('previewLogout').addEventListener('click', async () => {
   try { await fetch('/__preview/logout', {method: 'POST', credentials: 'same-origin', referrerPolicy: 'same-origin', redirect: 'manual'}); } catch { /* Login page follows anyway. */ }
   globalThis.location?.assign?.('/__preview/login');
+});
+$('showDiagnostics').addEventListener('click', () => {
+  debugEnabled = true;
+  renderSyncDebug();
+  const details = $('diagnosticsPanel').firstElementChild;
+  if (details) { details.open = true; details.firstElementChild?.focus(); }
 });
 $('logoutButton').addEventListener('click', async () => { forgetJoinedParty(); await session?.close(); await client?.auth.signOut(); renderAuthState(false); showPanel('join'); status('Abgemeldet.'); });
 $('invitePlay').addEventListener('click', () => joinParty());
@@ -1407,9 +1488,10 @@ function renderSyncDebug() {
   if (!debugEnabled) return;
   if (!debugOutput) {
     const details = document.createElement('details'), title = document.createElement('summary');
-    title.textContent = 'Lokale Sync-Diagnose (ohne URLs oder Tokens)';
+    title.textContent = 'Lokale Sync-Diagnose';
     debugOutput = document.createElement('pre'); details.append(title, debugOutput);
-    $('watchSection').append(details);
+    $('diagnosticsPanel').append(details);
+    $('showDiagnostics').hidden = true;
   }
   const d = session?.diagnostics || {}, p = session?.playback;
   const number = value => Number.isFinite(value) ? value : null;
@@ -1469,6 +1551,7 @@ setInterval(() => {
     session.reportPosition?.().catch?.(() => {});
   }
   if (session?.room && !$('infoDrawer').hidden) renderMembers(session.room);
+  $('drawerResync').disabled = $('resync').disabled;
 }, 1000);
 $('leaveButton').addEventListener('click', async () => { forgetJoinedParty(); await session?.close(); showPanel('join'); status('Party verlassen.'); });
 $('chatForm').addEventListener('submit', async e => {
