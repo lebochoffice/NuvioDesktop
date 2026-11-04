@@ -20,11 +20,11 @@ class PartyFamilyShareTest {
     private val original = Triple(PartyFamilyShare.workerOrigin, PartyFamilyShare.post, PartyFamilyShare.accessToken)
     private val originalDevice = PartyFamilyShare.deviceId
 
-    private fun configure(status: Int = 200, body: String = """{"ok":true,"rev":3}""", session: String? = "host-session") {
+    private fun configure(status: Int = 200, body: String = """{"ok":true,"rev":3}""", session: String? = "host-session", headers: Map<String, String> = emptyMap()) {
         PartyFamilyShare.workerOrigin = "https://share.example.test"
         PartyFamilyShare.accessToken = { session }
         PartyFamilyShare.deviceId = { "device-1" }
-        PartyFamilyShare.post = { url, token, payload -> sent += Triple(url, token, payload); RawHttpResponse(status, "", url, body, emptyMap()) }
+        PartyFamilyShare.post = { url, token, payload -> sent += Triple(url, token, payload); RawHttpResponse(status, "", url, body, headers) }
     }
 
     @AfterTest
@@ -70,6 +70,20 @@ class PartyFamilyShareTest {
         configure(session = null)
         assertNull(PartyFamilyShare.publish("party-1", "movie|tt1||", address, listOf("m-anna"), propagateToken = false).rev)
         assertTrue(sent.isEmpty()) // No session: no request at all.
+    }
+
+    @Test
+    fun aThrottledShareIsRetriedAfterRetryAfterWithoutLosingTheState() = runTest {
+        configure(status = 429, body = """{"error":"rate_limited"}""", headers = mapOf("retry-after" to "120"))
+        val throttled = PartyFamilyShare.publish("party-1", "movie|tt1||", address, listOf("m-anna"), propagateToken = false)
+        assertEquals(120_000L, throttled.retryAfterMs); assertNull(throttled.rev)
+        assertTrue(fakeToken !in throttled.message)
+        configure(status = 429, body = "{}")
+        assertEquals(60_000L, PartyFamilyShare.publish("party-1", "movie|tt1||", address, listOf("m-anna"), propagateToken = false).retryAfterMs)
+        configure(status = 429, body = "{}", headers = mapOf("Retry-After" to "1"))
+        assertEquals(10_000L, PartyFamilyShare.publish("party-1", "movie|tt1||", address, listOf("m-anna"), propagateToken = false).retryAfterMs)
+        configure()
+        assertNull(PartyFamilyShare.publish("party-1", "movie|tt1||", address, listOf("m-anna"), propagateToken = false).retryAfterMs)
     }
 
     @Test

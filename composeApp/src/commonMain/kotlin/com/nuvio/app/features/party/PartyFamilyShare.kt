@@ -28,7 +28,8 @@ internal object PartyFamilyShare {
     internal var workerOrigin: String = PartyBrowserConfig.SHARE_WORKER
     val configured: Boolean get() = workerOrigin.isNotBlank()
 
-    data class Result(val rev: Int?, val message: String)
+    /** retryAfterMs: the Worker throttled (429); retry then, keeping the previous state. */
+    data class Result(val rev: Int?, val message: String, val retryAfterMs: Long? = null)
 
     // Injectable for tests; production sends the host's own Nuvio session.
     internal var post: suspend (url: String, token: String, body: String) -> RawHttpResponse = { url, token, body ->
@@ -65,6 +66,7 @@ internal object PartyFamilyShare {
                 runCatching { kotlinx.serialization.json.Json.parseToJsonElement(response.body).jsonObject["rev"] as? JsonPrimitive }.getOrNull()?.intOrNull,
                 "Familienfreigabe aktiv für ${admitted.size} ${if (admitted.size == 1) "Mitglied" else "Mitglieder"}.",
             )
+            429 -> Result(null, "Familienfreigabe kurz gedrosselt (zu viele Anfragen). Neuer Versuch folgt automatisch.", retryAfterMs(response))
             401, 403 -> Result(null, "Familienfreigabe abgelehnt: Anmeldung oder Host-Rolle nicht bestätigt.")
             409 -> Result(null, "Familienfreigabe abgelehnt: Titel hat gewechselt.")
             else -> Result(null, "Familienfreigabe fehlgeschlagen (HTTP ${response.status}).")
@@ -75,6 +77,12 @@ internal object PartyFamilyShare {
         if (!configured) return false
         val body = buildJsonObject { put("party_id", partyId); put("device_id", deviceId()) }.toString()
         return send("revoke", body)?.status == 200
+    }
+
+    // Retry-After in seconds, bounded to 10 s .. 10 min (default 60 s).
+    private fun retryAfterMs(response: RawHttpResponse): Long {
+        val seconds = response.headers.entries.firstOrNull { it.key.equals("Retry-After", ignoreCase = true) }?.value?.trim()?.toLongOrNull() ?: 60L
+        return seconds.coerceIn(10L, 600L) * 1000L
     }
 
     private suspend fun send(action: String, body: String): RawHttpResponse? {

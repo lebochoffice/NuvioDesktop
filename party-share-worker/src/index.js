@@ -45,7 +45,24 @@ function corsHeaders(request, env) {
   const origin = request.headers.get('Origin');
   const allowed = String(env.ALLOWED_ORIGINS || '').split(',').map(item => item.trim()).filter(Boolean);
   if (!origin || !allowed.includes(origin)) return {};
-  return {'Access-Control-Allow-Origin': origin, 'Access-Control-Allow-Methods': 'POST', 'Access-Control-Allow-Headers': 'Authorization, Content-Type', 'Access-Control-Max-Age': '600', Vary: 'Origin'};
+  return {'Access-Control-Allow-Origin': origin, 'Access-Control-Allow-Methods': 'POST', 'Access-Control-Allow-Headers': 'Authorization, Content-Type',
+    'Access-Control-Expose-Headers': 'Retry-After', 'Access-Control-Max-Age': '600', Vary: 'Origin'};
+}
+
+// Cloudflare Workers Rate Limiting bindings ([[ratelimits]] in wrangler.toml),
+// per client IP (each binding is its own budget; share and revoke share one).
+// Checked before the body is read and before any
+// Supabase RPC. Separate budgets: share/revoke (host), grant (session + RPC),
+// stream (grant only, used for reconnects, so it gets the largest budget).
+export const RATE_LIMITERS = {share: 'SHARE_RATE_LIMIT', revoke: 'SHARE_RATE_LIMIT', grant: 'GRANT_RATE_LIMIT', stream: 'STREAM_RATE_LIMIT'};
+export const RETRY_AFTER_S = 60;
+export async function rateLimited(request, env, action) {
+  const limiter = env[RATE_LIMITERS[action]];
+  // Not an access control: without a binding (or on a limiter error) requests
+  // still need a valid session or grant, so availability wins.
+  if (typeof limiter?.limit !== 'function') return false;
+  const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
+  try { return !(await limiter.limit({key: ip}))?.success; } catch { return false; }
 }
 
 const bearer = request => /^Bearer ([A-Za-z0-9._-]{20,4096})$/.exec(request.headers.get('Authorization') || '')?.[1] || '';
@@ -78,6 +95,7 @@ export default {
     if (request.method !== 'POST') return json(405, {error: 'method'}, cors);
     const action = new URL(request.url).pathname.replace(/^\/v1\//, '');
     if (!['share', 'revoke', 'grant', 'stream'].includes(action)) return json(404, {error: 'not_found'}, cors);
+    if (await rateLimited(request, env, action)) return json(429, {error: 'rate_limited'}, {...cors, 'Retry-After': String(RETRY_AFTER_S)});
     if (!env.SUPABASE_URL || !env.SUPABASE_ANON_KEY || !env.PARTY_SHARE) return json(503, {error: 'not_configured'}, cors);
     const body = await readBody(request);
     if (!body || !UUID.test(String(body.party_id || ''))) return json(400, {error: 'invalid'}, cors);

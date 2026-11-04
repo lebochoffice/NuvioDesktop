@@ -16,6 +16,25 @@ ALLOWED_ORIGINS = "https://feature-party-premium-ui.nuvio-watch-friends.pages.de
 name = "PARTY_SHARE"
 class_name = "PartyShare"
 
+# Workers Rate Limiting API (per client IP and action; period 10 or 60 s).
+# namespace_id: any positive integer unique within your Cloudflare account.
+# Budgets leave room for a whole family behind one home IP reconnecting:
+# a reconnect uses /v1/stream; /v1/grant is needed only every 5 min per guest.
+[[ratelimits]]
+name = "SHARE_RATE_LIMIT"
+namespace_id = "46001"
+simple = { limit = 10, period = 60 }
+
+[[ratelimits]]
+name = "GRANT_RATE_LIMIT"
+namespace_id = "46002"
+simple = { limit = 30, period = 60 }
+
+[[ratelimits]]
+name = "STREAM_RATE_LIMIT"
+namespace_id = "46003"
+simple = { limit = 60, period = 60 }
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["PartyShare"]

@@ -2,7 +2,7 @@
 // fake watch_party_heartbeat. No real keys, URLs or accounts.
 import {test} from 'node:test';
 import {strict as assert} from 'node:assert';
-import worker, {PartyShare, isTorboxStreamHost, isTorboxStreamUrl, LIMITS} from '../src/index.js';
+import worker, {PartyShare, isTorboxStreamHost, isTorboxStreamUrl, LIMITS, RETRY_AFTER_S} from '../src/index.js';
 
 const PARTY = '0b7f5a52-6a3e-4c55-9f43-1b2a3c4d5e6f';
 const FAKE_KEY = 'FAKE_ACCOUNT_TOKEN_FOR_TESTS';
@@ -20,7 +20,7 @@ class Storage {
   async setAlarm(at) { this.alarm = at; }
 }
 
-function setup() {
+function setup(extraEnv = {}) {
   let clock = 1_000_000;
   const storage = new Storage(), object = new PartyShare({storage}, {}, () => clock);
   // Session -> current membership as the official RPC would report it.
@@ -39,9 +39,9 @@ function setup() {
       members: [...sessions.values()].map(s => ({id: s.member_id}))}), {status: 200});
   };
   const env = {SUPABASE_URL: 'https://backend.example.test', SUPABASE_ANON_KEY: 'sb_publishable_TEST', ALLOWED_ORIGINS: ORIGIN,
-    PARTY_SHARE: {idFromName: name => name, get: () => ({fetch: request => object.fetch(request)})}};
-  const call = async (action, body, session, origin = ORIGIN) => {
-    const headers = {'Content-Type': 'application/json', Origin: origin};
+    PARTY_SHARE: {idFromName: name => name, get: () => ({fetch: request => object.fetch(request)})}, ...extraEnv};
+  const call = async (action, body, session, origin = ORIGIN, ip = '203.0.113.7') => {
+    const headers = {'Content-Type': 'application/json', Origin: origin, 'CF-Connecting-IP': ip};
     if (session) headers.Authorization = `Bearer ${session}`;
     const response = await worker.fetch(new Request(`https://share.example.test/v1/${action}`, {method: 'POST', headers, body: JSON.stringify({party_id: PARTY, device_id: 'device-1', ...body})}), env);
     return {status: response.status, body: await response.json(), headers: response.headers};
@@ -152,4 +152,50 @@ test('short lifetimes: a renewal keeps rev, and an unrenewed share ends within i
   const fresh = setup(); await fresh.share(['m-anna'], {ttl_s: undefined});
   fresh.advance(LIMITS.shareDefaultS * 1000 + 1); // Host crashed: no renewal.
   assert.equal((await fresh.call('grant', {}, 'anna-session-aaaaaaaaaaaaaaaa')).status, 404);
+});
+
+// Fake of the Workers Rate Limiting binding: a fixed budget per key.
+class Limiter {
+  constructor(limit) { this.limit_ = limit; this.counts = new Map(); this.keys = []; }
+  async limit({key}) { this.keys.push(key); const n = (this.counts.get(key) || 0) + 1; this.counts.set(key, n); return {success: n <= this.limit_}; }
+}
+
+test('rate limiting answers 429 before any body parsing or Supabase RPC, with Retry-After and CORS', async () => {
+  const grantLimit = new Limiter(2);
+  const h = setup({GRANT_RATE_LIMIT: grantLimit});
+  await h.share();
+  assert.equal((await h.call('grant', {}, 'anna-session-aaaaaaaaaaaaaaaa')).status, 200);
+  assert.equal((await h.call('grant', {}, 'anna-session-aaaaaaaaaaaaaaaa')).status, 200);
+  const rpcBefore = h.rpcCalls.length;
+  const limited = await h.call('grant', {}, 'stranger-session-cccccccccc');
+  assert.equal(limited.status, 429); assert.equal(limited.body.error, 'rate_limited');
+  assert.equal(limited.headers.get('Retry-After'), String(RETRY_AFTER_S));
+  assert.equal(limited.headers.get('Access-Control-Allow-Origin'), ORIGIN);
+  assert.match(limited.headers.get('Access-Control-Expose-Headers'), /Retry-After/);
+  assert.equal(h.rpcCalls.length, rpcBefore); // No RPC for a throttled request.
+  assert.ok(!JSON.stringify(limited.body).includes(FAKE_KEY));
+  assert.deepEqual([...new Set(grantLimit.keys)], ['203.0.113.7']); // Per client IP within the grant budget.
+  // Another IP has its own budget.
+  assert.equal((await h.call('grant', {}, 'anna-session-aaaaaaaaaaaaaaaa', ORIGIN, '198.51.100.9')).status, 200);
+});
+
+test('separate budgets: an exhausted grant budget never blocks reconnects through /v1/stream', async () => {
+  const h = setup({GRANT_RATE_LIMIT: new Limiter(1), STREAM_RATE_LIMIT: new Limiter(60), SHARE_RATE_LIMIT: new Limiter(10)});
+  await h.share();
+  const {body: {grant}} = await h.call('grant', {}, 'anna-session-aaaaaaaaaaaaaaaa');
+  assert.equal((await h.call('grant', {}, 'anna-session-aaaaaaaaaaaaaaaa')).status, 429);
+  for (let i = 0; i < 20; i++) assert.equal((await h.call('stream', {grant}, null)).status, 200); // Family reconnects.
+  // Host renewals and admission changes stay within the share budget.
+  for (let i = 0; i < 8; i++) assert.equal((await h.share()).status, 200);
+});
+
+test('share and revoke are throttled together; a missing or failing limiter never blocks access', async () => {
+  const shareLimit = new Limiter(1);
+  const h = setup({SHARE_RATE_LIMIT: shareLimit});
+  assert.equal((await h.share()).status, 200);
+  assert.equal((await h.call('revoke', {}, 'host-session-aaaaaaaaaaaaaaaa')).status, 429);
+  assert.deepEqual(shareLimit.keys, ['203.0.113.7', '203.0.113.7']); // One budget for share and revoke.
+  const broken = setup({GRANT_RATE_LIMIT: {limit: async () => { throw new Error('limiter down'); }}});
+  await broken.share();
+  assert.equal((await broken.call('grant', {}, 'anna-session-aaaaaaaaaaaaaaaa')).status, 200);
 });

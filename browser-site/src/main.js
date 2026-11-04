@@ -1007,7 +1007,8 @@ function loadStream() {
 
 // Admitted guests get the host's address from the share service with their own
 // session and membership; a per-guest grant refreshes it after a reconnect.
-async function fetchFamilyStream(offer) {
+const FAMILY_RETRY_LIMIT = 3;
+async function fetchFamilyStream(offer, attempt = 0) {
   const room = session?.room, request = ++familyRequest;
   if (!SHARE_WORKER) {
     $('streamInfo').textContent = 'Der Host teilt per Familienfreigabe. Sie ist in diesem Browser-Build nicht eingerichtet; eigenen Video-Link verwenden.';
@@ -1018,13 +1019,14 @@ async function fetchFamilyStream(offer) {
     const headers = {'Content-Type': 'application/json'};
     if (jwt) headers.Authorization = `Bearer ${jwt}`;
     const response = await fetch(`${SHARE_WORKER}/v1/${action}`, {method: 'POST', headers, body: JSON.stringify({party_id: room.info.id, ...body}), credentials: 'omit', cache: 'no-store'});
-    return {status: response.status, body: await response.json().catch(() => ({}))};
+    return {status: response.status, retryAfter: Number(response.headers?.get?.('Retry-After')), body: await response.json().catch(() => ({}))};
   };
   let result = null;
   try {
     if (familyGrant && familyGrant.party === room.info.id && familyGrant.expires > Date.now()) {
       result = await post('stream', {grant: familyGrant.grant});
-      if (result.status !== 200) { familyGrant = null; result = null; }
+      // A throttled reconnect keeps the grant; only a refused one is dropped.
+      if (result.status !== 200 && result.status !== 429) { familyGrant = null; result = null; }
     }
     if (!result) {
       const {data: {session: auth} = {}} = await client.auth.getSession();
@@ -1034,6 +1036,15 @@ async function fetchFamilyStream(offer) {
     }
   } catch { result = {status: 0, body: {}}; }
   if (request !== familyRequest || session?.room !== room) return; // Superseded.
+  if (result.status === 429) {
+    // Throttled by the Worker: the current source keeps playing; retry a few times.
+    const seconds = Number.isFinite(result.retryAfter) && result.retryAfter > 0 ? Math.min(result.retryAfter, 300) : 60;
+    if (attempt < FAMILY_RETRY_LIMIT) {
+      setTimeout(() => { if (request === familyRequest && session?.room === room) fetchFamilyStream(offer, attempt + 1); }, seconds * 1000);
+      $('streamInfo').textContent = `Familienfreigabe: gerade zu viele Anfragen. Neuer Versuch in ${seconds} s.`;
+    } else $('streamInfo').textContent = 'Familienfreigabe: weiterhin zu viele Anfragen. Beim nächsten Host-Update wird es erneut versucht.';
+    return;
+  }
   const url = result.status === 200 ? String(result.body.url || '') : '';
   if (!url || result.body.media_key !== offer.media_key) {
     // Not (or no longer) admitted: a running family source stops at once.

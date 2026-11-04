@@ -130,3 +130,28 @@ Optional: S5, S7, Referrer-Policy.
 - Logs: `fork-maintenance/local/worker-tests-0.1.46-fix.log`, `browser-tests-0.1.46-fix.log`, `desktop-tests-0.1.46-fix.log`.
 - Fork-Invarianten: OK.
 - Nicht live getestet, Worker nicht deployt.
+
+## Umsetzung S4 Rate-Limit (04.11.2026, nicht committet)
+
+- **Worker:** Cloudflare Workers Rate Limiting API mit drei Bindings, Schlüssel ist die Client-IP (`CF-Connecting-IP`).
+  - `SHARE_RATE_LIMIT`: 10 pro 60 s, gemeinsam für `share` und `revoke`
+  - `GRANT_RATE_LIMIT`: 30 pro 60 s
+  - `STREAM_RATE_LIMIT`: 60 pro 60 s
+  - Die Prüfung läuft **vor** dem Lesen des Bodys und vor jedem Supabase-RPC.
+  - Antwort `429 {error: "rate_limited"}` mit `Retry-After: 60`; CORS gibt `Retry-After` an den Browser frei.
+  - Ohne Binding oder bei einem Fehler des Limiters wird nicht blockiert. Das Limit ist keine Zugriffskontrolle; Session oder Grant bleiben nötig.
+- **Reconnects:** laufen über `/v1/stream` mit eigenem, großem Budget. `/v1/grant` ist pro Gast nur alle 5 min nötig, und 30 pro Minute reichen auch für eine Familie hinter einer IP.
+- **Desktop:** Bei 429 behält er den letzten Stand (`rev`), meldet „kurz gedrosselt“ und versucht es nach `Retry-After` erneut (10 s bis 10 min, Standard 60 s).
+- **Browser:** Bei 429 läuft die Quelle weiter, und der Grant bleibt erhalten. Höchstens 3 erneute Versuche nach `Retry-After` (höchstens 300 s), mit Hinweis.
+- **Tests:**
+  - Worker: 3 neue Tests (Limit vor dem RPC, getrennte Budgets mit freiem Reconnect, `share` und `revoke` gemeinsam, fehlender oder defekter Limiter)
+  - `PartyFamilyShareTest`: 429 mit und ohne `Retry-After`
+  - Browser: 429 mit erneutem Versuch, und ein gedrosselter Reconnect stoppt die Quelle nicht
+- **Live-Testplan:** `WATCHPARTY_0.1.46_LIVE_TESTPLAN.md`.
+
+### Testergebnis Rate-Limit (04.11.2026, lokal)
+
+- Worker: 11/11. Browser: 207/207. Desktop: 157/157, darunter `PartyFamilyShareTest` 5/5.
+- Logs: `fork-maintenance/local/worker-tests-ratelimit.log`, `browser-tests-ratelimit.log`, `desktop-tests-ratelimit.log`.
+- Fork-Invarianten: OK.
+- Nicht live getestet, Worker nicht deployt.

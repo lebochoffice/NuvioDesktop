@@ -81,7 +81,7 @@ async function harness({debug = false, guestControl = false, guestJoin = false, 
     fetch: async (url, init) => {
       if (!share) throw Error('Unexpected fetch');
       const reply = await share.handle(String(url).split('/v1/')[1], JSON.parse(init.body), init.headers || {});
-      return {status: reply.status, json: async () => reply.body};
+      return {status: reply.status, headers: {get: name => reply.headers?.[name] ?? null}, json: async () => reply.body};
     },
     env: {VITE_SUPABASE_URL: 'https://backend.example.test', VITE_SUPABASE_ANON_KEY: 'sb_publishable_TEST', ...(guestControl === true ? {VITE_PARTY_GUEST_CONTROL: '1'} : typeof guestControl === 'string' ? {VITE_PARTY_GUEST_CONTROL: guestControl} : {}), ...(guestJoin ? {VITE_PARTY_GUEST_JOIN: '1'} : {}), ...(share ? {VITE_PARTY_SHARE_WORKER: 'https://share.example.test'} : {})},
     document: {getElementById: get, createElement: () => new Element()}, location, history: {replaceState: (_state, _title, url) => { historyCalls.push(url); location.pathname = url; }},
@@ -1794,4 +1794,25 @@ test('when the host leaves, an admitted guest keeps watching the loaded family s
   h.session.handlers.ended('Der Host hat die Party verlassen.', 'host_left');
   assert.equal(instance.destroyed, undefined); assert.equal(h.get('ctlSolo').textContent, 'Zur Party');
   h.session.receive('stream', {member_id: 'host', stream: null});
+});
+
+test('a throttled family fetch (429) keeps the current state and retries after Retry-After', async () => {
+  const share = familyWorker();
+  let throttle = 1;
+  const handle = share.handle;
+  share.handle = async (action, body, headers) => {
+    if (throttle-- > 0) return {status: 429, body: {error: 'rate_limited'}, headers: {'Retry-After': '30'}};
+    return handle(action, body, headers);
+  };
+  const h = await harness({autoHost: true, share, rpc: familySignedIn});
+  h.session.receive('stream', {member_id: 'host', stream: familyOffer()}); await settlePlayback();
+  assert.equal(h.desktopHls(), null);
+  assert.match(h.get('streamInfo').textContent, /zu viele Anfragen.*30 s/);
+  h.runTimers(); await settlePlayback(); await settlePlayback();
+  assert.equal(h.desktopHls().source, FAMILY_URL); // The retry succeeded.
+  // A throttled reconnect does not stop the running source.
+  const instance = h.desktopHls();
+  throttle = 1;
+  h.session.receive('stream', {member_id: 'host', stream: familyOffer(2)}); await settlePlayback();
+  assert.equal(instance.destroyed, undefined);
 });

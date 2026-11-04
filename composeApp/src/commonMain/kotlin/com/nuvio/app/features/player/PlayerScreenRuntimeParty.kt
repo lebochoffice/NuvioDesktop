@@ -517,9 +517,10 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
         while (isActive) {
             val result = com.nuvio.app.features.party.PartyFamilyShare.publish(partyId, key, familyUrl, admitted, torboxPropagateToken)
             familySharePartyId = partyId
-            familyShareRev = result.rev
+            // Throttled: keep the last rev (guests keep their state) and retry sooner.
+            if (result.retryAfterMs == null) familyShareRev = result.rev
             familyShareStatus = result.message
-            delay(com.nuvio.app.features.party.FAMILY_SHARE_RENEW_MS)
+            delay(result.retryAfterMs ?: com.nuvio.app.features.party.FAMILY_SHARE_RENEW_MS)
         }
     }
 
