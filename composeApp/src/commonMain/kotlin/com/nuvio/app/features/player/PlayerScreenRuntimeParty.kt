@@ -515,6 +515,29 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
         if (sharing) PartyRepository.shareStream(sharedStream)
     }
 
+    // Shared start: everyone shows the countdown to the server-time start; at
+    // the start the host plays through the existing path (members follow the
+    // authoritative state). A play/pause before the start cancels it.
+    val countdown by PartyRepository.countdown.collectAsState()
+    LaunchedEffect(countdown, key) {
+        val running = countdown ?: return@LaunchedEffect
+        if (running.mediaKey != key) return@LaunchedEffect
+        var shown = -1
+        while (isActive) {
+            if (PartyRepository.countdown.value != running) return@LaunchedEffect
+            if (PartyRepository.playback.value?.paused == false) { PartyRepository.clearCountdown(); return@LaunchedEffect }
+            val left = running.startAt - PartyRepository.nowMs()
+            if (left <= 0L) break
+            val seconds = ((left + 999L) / 1000L).toInt()
+            if (seconds != shown) { shown = seconds; showPartyMessage("Start in $seconds …") }
+            delay(((left - 1L) % 1000L + 1L).coerceIn(20L, 1000L))
+        }
+        val party = PartyRepository.state.value.party
+        if (party?.isHost == true && party.media.key == key && PartyRepository.countdown.value == running) setPlaybackPlaying(true)
+        showPartyMessage("Los geht's!")
+        PartyRepository.clearCountdown()
+    }
+
     // Family share: publish the token address for the admitted members while
     // "Share my stream" is on; revoke when it is off, the title changes or the
     // party ends. Guests that already loaded it keep playing.
@@ -658,6 +681,7 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
                 lastStatus = reportedStatus
                 // Behind is only reported in the deliberate local mode: "Allein".
                 PartyRepository.setLocalStatus(status, partyKey, reportedStatus.third, solo = status == PartyMemberStatus.Behind)
+                if (status == PartyMemberStatus.Buffering) partyStatBuffering += 1
             }
 
             val controller = playerController
@@ -819,10 +843,14 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
             if (measureSeekLead && !playback.paused) {
                 measureSeekLead = false
                 if (abs(drift) < MAX_SEEK_LEAD_MS) seekLeadMs = (seekLeadMs - drift).coerceIn(0L, MAX_SEEK_LEAD_MS)
+                partyStatSeekLeadMs = seekLeadMs
             }
-            when (val correction = PartySync.correction(snapshot.positionMs, expected, playback, partyRateNudge != null)) {
+            when (val correction = PartySync.correction(snapshot.positionMs, expected, playback, partyRateNudge != null, allowNudge = partySmartNudge)) {
                 is PartyCorrection.Seek -> {
                     partyLog.i { "Seeking $drift ms back into sync with ${seekLeadMs} ms lead" }
+                    partyStatSeeks += 1
+                    partyStatLastCorrection = "Seek-Korrektur"
+                    partyStatLastCorrectionAt = PartyRepository.nowMs()
                     clearPartyNudge(playback)
                     val target = if (playback.paused) correction.positionMs else correction.positionMs + seekLeadMs
                     val clamped = if (snapshot.durationMs > 0L) target.coerceAtMost(snapshot.durationMs) else target
@@ -838,6 +866,9 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
                         partyLog.i { "Nudging speed to ${correction.rate} for ${snapshot.positionMs - expected} ms drift" }
                         partyRateNudge = correction.rate
                         controller.setPlaybackSpeed(correction.rate)
+                        partyStatNudges += 1
+                        partyStatLastCorrection = "Tempo-Korrektur"
+                        partyStatLastCorrectionAt = PartyRepository.nowMs()
                     }
                 }
                 PartyCorrection.InSync -> clearPartyNudge(playback)

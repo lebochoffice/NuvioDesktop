@@ -279,7 +279,7 @@ export class PartySession {
     this.channel = ch;
     this.noteConnection('CONNECTING');
     this.emit('connection', 'CONNECTING');
-    for (const event of ['state', 'stream', 'media', 'control', 'chat', 'ended', 'member_left', 'member_joined', 'state_request', 'status', 'ack']) {
+    for (const event of ['state', 'stream', 'media', 'control', 'chat', 'ended', 'member_left', 'member_joined', 'state_request', 'status', 'ack', 'countdown']) {
       ch.on('broadcast', {event}, ({payload}) => {
         if (gen === this.generation && this.room === room && this.channel === ch) this.receive(event, payload);
       });
@@ -359,6 +359,8 @@ export class PartySession {
       return;
     }
     if (event === 'stream' && payload.member_id === this.room.info.host_member_id) this.emit('stream', payload.stream ?? null);
+    // Shared start announced by the host (server time); display only.
+    if (event === 'countdown' && payload.member_id === this.room.info.host_member_id) this.emit('countdown', payload);
     // Database snapshots are authoritative for media, membership and host-only changes.
     if (['media', 'control', 'member_joined'].includes(event)) this.refresh();
     if (event === 'chat') this.loadMessages();

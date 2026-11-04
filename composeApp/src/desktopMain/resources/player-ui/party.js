@@ -384,7 +384,86 @@ const buildPartyMembers = party => {
   if (party.canSyncMe) section.appendChild(partyIconTextButton("icon-sync", "Mich synchronisieren", "party-sync-button", "syncMe", () => closeAndSendParty("partySyncMe")));
   const syncAll = String(party.syncAllStatus || "").trim();
   if (syncAll) section.appendChild(partyElement("p", syncAll.startsWith("Alle synchron") ? "party-detail center ok" : "party-detail center", syncAll));
+  const countdown = buildPartyCountdown(party);
+  if (countdown) section.appendChild(countdown);
+  const smart = partyAction(partyElement("button", "party-link-button"), "smartOpen", () => setPartyView("smart"));
+  smart.appendChild(partyIcon("icon-speed"));
+  smart.appendChild(partyElement("span", "", "Intelligente Wiedergabe"));
+  section.appendChild(smart);
   return section;
+};
+
+// Shared start (host, while paused): length 1-10 s, readiness of the others,
+// start or cancel. The start time is announced in server time.
+const buildPartyCountdown = party => {
+  if (party.countdownActive) {
+    const row = partyElement("div", "party-inline-row party-countdown");
+    row.appendChild(partyElement("span", "party-row-label", "Gemeinsamer Start läuft …"));
+    if (party.isHost) row.appendChild(partyCompactButton("Abbrechen", "countdownCancel", () => send("partyCountdownCancel", 0)));
+    return row;
+  }
+  if (!party.countdownAvailable) return null;
+  const box = partyElement("div", "party-countdown");
+  const row = partyElement("div", "party-inline-row");
+  row.appendChild(partyElement("span", "party-row-label", "Gemeinsam starten"));
+  const seconds = Math.min(10, Math.max(1, Number(party.countdownSeconds) || 3));
+  const minus = partyIconButton("icon-remove", "Kürzer", "muted", "countdownMinus", () => send("partyCountdownSeconds", seconds - 1));
+  minus.disabled = seconds <= 1;
+  const plus = partyIconButton("icon-add", "Länger", "muted", "countdownPlus", () => send("partyCountdownSeconds", seconds + 1));
+  plus.disabled = seconds >= 10;
+  row.appendChild(minus);
+  row.appendChild(partyElement("span", "party-chip", `${seconds} s`));
+  row.appendChild(plus);
+  const readiness = String(party.countdownReadiness || "").trim();
+  const waiting = readiness.startsWith("Wartet");
+  row.appendChild(partyCompactButton(waiting ? "Trotzdem starten" : "Starten", "countdownStart", () => send("partyCountdownStart", 0), "primary"));
+  box.appendChild(row);
+  if (readiness) box.appendChild(partyElement("p", waiting ? "party-detail" : "party-detail ok", readiness));
+  return box;
+};
+
+// Party view or the "Intelligente Wiedergabe" view inside the party tab.
+let partyView = "party";
+const setPartyView = view => {
+  partyView = view;
+  partyPanelKey = "";
+  if (activeModal === "party") renderPartyModal();
+};
+
+const partySmartRow = (label, value) => {
+  const row = partyElement("div", "party-inline-row");
+  row.appendChild(partyElement("span", "party-row-label", label));
+  row.appendChild(partyElement("span", "party-smart-value", value));
+  return row;
+};
+
+// Automatic part (read-only live values of the existing sync loop) and the
+// expert part (optional switches), clearly separated.
+const buildPartySmart = party => {
+  const content = partyElement("div", "party-content");
+  const back = partyAction(partyElement("button", "party-link-button left"), "smartBack", () => setPartyView("party"));
+  back.appendChild(partyIcon("icon-arrow-up"));
+  back.appendChild(partyElement("span", "", "Zurück zur Party"));
+  content.appendChild(back);
+
+  const auto = partyElement("div", "party-card");
+  auto.appendChild(partyElement("p", "party-card-title", "Automatik"));
+  auto.appendChild(partyElement("p", "party-detail", "Puffern, Mini-Korrekturen und Seek-Korrekturen laufen automatisch."));
+  auto.appendChild(partySmartRow("Mein Status", String(party.smartStatus || "–")));
+  auto.appendChild(partySmartRow("Tempo-Korrektur", party.smartNudgeActive ? "aktiv" : party.smartNudgeEnabled ? "bereit" : "aus"));
+  auto.appendChild(partySmartRow("Korrekturen", `${Number(party.smartSeeks) || 0} Seek · ${Number(party.smartNudges) || 0} Tempo`));
+  auto.appendChild(partySmartRow("Puffern", `${Number(party.smartBuffering) || 0}×`));
+  auto.appendChild(partySmartRow("Seek-Vorlauf", `${Number(party.smartSeekLeadMs) || 0} ms`));
+  const last = String(party.smartLastCorrection || "").trim();
+  if (last) auto.appendChild(partySmartRow("Zuletzt", last));
+  if (party.canSyncMe) auto.appendChild(partyIconTextButton("icon-sync", "Neu synchronisieren", "compact", "smartResync", () => closeAndSendParty("partySyncMe")));
+  content.appendChild(auto);
+
+  const expert = partyElement("div", "party-card");
+  expert.appendChild(partyElement("p", "party-card-title", "Experte"));
+  expert.appendChild(buildPartySwitch("smartNudge", "Mini-Korrekturen per Tempo", "Aus: nur Seek-Korrekturen bei größerer Abweichung.", party.smartNudgeEnabled !== false, "partySmartNudge"));
+  content.appendChild(expert);
+  return content;
 };
 
 // Stream share per member (shield): only members switched on here receive a
@@ -718,6 +797,7 @@ const closeAndSendParty = type => {
 };
 
 const buildPartyContent = party => {
+  if (partyView === "smart") return buildPartySmart(party);
   const content = partyElement("div", "party-content");
   const behind = String(party.behindTitle || "").trim();
   if (behind) {
@@ -1065,6 +1145,7 @@ const onPartyModalClosed = () => {
   }
   resetPartyChatList();
   closePartyConfirm();
+  partyView = "party";
   partyPanelKey = "";
   partyKnownMemberIds = null;
 };

@@ -80,6 +80,42 @@ object PartyRepository {
 
     fun dismissHlsSuggestion() { _hlsSuggestion.value = null }
 
+    // Shared start (host announcement in server time); display only for members.
+    private val _countdown = MutableStateFlow<PartyCountdown?>(null)
+    val countdown: StateFlow<PartyCountdown?> = _countdown.asStateFlow()
+
+    fun startCountdown(seconds: Int) {
+        scope.launch {
+            val party = _state.value.party ?: return@launch
+            if (!party.isHost) return@launch
+            val length = seconds.coerceIn(PARTY_COUNTDOWN_MIN_S, PARTY_COUNTDOWN_MAX_S)
+            val next = PartyCountdown(clock.nowMs() + length * 1_000L, length, party.media.key)
+            _countdown.value = next
+            runCatching {
+                channel?.send("countdown", buildJsonObject {
+                    put("member_id", party.memberId)
+                    put("media_key", next.mediaKey)
+                    put("start_at", next.startAt)
+                    put("seconds", next.seconds)
+                })
+            }
+        }
+    }
+
+    fun cancelCountdown() {
+        scope.launch {
+            val party = _state.value.party ?: return@launch
+            val running = _countdown.value ?: return@launch
+            _countdown.value = null
+            if (party.isHost && running.mediaKey == party.media.key) {
+                runCatching { channel?.send("countdown", buildJsonObject { put("member_id", party.memberId); put("cancel", true) }) }
+            }
+        }
+    }
+
+    /** Local end of a finished countdown (no broadcast). */
+    fun clearCountdown() { _countdown.value = null }
+
     private val _enabled = MutableStateFlow(true)
     val available: StateFlow<Boolean> = combine(ServerConfigurationRepository.active, _enabled) { server, enabled ->
         server.capabilities.watchParty && enabled
@@ -359,6 +395,7 @@ object PartyRepository {
         _playback.value = null
         _sharedStream.value = null
         _hlsSuggestion.value = null
+        _countdown.value = null
         _state.value = PartyUiState()
         PartyChat.stop()
     }
@@ -431,6 +468,14 @@ object PartyRepository {
                     ?.let { decode(it, PartyStream.serializer()) }
                     ?.takeIf { isShareableStreamUrl(it.url) }
                     ?.forDesktop() // HLS renewals must not restart Desktop guests.
+            }
+            "countdown" -> {
+                if (party.isHost) return
+                when (val signal = partyCountdownFrom(payload.string("member_id"), party.hostMemberId, party.media.key, payload, clock.nowMs())) {
+                    PartyCountdownSignal.Cancel -> _countdown.value = null
+                    is PartyCountdownSignal.Start -> _countdown.value = signal.countdown
+                    null -> Unit
+                }
             }
             "stream_suggest" -> {
                 // Realtime sender identities are not verified by the server: the
@@ -541,6 +586,7 @@ object PartyRepository {
         val name = party.member(memberId)?.displayName
         if (memberId == party.hostMemberId) _sharedStream.value = null
         if (_hlsSuggestion.value?.memberId == memberId) _hlsSuggestion.value = null
+        if (memberId == party.hostMemberId) _countdown.value = null
         updateParty { current ->
             current.copy(
                 members = current.members.filterNot { it.id == memberId },
@@ -597,6 +643,7 @@ object PartyRepository {
             _playback.value = playback?.takeIf { it.mediaKey == null || it.mediaKey == media.key }
             if (_sharedStream.value?.mediaKey != media.key) _sharedStream.value = null
             if (_hlsSuggestion.value?.mediaKey != media.key) _hlsSuggestion.value = null
+            if (_countdown.value?.mediaKey != media.key) _countdown.value = null
             ignoredWaiting.clear()
             waitStartedAt = null
             _events.tryEmit(PartyEvent.MediaChanged(media))

@@ -63,6 +63,8 @@ internal object PartySync {
         expectedPositionMs: Long,
         playback: PartyPlayback,
         nudging: Boolean,
+        // Expert option "Mini-Korrekturen per Tempo"; off = only seek corrections.
+        allowNudge: Boolean = true,
     ): PartyCorrection {
         val drift = localPositionMs - expectedPositionMs
         val distance = abs(drift)
@@ -72,7 +74,7 @@ internal object PartySync {
         val threshold = if (nudging) NUDGE_STOP_MS else NUDGE_START_MS
         return when {
             distance > SEEK_THRESHOLD_MS -> PartyCorrection.Seek(expectedPositionMs)
-            distance > threshold -> {
+            distance > threshold && allowNudge -> {
                 val factor = if (drift > 0L) 1f - NUDGE_FACTOR else 1f + NUDGE_FACTOR
                 PartyCorrection.Nudge(playback.rate * factor)
             }

@@ -22,6 +22,7 @@ const guestControlEnabled = guestControlMode !== 'off';
 // token) only to members the host admitted. Memory only, never stored/logged.
 const SHARE_WORKER = shareWorkerOrigin(import.meta.env.VITE_PARTY_SHARE_WORKER);
 let familyGrant = null, familyRequest = 0, familyStream = null;
+let countdownRun = 0;
 const configProblem = publicConfigProblem(url, key);
 const client = configProblem ? null : createClient(url, key, {
   auth: {autoRefreshToken: true, persistSession: true, detectSessionInUrl: false},
@@ -177,6 +178,22 @@ const session = client ? new PartySession(client, deviceId, {
     else { $('noStream').textContent = 'Stream bereit. Tippe auf ▶, um gemeinsam zu schauen.'; status('Stream bereit. Tippe auf ▶ zum Abspielen.'); }
   },
   media: () => { lastHostStreamEvent = undefined; soloMode = false; soloResume = null; resetVideo('Film gewechselt. Persönliche Quelle entfernt. Bitte eine neue eigene Quelle laden.'); $('streamInfo').textContent = 'Film gewechselt. Warte auf die neue Streamfreigabe oder lade eine eigene HLS-Quelle.'; },
+  // Shared start: count down to the host's server-time start; playback itself
+  // still follows the host's authoritative state (no local start here).
+  countdown: payload => {
+    const run = ++countdownRun;
+    if (payload?.cancel === true) { status('Gemeinsamer Start abgebrochen.'); return; }
+    const startAt = Number(payload?.start_at), seconds = Number(payload?.seconds);
+    if (!Number.isFinite(startAt) || !(seconds >= 1 && seconds <= 10) || payload?.media_key !== mediaKey(session.room?.info.media)) return;
+    const tick = () => {
+      if (run !== countdownRun || !session?.room) return;
+      const left = startAt - session.now();
+      if (left <= 0) { status('Los geht’s!'); return; }
+      status(`Gemeinsamer Start in ${Math.ceil(left / 1000)} …`);
+      setTimeout(tick, Math.min(1000, Math.max(20, ((left - 1) % 1000) + 1)));
+    };
+    tick();
+  },
   chat: message => {
     const line = document.createElement('div'), author = document.createElement('b');
     author.textContent = `${message.name || session.room?.members.find(m => m.id === message.member_id)?.display_name || 'Gast'}: `;

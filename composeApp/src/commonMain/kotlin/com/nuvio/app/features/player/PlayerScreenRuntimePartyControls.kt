@@ -84,6 +84,7 @@ internal fun PlayerScreenRuntime.rememberPartyControlsState(): PlayerControlPart
     val playback by PartyRepository.playback.collectAsStateWithLifecycle()
     val available by PartyRepository.available.collectAsStateWithLifecycle()
     val hlsSuggestion by PartyRepository.hlsSuggestion.collectAsStateWithLifecycle()
+    val countdown by PartyRepository.countdown.collectAsStateWithLifecycle()
     val notice = rememberPartyNotice()
     val avatar = rememberProfileAvatar()
     val clipboard = LocalClipboardManager.current
@@ -254,6 +255,20 @@ internal fun PlayerScreenRuntime.rememberPartyControlsState(): PlayerControlPart
             activeStream != null -> "Keine Cloud-Datei verknüpft"
             else -> ""
         },
+        countdownActive = countdown?.mediaKey == party.media.key,
+        countdownAvailable = party.isHost && !elsewhere && party.members.size > 1 && countdown == null && playback?.paused != false,
+        countdownSeconds = partyCountdownSeconds,
+        countdownReadiness = if (party.isHost && !elsewhere) countdownReadiness(party, nowMs, playback) else "",
+        smartStatus = members.firstOrNull { it.id == party.memberId }?.status.orEmpty(),
+        smartNudgeActive = partyRateNudge != null,
+        smartNudgeEnabled = partySmartNudge,
+        smartSeeks = partyStatSeeks,
+        smartNudges = partyStatNudges,
+        smartBuffering = partyStatBuffering,
+        smartSeekLeadMs = partyStatSeekLeadMs,
+        smartLastCorrection = partyStatLastCorrectionAt?.let { at ->
+            "$partyStatLastCorrection vor ${((nowMs - at).coerceAtLeast(0L) / 1000L)} s"
+        }.orEmpty(),
         canSyncMe = !party.isHost && !elsewhere,
         canSyncAll = party.isHost && !elsewhere && party.members.size > 1,
         syncAllStatus = partySyncAllAt?.takeIf { party.isHost && nowMs - it < SYNC_ALL_STATUS_MS }
@@ -431,6 +446,14 @@ internal fun PlayerScreenRuntime.handlePartyControlsEvent(type: String, value: D
         "partyCatchUp" -> catchUpWithParty()
         "partySyncMe" -> if (PartyRepository.state.value.party?.isHost == false) syncMeWithParty()
         "partySyncAll" -> syncEveryone()
+        "partyCountdownSeconds" -> partyCountdownSeconds = value.toInt().coerceIn(
+            com.nuvio.app.features.party.PARTY_COUNTDOWN_MIN_S, com.nuvio.app.features.party.PARTY_COUNTDOWN_MAX_S)
+        "partyCountdownStart" -> {
+            val party = PartyRepository.state.value.party
+            if (party?.isHost == true && party.media.key == partyKey) PartyRepository.startCountdown(partyCountdownSeconds)
+        }
+        "partyCountdownCancel" -> if (PartyRepository.state.value.party?.isHost == true) PartyRepository.cancelCountdown()
+        "partySmartNudge" -> partySmartNudge = value >= 0.5
         "partyLeave" -> leaveParty()
         "partyEnd" -> endParty()
         "partyChatVisible" -> partyChatVisible = value >= 0.5
@@ -485,6 +508,31 @@ private const val REMOVE_MEMBER_EVENT = "partyRemoveMember:"
 private const val CHAT_SEND_EVENT = "partyChatSend:"
 private const val HOST_HLS_EVENT = "partyHostHls:"
 private const val SYNC_ALL_STATUS_MS = 60_000L
+
+/**
+ * Readiness before a shared start, from the members' own reports: members on
+ * this title that are not loading/buffering count as ready; offline members
+ * and members watching alone do not block.
+ */
+private fun countdownReadiness(
+    party: com.nuvio.app.features.party.ActiveParty,
+    nowMs: Long,
+    playback: com.nuvio.app.features.party.PartyPlayback?,
+): String {
+    val joined = party.members.filter { it.id != party.memberId }
+        .filter { party.presenceState(it) != com.nuvio.app.features.party.PartyPresenceState.Offline }
+        .filter { PartySync.memberSync(party.presence[it.id], playback, party.media.key, nowMs).state != com.nuvio.app.features.party.MemberSync.Solo }
+    val waiting = joined.filter { member ->
+        val presence = party.presence[member.id]
+        presence == null || presence.mediaKey != party.media.key ||
+            presence.status in setOf(PartyMemberStatus.Loading, PartyMemberStatus.Buffering, PartyMemberStatus.Browsing)
+    }
+    return when {
+        joined.isEmpty() -> ""
+        waiting.isEmpty() -> "Alle bereit"
+        else -> "Wartet auf: ${waiting.joinToString { it.displayName.take(20) }}"
+    }
+}
 private const val SYNC_ALL_SETTLE_MS = 2_500L
 
 /**

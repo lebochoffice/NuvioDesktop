@@ -28,6 +28,20 @@ data class PlayerControlPartyState(
     // "Mich synchronisieren" (guest on the party title) and "Alle synchronisieren" (host).
     val canSyncMe: Boolean = false,
     val canSyncAll: Boolean = false,
+    // Shared start (host): offered while paused; running countdown; readiness.
+    val countdownAvailable: Boolean = false,
+    val countdownActive: Boolean = false,
+    val countdownSeconds: Int = 3,
+    val countdownReadiness: String = "",
+    // "Intelligente Wiedergabe": live values of the own player and the expert option.
+    val smartStatus: String = "",
+    val smartNudgeActive: Boolean = false,
+    val smartNudgeEnabled: Boolean = true,
+    val smartSeeks: Int = 0,
+    val smartNudges: Int = 0,
+    val smartBuffering: Int = 0,
+    val smartSeekLeadMs: Long = 0,
+    val smartLastCorrection: String = "",
     // Result of the host's last "Alle synchronisieren" (live, for about a minute).
     val syncAllStatus: String = "",
     // Short browser HLS state for a status chip ("sent", "ready", "preparing", …).

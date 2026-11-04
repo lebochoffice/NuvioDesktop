@@ -294,6 +294,17 @@ internal class PlayerScreenRuntime(
     var partyResyncRequest by mutableStateOf(0)
     // "Alle synchronisieren": party time (server clock) of the host's request.
     var partySyncAllAt by mutableStateOf<Long?>(null)
+    // Shared start: length the host picked (1-10 s).
+    var partyCountdownSeconds by mutableStateOf(3)
+    // "Intelligente Wiedergabe": expert option and live counters of the
+    // existing sync loop (display only; they never steer playback).
+    var partySmartNudge by mutableStateOf(true)
+    var partyStatSeeks by mutableStateOf(0)
+    var partyStatNudges by mutableStateOf(0)
+    var partyStatBuffering by mutableStateOf(0)
+    var partyStatSeekLeadMs by mutableStateOf(0L)
+    var partyStatLastCorrection by mutableStateOf("")
+    var partyStatLastCorrectionAt by mutableStateOf<Long?>(null)
     var torboxPartyStream by mutableStateOf<com.nuvio.app.features.party.PartyStream?>(null)
     var torboxPartyStatus by mutableStateOf("")
     var torboxPreparedFile by mutableStateOf<com.nuvio.app.features.debrid.TorboxPartyFile?>(null)

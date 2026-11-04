@@ -1819,3 +1819,29 @@ test('a throttled family fetch (429) keeps the current state and retries after R
   h.session.receive('stream', {member_id: 'host', stream: familyOffer(2)}); await settlePlayback();
   assert.equal(instance.destroyed, undefined);
 });
+
+// --- Phase B: shared start (display only; playback follows the host state) ---
+
+test('the host countdown is shown in server time, never starts playback by itself, and can be cancelled', async () => {
+  const h = await harness({autoHost: true});
+  h.session.receive('stream', {member_id: 'host', stream: {media_key: 'movie|tt1||', url: 'https://cdn.example.test/a.m3u8', stream_type: 'hls'}});
+  h.metadata(); await settlePlayback();
+  const plays = []; h.player.play = () => { plays.push(1); h.player.paused = false; return Promise.resolve(); };
+  // session.now() is 1000 in the harness (server time), whatever the device clock says.
+  h.session.receive('countdown', {member_id: 'host', media_key: 'movie|tt1||', start_at: 4000, seconds: 3});
+  assert.match(h.get('message').textContent, /Gemeinsamer Start in 3/);
+  assert.equal(plays.length, 0); assert.equal(h.player.paused, true); // No local start.
+  h.session.receive('countdown', {member_id: 'host', cancel: true});
+  assert.match(h.get('message').textContent, /abgebrochen/);
+  h.runTimers();
+  assert.match(h.get('message').textContent, /abgebrochen/); // The old ticker stopped.
+});
+
+test('countdowns from other members, other titles or invalid lengths are ignored', async () => {
+  const h = await harness();
+  h.get('message').textContent = 'before';
+  h.session.receive('countdown', {member_id: 'guest-2', media_key: 'movie|tt1||', start_at: 4000, seconds: 3});
+  h.session.receive('countdown', {member_id: 'host', media_key: 'movie|tt9||', start_at: 4000, seconds: 3});
+  h.session.receive('countdown', {member_id: 'host', media_key: 'movie|tt1||', start_at: 4000, seconds: 30});
+  assert.equal(h.get('message').textContent, 'before');
+});
