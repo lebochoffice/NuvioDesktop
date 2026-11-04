@@ -289,6 +289,11 @@ internal class PlayerScreenRuntime(
         get() = showAudioModal || showSubtitleModal || showVideoSettingsModal || showStreamInfo ||
             showPartyPanel || showSourcesPanel || showEpisodesPanel || showSubmitIntroModal
     var partyBehind by mutableStateOf(false)
+    // "Mich synchronisieren": incremented to re-apply the current party state
+    // through the existing path (same as returning from background).
+    var partyResyncRequest by mutableStateOf(0)
+    // "Alle synchronisieren": party time (server clock) of the host's request.
+    var partySyncAllAt by mutableStateOf<Long?>(null)
     var torboxPartyStream by mutableStateOf<com.nuvio.app.features.party.PartyStream?>(null)
     var torboxPartyStatus by mutableStateOf("")
     var torboxPreparedFile by mutableStateOf<com.nuvio.app.features.debrid.TorboxPartyFile?>(null)

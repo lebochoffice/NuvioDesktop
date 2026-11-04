@@ -138,6 +138,27 @@ internal fun PlayerScreenRuntime.catchUpWithParty() {
     showPartyPanel = false
 }
 
+/** "Mich synchronisieren": leave local mode and re-apply the current party state (own player only). */
+internal fun PlayerScreenRuntime.syncMeWithParty() {
+    partyBehind = false
+    partyResyncRequest += 1
+    showPartyPanel = false
+}
+
+/**
+ * "Alle synchronisieren" (host): publish the host's current party time as a
+ * new revision through the existing publish path, then ask for immediate
+ * status reports. Members already in sync stay put (existing tolerances);
+ * paused stays paused; members watching alone are not pulled back.
+ */
+internal fun PlayerScreenRuntime.syncEveryone() {
+    val party = PartyRepository.state.value.party ?: return
+    if (!party.isHost || party.media.key != partyKey || !isPartySynced) return
+    publishPartyPlayback()
+    PartyRepository.requestStatusReports()
+    partySyncAllAt = PartyRepository.nowMs()
+}
+
 internal fun PlayerScreenRuntime.leaveParty() {
     showPartyPanel = false
     PartyRepository.leave()
@@ -590,6 +611,7 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
         var lastStatus: Triple<PartyMemberStatus, String, Long?>? = null
         var lastPositionReport: TimeMark? = null
         var wasInBackground = false
+        var handledResync = partyResyncRequest
         var publishedInitial = false
         var seekLeadMs = 0L
         var measureSeekLead = false
@@ -610,6 +632,7 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
             val resumedFromBackground = wasInBackground && !partyAppInBackground
             wasInBackground = partyAppInBackground
             if (resumedFromBackground) lastSeq = null
+            if (handledResync != partyResyncRequest) { handledResync = partyResyncRequest; lastSeq = null }
             val behindGap = PartyRepository.playback.value
                 ?.takeIf { partyBehind && party.media.key == partyKey }
                 ?.let { PartySync.expectedPositionMs(it, PartyRepository.nowMs(), snapshot.durationMs) - currentPlaybackPositionMs() }
@@ -633,7 +656,8 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
             )
             if (reportedStatus != lastStatus) {
                 lastStatus = reportedStatus
-                PartyRepository.setLocalStatus(status, partyKey, reportedStatus.third)
+                // Behind is only reported in the deliberate local mode: "Allein".
+                PartyRepository.setLocalStatus(status, partyKey, reportedStatus.third, solo = status == PartyMemberStatus.Behind)
             }
 
             val controller = playerController

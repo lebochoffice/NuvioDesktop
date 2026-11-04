@@ -105,6 +105,7 @@ export const partyCodeFromPath = pathname => {
 export const REPORT_STALE_MS = 30000, MEMBER_SYNCED_MS = 1000, MEMBER_CATCH_UP_MS = 15000;
 export function memberSync(report, playback, currentMediaKey, nowMs) {
   if (!report || (report.media_key && report.media_key !== currentMediaKey)) return {state: 'unknown'};
+  if (report.solo === true) return {state: 'solo'}; // Watching alone on purpose: no drift, not "out of sync".
   if (report.status === 'loading' || report.status === 'buffering') return {state: 'buffering'};
   const reported = Number(report.position_ms), at = Number(report.position_at);
   if (!Number.isFinite(reported) || !Number.isFinite(at)) return {state: report.status === 'behind' ? 'unsynced' : 'unknown'};
@@ -124,5 +125,5 @@ export function formatDrift(driftMs) {
 export function memberSyncLabel(info) {
   const drift = info?.driftMs != null ? ` (${formatDrift(info.driftMs)})` : '';
   return {synced: `Synchron${drift}`, catching_up: `Holt auf${drift}`, buffering: 'Puffert',
-    unsynced: `Unsynchron${drift}`, stale: 'Status veraltet'}[info?.state] || '';
+    unsynced: `Unsynchron${drift}`, solo: 'Allein', stale: 'Status veraltet'}[info?.state] || '';
 }

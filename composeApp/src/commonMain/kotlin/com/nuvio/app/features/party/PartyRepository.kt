@@ -235,13 +235,13 @@ object PartyRepository {
         }
     }
 
-    fun setLocalStatus(status: PartyMemberStatus, mediaKey: String?, behindMs: Long? = null) {
+    fun setLocalStatus(status: PartyMemberStatus, mediaKey: String?, behindMs: Long? = null, solo: Boolean = false) {
         scope.launch {
             val party = _state.value.party ?: return@launch
             // Keep the last position report; a status change does not clear it.
             val previous = localPresence?.takeIf { it.mediaKey == mediaKey }
             val next = PartyPresence(memberId = party.memberId, status = status, mediaKey = mediaKey, behindMs = behindMs,
-                positionMs = previous?.positionMs, positionAt = previous?.positionAt, playing = previous?.playing)
+                positionMs = previous?.positionMs, positionAt = previous?.positionAt, playing = previous?.playing, solo = solo.takeIf { it })
             if (next == localPresence) return@launch
             localPresence = next
             if (status == PartyMemberStatus.Ready) ignoredWaiting.remove(party.memberId)
@@ -268,6 +268,18 @@ object PartyRepository {
             localPresence = next
             updateParty { it.copy(presence = it.presence + (party.memberId to next)) }
             runCatching { channel?.send("status", encodePresence(next)) }
+        }
+    }
+
+    /**
+     * "Alle synchronisieren" (host): asks every member for an immediate status
+     * report through the existing state_request, so the host sees at once who
+     * reached the freshly published party time.
+     */
+    fun requestStatusReports() {
+        scope.launch {
+            val party = _state.value.party ?: return@launch
+            if (party.isHost) requestState(party)
         }
     }
 

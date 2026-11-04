@@ -22,6 +22,11 @@ data class PlayerControlPartyState(
     val hlsAvailable: Boolean = false,
     val hlsBusy: Boolean = false,
     val hlsStatus: String = "",
+    // "Mich synchronisieren" (guest on the party title) and "Alle synchronisieren" (host).
+    val canSyncMe: Boolean = false,
+    val canSyncAll: Boolean = false,
+    // Result of the host's last "Alle synchronisieren" (live, for about a minute).
+    val syncAllStatus: String = "",
     // Short browser HLS state for a status chip ("sent", "ready", "preparing", …).
     val hlsPhase: String = "",
     // Titles for the "different title" card (only while the player is elsewhere).

@@ -75,4 +75,15 @@ class MemberSyncTest {
         val failed = PartyApi.json.decodeFromString(PartyBrowserHls.serializer(), """{"url":null,"state":"failed"}""")
         assertEquals("failed", failed.state)
     }
+
+    @Test
+    fun watchingAloneIsShownAsAloneWithoutDriftAndNeverAsOutOfSync() {
+        val alone = report(status = PartyMemberStatus.Behind, positionMs = 20_000).copy(solo = true)
+        assertEquals(MemberSyncInfo(MemberSync.Solo), PartySync.memberSync(alone, party, key, 15_000))
+        assertEquals("Allein", PartySync.memberSyncLabel(PartySync.memberSync(alone, party, key, 15_000)))
+        // Without the flag (older clients) a far-behind member stays "Unsynchron".
+        assertEquals(MemberSync.Unsynced, PartySync.memberSync(report(status = PartyMemberStatus.Behind, positionMs = 20_000), party, key, 15_000).state)
+        // Another title still wins over solo.
+        assertEquals(MemberSync.Unknown, PartySync.memberSync(alone.copy(mediaKey = "movie|tt9||"), party, key, 15_000).state)
+    }
 }

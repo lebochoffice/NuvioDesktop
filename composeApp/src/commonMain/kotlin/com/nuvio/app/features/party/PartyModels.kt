@@ -181,6 +181,9 @@ data class PartyPresence(
     @SerialName("position_ms") val positionMs: Long? = null,
     @SerialName("position_at") val positionAt: Long? = null,
     val playing: Boolean? = null,
+    // Watching alone on purpose (local pause/seek, browser "Allein schauen"):
+    // shown as "Allein", not as out of sync. Optional; older clients ignore it.
+    val solo: Boolean? = null,
 )
 
 @Serializable

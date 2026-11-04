@@ -27,7 +27,7 @@ internal enum class PendingApply {
 }
 
 /** Estimated state of a member relative to the party time (display only). */
-internal enum class MemberSync { Synced, CatchingUp, Buffering, Unsynced, Stale, Unknown }
+internal enum class MemberSync { Synced, CatchingUp, Buffering, Unsynced, Solo, Stale, Unknown }
 
 internal data class MemberSyncInfo(val state: MemberSync, val positionMs: Long? = null, val driftMs: Long? = null)
 
@@ -119,6 +119,8 @@ internal object PartySync {
      */
     fun memberSync(presence: PartyPresence?, playback: PartyPlayback?, mediaKey: String, nowMs: Long): MemberSyncInfo {
         if (presence == null || (presence.mediaKey != null && presence.mediaKey != mediaKey)) return MemberSyncInfo(MemberSync.Unknown)
+        // Deliberately independent: no drift shown, never counted as out of sync.
+        if (presence.solo == true) return MemberSyncInfo(MemberSync.Solo)
         if (presence.status == PartyMemberStatus.Loading || presence.status == PartyMemberStatus.Buffering) return MemberSyncInfo(MemberSync.Buffering)
         val reported = presence.positionMs
         val at = presence.positionAt
@@ -145,6 +147,7 @@ internal object PartySync {
             MemberSync.CatchingUp -> "Holt auf$drift"
             MemberSync.Buffering -> "Puffert"
             MemberSync.Unsynced -> "Unsynchron$drift"
+            MemberSync.Solo -> "Allein"
             MemberSync.Stale -> "Status veraltet"
             MemberSync.Unknown -> ""
         }

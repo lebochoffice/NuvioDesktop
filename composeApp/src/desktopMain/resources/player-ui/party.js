@@ -365,6 +365,11 @@ const buildPartyMembers = party => {
   partyKnownMemberIds = new Set(members.map(member => member.id));
   const familyStatus = String(party.familyStatus || "").trim();
   if (members.some(member => member.familyShare) && familyStatus) section.appendChild(partyElement("p", "party-detail", familyStatus));
+  // Own player back to the party time / everyone to the host's party time.
+  if (party.canSyncMe) section.appendChild(partyIconTextButton("icon-sync", "Mich synchronisieren", "", "syncMe", () => closeAndSendParty("partySyncMe")));
+  if (party.canSyncAll) section.appendChild(partyIconTextButton("icon-sync", "Alle synchronisieren", "", "syncAll", () => send("partySyncAll", 0)));
+  const syncAll = String(party.syncAllStatus || "").trim();
+  if (syncAll) section.appendChild(partyElement("p", syncAll.startsWith("Alle synchron") ? "party-detail ok" : "party-detail", syncAll));
 
   if (members.length < total) {
     const invite = partyAction(partyElement("button", "party-open-seat-row"), "invite", copyPartyInvite);

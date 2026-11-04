@@ -293,7 +293,7 @@ function memberSyncFor(room, member) {
   if (member.id === room.memberId) {
     if (!loadedStream) return {state: 'unknown'};
     const status = soloMode || !syncEnabled ? 'behind' : buffering || waitingForTarget || loading ? 'buffering' : 'ready';
-    return memberSync({status, media_key: current, position_ms: player.currentTime * 1000, position_at: now, playing: !player.paused}, session.playback, current, now);
+    return memberSync({status, solo: soloMode, media_key: current, position_ms: player.currentTime * 1000, position_at: now, playing: !player.paused}, session.playback, current, now);
   }
   return memberSync(session?.memberStatus?.get(member.id), session?.playback, current, now);
 }
@@ -409,10 +409,11 @@ function presence() {
   if (loading && !syncEnabled) state = 'browsing';
   const gap = session.playback ? Math.max(5000, expectedPositionMs(session.playback, session.now()) - player.currentTime * 1000) : 5000;
   const behind = state === 'behind' ? Math.round(gap / 5000) * 5000 : undefined;
-  const signature = `${state}:${behind ?? ''}`;
+  const solo = soloMode && !!loadedStream;
+  const signature = `${state}:${behind ?? ''}:${solo}`;
   if (presenceRoom === session.room && lastPresence === signature) return;
   presenceRoom = session.room; lastPresence = signature;
-  session.sendPresence(state, behind).catch(() => {
+  session.sendPresence(state, behind, solo).catch(() => {
     if (lastPresence === signature) lastPresence = null;
     status('Status nicht gesendet. Party-Verbindung prüfen.', true);
   });

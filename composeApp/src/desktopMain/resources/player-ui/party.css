@@ -1346,6 +1346,10 @@
   color: #ff8a80;
 }
 
+.party-detail.ok {
+  color: #7ee2a0;
+}
+
 .party-button.compact {
   width: auto;
   min-height: 32px;

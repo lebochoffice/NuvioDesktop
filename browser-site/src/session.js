@@ -460,9 +460,10 @@ export class PartySession {
     const payload = {...this.presence, member_id: this.room.memberId, media_key: mediaKey(this.room.info.media), ...fields};
     await this.channel.send({type: 'broadcast', event: 'status', payload}).catch(() => {});
   }
-  async sendPresence(status, behindMs) {
+  async sendPresence(status, behindMs, solo = false) {
     if (!this.room || !this.channel) return;
-    if (status) this.presence = {status, ...(behindMs != null ? {behind_ms: behindMs} : {})};
+    // solo: watching alone on purpose (shown as "Allein"); optional field.
+    if (status) this.presence = {status, ...(behindMs != null ? {behind_ms: behindMs} : {}), ...(solo ? {solo: true} : {})};
     const payload = {...this.presence, member_id: this.room.memberId, media_key: mediaKey(this.room.info.media), ...this.positionFields()};
     const tracked = await this.channel.track(payload);
     if (tracked && tracked !== 'ok') throw new Error('Online-Status nicht bestätigt (' + tracked + '). RPC-Beitritt allein stellt keine Realtime-Verbindung her.');

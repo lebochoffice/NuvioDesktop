@@ -228,6 +228,10 @@ internal fun PlayerScreenRuntime.rememberPartyControlsState(): PlayerControlPart
         hlsAvailable = party.isHost && !elsewhere && effectiveTorboxFile != null && activeHostPartyHls == null,
         hlsBusy = torboxPartyPhase == com.nuvio.app.features.debrid.TorboxHlsPhase.Preparing,
         browserOrigin = com.nuvio.app.features.party.watchPartyBrowserOrigin,
+        canSyncMe = !party.isHost && !elsewhere,
+        canSyncAll = party.isHost && !elsewhere && party.members.size > 1,
+        syncAllStatus = partySyncAllAt?.takeIf { party.isHost && nowMs - it < SYNC_ALL_STATUS_MS }
+            ?.let { requestedAt -> syncAllSummary(party, playback, nowMs, nowMs - requestedAt) }.orEmpty(),
         hlsPhase = when {
             !party.isHost || elsewhere -> ""
             activeHostPartyHls != null -> if (activeHostPartyHls?.familyOnly == true) "family-link" else "link"
@@ -399,6 +403,8 @@ internal fun PlayerScreenRuntime.handlePartyControlsEvent(type: String, value: D
         "partyWatch" -> watchWithParty()
         "partySwitch" -> switchPartyMedia()
         "partyCatchUp" -> catchUpWithParty()
+        "partySyncMe" -> if (PartyRepository.state.value.party?.isHost == false) syncMeWithParty()
+        "partySyncAll" -> syncEveryone()
         "partyLeave" -> leaveParty()
         "partyEnd" -> endParty()
         "partyChatVisible" -> partyChatVisible = value >= 0.5
@@ -452,6 +458,39 @@ private const val BROWSER_INVITE_EVENT = "partyBrowserInvite:"
 private const val REMOVE_MEMBER_EVENT = "partyRemoveMember:"
 private const val CHAT_SEND_EVENT = "partyChatSend:"
 private const val HOST_HLS_EVENT = "partyHostHls:"
+private const val SYNC_ALL_STATUS_MS = 60_000L
+private const val SYNC_ALL_SETTLE_MS = 2_500L
+
+/**
+ * Host feedback for "Alle synchronisieren", from the members' own reports
+ * (never assumed): offline and "Allein" members are listed separately and do
+ * not block; a member counts as synced only with a fresh in-sync report.
+ */
+private fun syncAllSummary(
+    party: com.nuvio.app.features.party.ActiveParty,
+    playback: com.nuvio.app.features.party.PartyPlayback?,
+    nowMs: Long,
+    elapsedMs: Long,
+): String {
+    val others = party.members.filter { it.id != party.memberId }
+    val offline = others.filter { party.presenceState(it) == com.nuvio.app.features.party.PartyPresenceState.Offline }
+    val online = others - offline.toSet()
+    val states = online.associateWith { PartySync.memberSync(party.presence[it.id], playback, party.media.key, nowMs).state }
+    val solo = online.filter { states[it] == com.nuvio.app.features.party.MemberSync.Solo }
+    val joined = online - solo.toSet()
+    val synced = joined.filter { states[it] == com.nuvio.app.features.party.MemberSync.Synced }
+    val pending = joined - synced.toSet()
+    val extras = listOfNotNull(
+        solo.size.takeIf { it > 0 }?.let { "$it allein" },
+        offline.size.takeIf { it > 0 }?.let { "$it offline" },
+    ).joinToString(" · ").let { if (it.isEmpty()) "" else " · $it" }
+    return when {
+        joined.isEmpty() -> "Niemand schaut gerade gemeinsam$extras"
+        pending.isEmpty() -> "Alle synchron (${synced.size})$extras"
+        elapsedMs < SYNC_ALL_SETTLE_MS -> "Synchronisiere …"
+        else -> "${synced.size}/${joined.size} synchron · ausstehend: ${pending.joinToString { it.displayName.take(20) }}$extras"
+    }
+}
 private const val TORBOX_PICK_EVENT = "partyTorboxPick:"
 private const val FAMILY_ADMIT_EVENT = "partyFamilyAdmit:"
 

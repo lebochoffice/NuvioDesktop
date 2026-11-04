@@ -104,3 +104,11 @@ test('family share helpers: token only for TorBox HTTPS hosts without a token; s
   assert.equal(shareWorkerOrigin('https://nuvio-party-share.example.workers.dev/'), 'https://nuvio-party-share.example.workers.dev');
   for (const bad of ['', 'http://x.example', 'https://x.example/path', 'https://user@x.example', 'https://x.example:8443', null]) assert.equal(shareWorkerOrigin(bad), '');
 });
+
+test('a member watching alone on purpose (solo) is labelled "Allein", without drift', () => {
+  const party = {seq: 3, member_id: 'host', paused: false, position_ms: 60000, at: 10000, rate: 1};
+  const alone = {status: 'behind', solo: true, media_key: 'movie|tt1||', position_ms: 20000, position_at: 10000, playing: true};
+  assert.deepEqual(memberSync(alone, party, 'movie|tt1||', 15000), {state: 'solo'});
+  assert.equal(memberSyncLabel(memberSync(alone, party, 'movie|tt1||', 15000)), 'Allein');
+  assert.equal(memberSync({...alone, solo: undefined}, party, 'movie|tt1||', 15000).state, 'unsynced'); // Older clients.
+});
