@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import {strict as assert} from 'node:assert';
-import {normalizeCode,partyCodeFromPath,validCode,mediaKey,expectedPositionMs,safeStreamUrl,isNewerPlayback,validPlayback,streamProblem,streamIsHls,publicConfigProblem} from '../src/protocol.js';
+import {normalizeCode,partyCodeFromPath,validCode,mediaKey,expectedPositionMs,safeStreamUrl,isNewerPlayback,validPlayback,streamProblem,streamIsHls,browserPartyStream,publicConfigProblem} from '../src/protocol.js';
 test('normalize URL party code',()=>{assert.equal(normalizeCode('uxz-83h'),'UXZ83H');assert.ok(validCode('UXZ 83H'));assert.equal(partyCodeFromPath('/party/UXZ83H'),'UXZ83H');assert.equal(partyCodeFromPath('/party/abcd'),'');});
 test('media key same as desktop contract',()=>{assert.equal(mediaKey({meta_type:'Movie',meta_id:'tt123',season:null,episode:null}),'movie|tt123||');assert.equal(mediaKey({meta_type:'Movie',meta_id:'TT123'}),'movie|TT123||');});
 test('expected playback position accounts for pauses and clock',()=>{assert.equal(expectedPositionMs({paused:false,waiting:false,position_ms:120000,rate:1,at:1000},3500),122500);assert.equal(expectedPositionMs({paused:true,position_ms:120000,rate:1,at:1000},3500),120000);});
@@ -38,4 +38,27 @@ test('only public backend configuration is accepted', () => {
   for (const key of [jwt('service_role'), 'sb_secret_example', 'personal-token']) assert.match(publicConfigProblem('https://api.example.org', key), /Key/);
   assert.ok(publicConfigProblem('', ''));
   assert.ok(publicConfigProblem('https://api.example.org/path', jwt('anon')));
+});
+
+test('HLS permits safe request headers without enabling credential or response header rewriting', () => {
+  const stream = {url: 'https://stream.example.test/v', stream_type: 'hls', headers: {Accept: 'application/vnd.apple.mpegurl', 'Accept-Language': 'de'}};
+  assert.equal(streamProblem(stream), '');
+  assert.match(streamProblem({...stream, headers: {Referer: 'https://example.test'}}), /HTTP-Header/);
+  assert.match(streamProblem({...stream, headers: {Accept: 'video\r\nInjected: yes'}}), /HTTP-Header/);
+  assert.match(streamProblem({...stream, stream_type: 'mp4'}), /HTTP-Header/);
+});
+
+test('browser selection leaves the Desktop original intact and inherits its media key only', () => {
+  const original = {media_key: 'movie|tt1||', url: 'https://desktop.example.test/film.mkv', filename: 'film.mkv',
+    headers: {Referer: 'https://provider.example.test'}, video_size: 1000000, stream_type: 'mkv',
+    browser_hls: {url: 'https://stream.example.test/master.m3u8', headers: {Accept: 'application/vnd.apple.mpegurl'}}};
+  const before = JSON.stringify(original), browser = browserPartyStream(original);
+  assert.equal(browser.url, original.browser_hls.url); assert.equal(browser.media_key, original.media_key);
+  assert.equal(streamProblem(browser), ''); assert.equal(browser.stream_type, 'hls');
+  assert.equal(browser.filename, undefined); assert.equal(browser.headers.Referer, undefined);
+  assert.equal(JSON.stringify(original), before);
+  for (const browser_hls of [{}, {url: null}, null, []]) assert.equal(browserPartyStream({...original, browser_hls}), null);
+  assert.equal(browserPartyStream(null), null);
+  const legacy = {media_key: original.media_key, url: 'https://desktop.example.test/video.mp4'};
+  assert.equal(browserPartyStream(legacy), legacy);
 });

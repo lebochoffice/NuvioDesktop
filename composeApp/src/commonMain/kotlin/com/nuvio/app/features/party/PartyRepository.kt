@@ -369,6 +369,7 @@ object PartyRepository {
                     ?.takeIf { it !is JsonNull }
                     ?.let { decode(it, PartyStream.serializer()) }
                     ?.takeIf { isShareableStreamUrl(it.url) }
+                    ?.forDesktop() // HLS renewals must not restart Desktop guests.
             }
             "chat" -> PartyChat.receive(payload)
         }

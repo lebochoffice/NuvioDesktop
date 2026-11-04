@@ -6,6 +6,11 @@ import com.nuvio.app.features.streams.StreamItem
 import com.nuvio.app.features.streams.StreamProxyHeaders
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import io.ktor.http.decodeURLPart
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonArray
 
 @Serializable
 data class PartySource(
@@ -39,6 +44,13 @@ data class PartyMedia(
 }
 
 @Serializable
+data class PartyBrowserHls(
+    // Null means preparation unavailable/pending, never "use the Desktop URL".
+    val url: String? = null,
+    val headers: Map<String, String> = emptyMap(),
+)
+
+@Serializable
 data class PartyStream(
     @SerialName("media_key") val mediaKey: String,
     val url: String,
@@ -54,7 +66,10 @@ data class PartyStream(
     @SerialName("binge_group") val bingeGroup: String? = null,
     @SerialName("stream_type") val streamType: String? = null,
     val badges: List<StreamBadge> = emptyList(),
+    @SerialName("browser_hls") val browserHls: PartyBrowserHls? = null,
 ) {
+    fun forDesktop(): PartyStream = if (browserHls == null) this else copy(browserHls = null)
+
     fun toStreamItem(): StreamItem = StreamItem(
         name = name,
         description = description,
@@ -74,6 +89,20 @@ data class PartyStream(
 }
 
 internal fun isShareableStreamUrl(url: String): Boolean = SHAREABLE_URL.containsMatchIn(url)
+
+// Reject the complete known account key in either transport, including headers.
+// Never log the JSON or the key; a rejected original cannot be silently stripped.
+internal fun PartyStream.containsAccountKey(key: String): Boolean {
+    if (key.isBlank()) return false
+    fun textContains(value: String): Boolean = value.contains(key) ||
+        runCatching { value.decodeURLPart().contains(key) }.getOrDefault(false)
+    fun contains(element: JsonElement): Boolean = when (element) {
+        is JsonPrimitive -> element.isString && textContains(element.content)
+        is JsonObject -> element.any { (name, value) -> textContains(name) || contains(value) }
+        is JsonArray -> element.any { contains(it) }
+    }
+    return contains(PartyApi.json.encodeToJsonElement(PartyStream.serializer(), this))
+}
 
 private val SHAREABLE_URL = Regex("^https?://(?!localhost|127\\.|0\\.0\\.0\\.0|\\[::1])[^\\s/]+", RegexOption.IGNORE_CASE)
 

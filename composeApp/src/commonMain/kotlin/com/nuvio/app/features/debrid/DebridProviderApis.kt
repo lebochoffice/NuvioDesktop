@@ -129,6 +129,7 @@ private class TorboxDebridProviderApi(
                 url = url,
                 filename = file.displayName().takeIf { it.isNotBlank() },
                 videoSize = file.size,
+                torboxPartyFile = TorboxPartyFile(torrentId, fileId, torboxAccountFingerprint(apiKey)),
             )
         } catch (error: Exception) {
             if (error is CancellationException) throw error

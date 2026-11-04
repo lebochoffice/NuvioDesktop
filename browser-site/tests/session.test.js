@@ -115,3 +115,142 @@ test('presence failures are reported without suppressing the independent stream 
   assert.ok(errors.some(e => e.includes('Online-Status nicht bestätigt')));
   assert.ok(f.messages.some(m => m.event === 'state_request'));
 });
+
+test('a replacement host can restart sequence ordering without a media reset', async t => {
+  const mediaEvents = [], f = fixture({media: media => mediaEvents.push(media)});
+  t.after(() => f.session.close(false));
+  await f.session.join('UXZ83H', 'Guest');
+  const rpc = f.client.rpc;
+  f.client.rpc = async (name, args) => name === 'watch_party_heartbeat'
+    ? {data: {...snapshot(), party: {...snapshot().party, host_member_id: 'new-host', playback: {...playback, seq: 0, member_id: 'new-host'}}}}
+    : rpc(name, args);
+  await f.session.refresh();
+  assert.equal(f.session.playback.member_id, 'new-host'); assert.equal(f.session.playback.seq, 0);
+  assert.deepEqual(mediaEvents, []);
+  f.emit('state', {...playback, seq: 999}); assert.equal(f.session.playback.member_id, 'new-host');
+});
+
+test('party-ended snapshot closes membership before any later playback can be accepted', async () => {
+  const events = [], f = fixture({closed: () => events.push('closed'), ended: () => events.push('ended')});
+  await f.session.join('UXZ83H', 'Guest');
+  f.client.rpc = async () => ({data: {party: null}});
+  await f.session.refresh();
+  assert.equal(f.session.room, null); assert.equal(f.session.playback, null);
+  assert.deepEqual(events, ['closed', 'ended']);
+  f.emit('state', {...playback, seq: 999}); assert.equal(f.session.playback, null);
+});
+
+test('empty and repeated closes do not emit lifecycle events; concurrent closes share cleanup', async () => {
+  const events = [], f = fixture({closed: () => events.push('closed')});
+  await f.session.close(false); await f.session.close(false);
+  assert.deepEqual(events, []);
+  await f.session.join('UXZ83H', 'Guest'); assert.deepEqual(events, []);
+  let releaseRemoval, startedRemoval, removals = 0;
+  const removal = new Promise(resolve => {releaseRemoval = resolve;});
+  const started = new Promise(resolve => {startedRemoval = resolve;});
+  f.client.removeChannel = () => {removals++; startedRemoval(); return removal;};
+  const first = f.session.close(), second = f.session.close();
+  assert.equal(first, second);
+  assert.equal(f.session.room, null); assert.equal(f.session.playback, null);
+  assert.equal(f.session.timers.length, 0); assert.deepEqual(events, ['closed']);
+  f.emit('state', {...playback, seq: 999}); assert.equal(f.session.playback, null);
+  await started; assert.equal(removals, 1);
+  let settled = false; second.then(() => {settled = true;});
+  await Promise.resolve(); assert.equal(settled, false);
+  releaseRemoval(); await Promise.all([first, second]);
+  assert.equal(f.calls.filter(([name]) => name === 'watch_party_leave').length, 1);
+  await f.session.close(); assert.deepEqual(events, ['closed']);
+});
+
+test('concurrent finish calls emit closed and ended once after cleanup', async () => {
+  const events = [], f = fixture({closed: () => events.push('closed'), ended: () => events.push('ended')});
+  await f.session.join('UXZ83H', 'Guest');
+  let releaseRemoval;
+  f.client.removeChannel = () => new Promise(resolve => {releaseRemoval = resolve;});
+  const first = f.session.finish('Ended'), second = f.session.finish('Ended');
+  assert.deepEqual(events, ['closed']);
+  await Promise.resolve(); // Enter the deferred channel cleanup.
+  releaseRemoval(); await Promise.all([first, second]);
+  await f.session.finish('Ended'); assert.deepEqual(events, ['closed', 'ended']);
+  f.emit('state', {...playback, seq: 999}); assert.equal(f.session.playback, null);
+});
+
+test('a new join supersedes an old ended callback while channel cleanup is pending', async t => {
+  const events = [], f = fixture({closed: () => events.push('closed'), ended: () => events.push('ended')});
+  t.after(() => f.session.close(false));
+  await f.session.join('UXZ83H', 'Guest');
+  let releaseRemoval;
+  f.client.removeChannel = () => new Promise(resolve => {releaseRemoval = resolve;});
+  const finish = f.session.finish('Old party ended');
+  const join = f.session.join('UXZ83H', 'Guest');
+  await Promise.resolve(); releaseRemoval();
+  await Promise.all([finish, join]);
+  assert.ok(f.session.room); assert.deepEqual(events, ['closed']);
+  // Keep teardown independent of the already released deferred operation.
+  f.client.removeChannel = async () => {};
+});
+
+test('closing an empty session still invalidates an in-flight join', async () => {
+  const events = [], f = fixture({closed: () => events.push('closed')});
+  let authorize, authStarted;
+  const started = new Promise(resolve => {authStarted = resolve;});
+  f.client.auth.getSession = () => { authStarted(); return new Promise(resolve => {authorize = resolve;}); };
+  const joining = f.session.join('UXZ83H', 'Guest');
+  await started; await f.session.close(false);
+  authorize({data: {session: {access_token: 'session-jwt', user: {id: 'u', is_anonymous: false}}}});
+  await joining;
+  assert.equal(f.session.room, null); assert.equal(f.calls.length, 0); assert.deepEqual(events, []);
+});
+
+test('state broadcasts are accepted immediately and a delayed older heartbeat cannot re-pause playback', async t => {
+  const changes = [], f = fixture({playback: state => changes.push(state)});
+  t.after(() => f.session.close(false)); await f.session.join('UXZ83H', 'Guest');
+  const rpc = f.client.rpc; let resolveHeartbeat;
+  f.client.rpc = (name, args) => name === 'watch_party_heartbeat'
+    ? new Promise(resolve => {resolveHeartbeat = resolve;}) : rpc(name, args);
+  const refresh = f.session.refresh();
+  f.emit('state', {...playback, seq: 4, paused: false, position_ms: 12000});
+  assert.equal(f.session.playback.seq, 4); assert.equal(f.session.playback.paused, false);
+  assert.equal(f.session.diagnostics.acceptedSource, 'realtime');
+  resolveHeartbeat({data: {...snapshot(), party: {...snapshot().party, playback: {...playback, seq: 3, paused: true}}}});
+  await refresh;
+  assert.equal(f.session.playback.seq, 4); assert.equal(f.session.playback.paused, false);
+  assert.equal(changes.length, 2); // Initial snapshot and accepted state; no stale pause callback.
+  assert.equal(f.session.diagnostics.lastSource, 'snapshot');
+  assert.equal(f.session.diagnostics.lastDecision, 'not_newer');
+  assert.equal(f.session.diagnostics.acceptedSource, 'realtime');
+  f.emit('state', {...playback, seq: 5, paused: true});
+  assert.equal(f.session.playback.paused, true); assert.equal(changes.length, 3);
+});
+
+test('state rejection diagnostics distinguish validation, media, authority and ordering without payload disclosure', async t => {
+  const f = fixture(); t.after(() => f.session.close(false)); await f.session.join('UXZ83H', 'Guest');
+  const secret = 'PRIVATE_STATE_SENTINEL';
+  for (const [candidate, decision] of [
+    [{...playback, seq: '3'}, 'invalid_playback'],
+    [{...playback, seq: 3, media_key: secret}, 'wrong_media'],
+    [{...playback, seq: 3, member_id: secret}, 'not_host'],
+    [{...playback, seq: 1}, 'not_newer'],
+    [null, 'invalid_playback'],
+  ]) {
+    f.emit('state', candidate && {...candidate, url: secret, token: secret});
+    assert.equal(f.session.diagnostics.lastDecision, decision);
+    assert.equal(f.session.playback.seq, 2);
+    assert.ok(!JSON.stringify(f.session.diagnostics).includes(secret));
+  }
+  assert.equal(f.session.diagnostics.realtimeStates, 5);
+  assert.equal(typeof f.session.diagnostics.lastRealtimeAt, 'number');
+});
+
+test('a newer snapshot remains a fallback; later stale realtime cannot roll it back', async t => {
+  const f = fixture(); t.after(() => f.session.close(false)); await f.session.join('UXZ83H', 'Guest');
+  const rpc = f.client.rpc;
+  f.client.rpc = (name, args) => name === 'watch_party_heartbeat'
+    ? Promise.resolve({data: {...snapshot(), party: {...snapshot().party, playback: {...playback, seq: 5, paused: true}}}})
+    : rpc(name, args);
+  await f.session.refresh();
+  assert.equal(f.session.playback.paused, true); assert.equal(f.session.diagnostics.acceptedSource, 'snapshot');
+  f.emit('state', {...playback, seq: 4, paused: false});
+  assert.equal(f.session.playback.seq, 5); assert.equal(f.session.playback.paused, true);
+  assert.equal(f.session.diagnostics.lastDecision, 'not_newer');
+});

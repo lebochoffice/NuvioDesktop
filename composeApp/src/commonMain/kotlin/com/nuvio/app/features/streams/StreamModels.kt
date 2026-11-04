@@ -33,6 +33,7 @@ data class StreamItem(
     val externalSubtitles: List<StreamSubtitle> = emptyList(),
     val badges: List<StreamBadge> = emptyList(),
     val serverTarget: ServerPlaybackTarget? = null,
+    val torboxPartyFile: com.nuvio.app.features.debrid.TorboxPartyFile? = null,
 ) {
     val streamLabel: String
         get() = name?.takeIf { it.isNotBlank() } ?: "Stream"
