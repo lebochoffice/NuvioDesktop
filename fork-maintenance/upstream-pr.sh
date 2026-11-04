@@ -26,7 +26,8 @@ fi
 # (not from the merged tree) and only greps files.
 checker="$(mktemp)"; body="$(mktemp)"
 trap 'rm -f "$checker" "$body"' EXIT
-git show "$base:fork-maintenance/check-fork-invariants.sh" > "$checker" 2>/dev/null \n  || { echo "fork-maintenance/check-fork-invariants.sh is not on Dev yet; merge the fork automation first." >&2; exit 1; }
+git show "$base:fork-maintenance/check-fork-invariants.sh" > "$checker" 2>/dev/null \
+  || { echo "fork-maintenance/check-fork-invariants.sh is not on Dev yet; merge the fork automation first." >&2; exit 1; }
 
 git push origin "$tip:refs/heads/$branch"
 git config user.name 'nuvio-fork-sync'
