@@ -126,3 +126,16 @@ test('login and logout reject cross-site posts; logout clears the cookie', async
   assert.equal(loginGet.response.status, 200);
   assert.ok(!(await loginGet.response.text()).includes('<script>alert'));
 });
+
+test('the login form page sends its real origin on submit (Referrer-Policy same-origin); Origin null stays rejected', async () => {
+  for (const url of [`${PREVIEW}/party/ABC234`, `${PREVIEW}${LOGIN_PATH}`]) {
+    const {response} = await call(url);
+    assert.equal(response.headers.get('Referrer-Policy'), 'same-origin', url); // no-referrer would make the POST send "Origin: null".
+  }
+  const wrong = await login(PREVIEW, 'wrong-password-123456', '/', {'CF-Connecting-IP': '192.0.2.200'});
+  assert.equal(wrong.response.headers.get('Referrer-Policy'), 'same-origin');
+  assert.equal((await call(`${PREVIEW}/`, {environment: {}})).response.headers.get('Referrer-Policy'), 'no-referrer'); // Other pages unchanged.
+  const nullOrigin = await call(`${PREVIEW}${LOGIN_PATH}`, form({password: env.PREVIEW_PASSWORD, next: '/'}, 'null'));
+  assert.equal(nullOrigin.response.status, 403); assert.equal(nullOrigin.response.headers.get('Set-Cookie'), null);
+  assert.equal((await login()).response.status, 303); // Same-origin submit works.
+});
