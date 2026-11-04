@@ -923,12 +923,20 @@ test('host-only party paused: Play still plays locally, honestly marked "Nicht s
 
 test('a blocked play() is reported instead of a button that seemingly does nothing', async () => {
   const h = await readyGuest(); h.get('resync').fire('click'); h.player.fire('seeked');
-  h.player.play = () => Promise.reject({name: 'NotAllowedError', message: privateUrl});
+  let playCalls = 0;
+  h.player.play = () => {
+    playCalls++;
+    return Promise.reject({name: 'NotAllowedError', message: privateUrl});
+  };
   h.get('ctlPlay').fire('click'); await settlePlayback();
+  assert.equal(playCalls, 1);
   assert.match(h.get('message').textContent, /blockiert/);
   assert.ok(!h.get('message').textContent.includes('INTEGRATION_PRIVATE_SENTINEL'));
+});
+
+test('Play without a shared stream points to the Browser-HLS switch', async () => {
   const idle = await harness(); idle.get('ctlPlay').fire('click');
-  assert.match(idle.get('message').textContent, /Share my stream/);
+  assert.match(idle.get('message').textContent, /Noch kein Browser-Stream freigegeben.*Browser-HLS freigeben/);
 });
 
 test('back arrow returns to the invitation without leaving; "Zurück zur Party" resumes the party time', async () => {
