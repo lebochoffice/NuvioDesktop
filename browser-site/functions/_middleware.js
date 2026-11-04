@@ -71,11 +71,15 @@ function page(status, title, body, extra = {}) {
   return new Response(html, {status, headers: {'Content-Type': 'text/html; charset=utf-8', 'Content-Security-Policy': PAGE_CSP, ...PRIVATE_HEADERS, ...extra}});
 }
 
+// The login form posts to this same origin. With "no-referrer" browsers send
+// "Origin: null" on that POST (Fetch standard), which sameOrigin() rightly
+// rejects; "same-origin" sends the real origin here and nothing cross-site.
+const LOGIN_REFERRER = {'Referrer-Policy': 'same-origin'};
 const loginPage = (next, error = '', status = 401, extra = {}) => page(status, 'Nuvio Preview',
   `<h1>Nuvio Preview</h1><p>Diese Testversion ist passwortgeschützt.</p>${error ? `<p class="error">${escapeHtml(error)}</p>` : ''}
 <form method="post" action="${LOGIN_PATH}"><input type="hidden" name="next" value="${escapeHtml(safeNext(next))}">
 <label for="password">Passwort</label><input id="password" name="password" type="password" autocomplete="current-password" required autofocus>
-<button type="submit">Anmelden</button></form>`, extra);
+<button type="submit">Anmelden</button></form>`, {...LOGIN_REFERRER, ...extra});
 
 // Secrets present and long enough; otherwise the preview stays closed.
 export function gateConfig(env = {}) {
