@@ -22,6 +22,9 @@ data class PlayerControlPartyState(
     val hlsAvailable: Boolean = false,
     val hlsBusy: Boolean = false,
     val hlsStatus: String = "",
+    // Stream card: current title and where its browser source comes from.
+    val streamTitle: String = "",
+    val streamSource: String = "",
     // "Mich synchronisieren" (guest on the party title) and "Alle synchronisieren" (host).
     val canSyncMe: Boolean = false,
     val canSyncAll: Boolean = false,
@@ -101,6 +104,9 @@ data class PlayerControlPartyMember(
     val removeTitle: String = "",
     // Family share toggle for the host: "" (none), "off" or "on".
     val familyShare: String = "",
+    // Compact sync state for colours: synced, catching_up, buffering,
+    // unsynced, solo, stale, offline or "" (unknown; never assumed synced).
+    val syncState: String = "",
 )
 
 @Serializable

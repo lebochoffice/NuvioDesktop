@@ -159,7 +159,9 @@ internal fun PlayerScreenRuntime.rememberPartyControlsState(): PlayerControlPart
                 mediaKey = partyKey, positionMs = currentPlaybackPositionMs(), positionAt = nowMs, playing = playbackSnapshot.isPlaying)
                 .takeIf { !elsewhere }
         } else party.presence[member.id]
-        val syncLabel = PartySync.memberSyncLabel(PartySync.memberSync(reported, playback, party.media.key, nowMs))
+        val syncInfo = PartySync.memberSync(reported, playback, party.media.key, nowMs)
+        val syncLabel = PartySync.memberSyncLabel(syncInfo).replace(" (", " · ").removeSuffix(")")
+        val offline = party.presenceState(member) == com.nuvio.app.features.party.PartyPresenceState.Offline
         PlayerControlPartyMember(
             id = member.id,
             name = if (isSelf) "$label ($you)" else label,
@@ -167,11 +169,26 @@ internal fun PlayerScreenRuntime.rememberPartyControlsState(): PlayerControlPart
             imageUrl = member.avatarUrl?.takeIf { it.startsWith(storage) }.orEmpty(),
             color = member.avatarColor.orEmpty(),
             isHost = member.id == party.hostMemberId,
-            status = (if (behindMs != null) {
-                stringResource(Res.string.party_behind, formatPlaybackTime(behindMs))
-            } else {
-                stringResource(party.statusRes(member))
-            }).let { base -> if (syncLabel.isEmpty()) base else "$base · $syncLabel" },
+            // One short line: "Synchron · +0,1 s", "Puffert", "Allein", "Offline"; else the plain status.
+            status = when {
+                offline && !isSelf -> "Offline"
+                behindMs != null && syncInfo.state != com.nuvio.app.features.party.MemberSync.Solo ->
+                    stringResource(Res.string.party_behind, formatPlaybackTime(behindMs))
+                syncLabel.isNotEmpty() -> syncLabel
+                else -> stringResource(party.statusRes(member))
+            },
+            syncState = when {
+                offline && !isSelf -> "offline"
+                else -> when (syncInfo.state) {
+                    com.nuvio.app.features.party.MemberSync.Synced -> "synced"
+                    com.nuvio.app.features.party.MemberSync.CatchingUp -> "catching_up"
+                    com.nuvio.app.features.party.MemberSync.Buffering -> "buffering"
+                    com.nuvio.app.features.party.MemberSync.Unsynced -> "unsynced"
+                    com.nuvio.app.features.party.MemberSync.Solo -> "solo"
+                    com.nuvio.app.features.party.MemberSync.Stale -> "stale"
+                    com.nuvio.app.features.party.MemberSync.Unknown -> ""
+                }
+            },
             presence = party.presenceState(member).name.lowercase(),
             canRemove = party.isHost && !isSelf,
             removeTitle = stringResource(Res.string.party_remove_title, label),
@@ -228,6 +245,15 @@ internal fun PlayerScreenRuntime.rememberPartyControlsState(): PlayerControlPart
         hlsAvailable = party.isHost && !elsewhere && effectiveTorboxFile != null && activeHostPartyHls == null,
         hlsBusy = torboxPartyPhase == com.nuvio.app.features.debrid.TorboxHlsPhase.Preparing,
         browserOrigin = com.nuvio.app.features.party.watchPartyBrowserOrigin,
+        streamTitle = if (party.isHost && !elsewhere) party.media.displayTitle() else "",
+        streamSource = when {
+            !party.isHost || elsewhere -> ""
+            activeHostPartyHls != null -> if (activeHostPartyHls?.familyOnly == true) "Eigener Link · Familie" else "Eigener Link"
+            activeStream?.torboxPartyFile != null -> "TorBox-Cloud"
+            torboxManualFor == partyKey -> if (torboxLinkAuto) "TorBox automatisch verknüpft" else "TorBox verknüpft"
+            activeStream != null -> "Keine Cloud-Datei verknüpft"
+            else -> ""
+        },
         canSyncMe = !party.isHost && !elsewhere,
         canSyncAll = party.isHost && !elsewhere && party.members.size > 1,
         syncAllStatus = partySyncAllAt?.takeIf { party.isHost && nowMs - it < SYNC_ALL_STATUS_MS }

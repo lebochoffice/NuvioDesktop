@@ -1473,3 +1473,179 @@
   padding-top: 16px;
   border-top: 1px solid rgba(255, 255, 255, .08);
 }
+
+/* UI pass 2: layout after the agreed design (code head, sync pill, member
+   status colours, share shields, stream card, invite grid, leave row). */
+.party-code {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.party-code-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.party-code-copy .party-label {
+  font-size: 12px;
+  line-height: 16px;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+
+.party-code-value {
+  color: var(--theme-text-primary);
+  font-size: 22px;
+  line-height: 28px;
+  font-weight: 700;
+  letter-spacing: .08em;
+  user-select: text;
+}
+
+.party-members-header .party-label {
+  font-size: 13px;
+}
+
+.party-sync-pill {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--theme-text-secondary);
+}
+
+.party-sync-pill svg {
+  width: 14px;
+  height: 14px;
+}
+
+.party-sync-pill.ok,
+.party-member-status.ok,
+.party-detail.ok {
+  color: #7ee2a0;
+}
+
+.party-sync-pill.busy,
+.party-member-status.busy {
+  color: #ffc35a;
+}
+
+.party-member-status.error {
+  color: #ff8a80;
+}
+
+.party-member-status.muted {
+  color: var(--theme-text-muted);
+}
+
+.party-member-row {
+  padding: 5px 0;
+  gap: 12px;
+}
+
+.party-share-shield svg {
+  width: 20px;
+  height: 20px;
+}
+
+.party-share-shield.on {
+  color: #7ee2a0;
+}
+
+.party-button.party-sync-button {
+  min-height: 46px;
+  margin-top: 6px;
+  font-weight: 600;
+  background: rgba(255, 255, 255, .1);
+}
+
+.party-detail.center {
+  text-align: center;
+}
+
+.party-host-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.party-stream-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, .06);
+}
+
+.party-stream-card > svg {
+  width: 20px;
+  height: 20px;
+  flex: 0 0 auto;
+  color: var(--theme-text-secondary);
+}
+
+.party-stream-copy {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.party-stream-title {
+  color: var(--theme-text-primary);
+  font-size: 14px;
+  line-height: 20px;
+  font-weight: 600;
+}
+
+.party-stream-source {
+  color: var(--theme-text-secondary);
+  font-size: 13px;
+  line-height: 18px;
+}
+
+.party-invite-card {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.party-invite-card > .party-browser-host,
+.party-invite-card > .party-detail {
+  grid-column: 1 / -1;
+}
+
+.party-invite-card .party-button {
+  min-height: 46px;
+}
+
+.party-button.light {
+  background: #f2f2f2;
+  color: #141414;
+}
+
+.party-button.light:hover:not(:disabled) {
+  background: #ffffff;
+}
+
+.party-actions {
+  margin-top: 4px;
+  padding-top: 12px;
+}
+
+.party-button.party-leave-row {
+  justify-content: space-between;
+  background: transparent;
+  padding: 0 8px;
+}
+
+.party-button.party-leave-row:hover:not(:disabled) {
+  background: rgba(255, 255, 255, .06);
+}

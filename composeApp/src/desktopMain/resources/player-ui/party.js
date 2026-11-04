@@ -291,35 +291,28 @@ const buildPartyStart = party => {
   return content;
 };
 
+// "PARTY-CODE" label, the code as one line, copy icon on the right.
 const buildPartyCode = party => {
   const section = partyElement("div", "party-code");
-  const header = partyElement("div", "party-row");
+  const copy = partyElement("div", "party-code-copy");
   if (party.connected) {
-    header.appendChild(partyElement("span", "party-label", partyLabel("codeLabel")));
+    copy.appendChild(partyElement("span", "party-label", partyLabel("codeLabel")));
   } else {
     const status = partyElement("span", "party-label accent party-row");
     status.appendChild(partyElement("span", "party-pulsing-dot"));
     status.appendChild(partyElement("span", "", partyLabel("reconnecting")));
-    header.appendChild(status);
+    copy.appendChild(status);
   }
+  copy.appendChild(partyElement("span", "party-code-value", String(party.code || "")));
+  section.appendChild(copy);
   const copied = partyCopiedUntil > Date.now();
-  header.appendChild(partyIconButton(
+  section.appendChild(partyIconButton(
     copied ? "icon-check" : "icon-copy",
     partyLabel("copyInvite"),
     copied ? "done" : "",
     "copy",
     copyPartyInvite,
   ));
-  section.appendChild(header);
-  const slots = partyElement("div", "party-code-slots");
-  const code = String(party.code || "");
-  for (let index = 0; index < partyCodeLength; index += 1) {
-    const slot = partyElement("div", "party-code-slot");
-    slot.appendChild(partyElement("span", "party-code-char", code.charAt(index)));
-    slot.appendChild(partyElement("span", "party-code-line"));
-    slots.appendChild(slot);
-  }
-  section.appendChild(slots);
   return section;
 };
 
@@ -331,30 +324,44 @@ const confirmPartyRemoval = member => showPartyConfirm({
   onConfirm: () => send(`partyRemoveMember:${member.id}`, 0),
 });
 
+// Overall state from the members' own reports; offline and "Allein" members
+// do not count. Nothing is shown without real reports.
+const partyOverallSync = members => {
+  const joined = members.filter(member => member.syncState && !["offline", "solo"].includes(member.syncState));
+  if (!joined.length) return null;
+  const synced = joined.filter(member => member.syncState === "synced").length;
+  return synced === joined.length ? ["Synchron", "ok"] : [`${synced}/${joined.length} synchron`, "busy"];
+};
+
+const partySyncTone = state => ({synced: "ok", catching_up: "busy", buffering: "busy", unsynced: "error", solo: "muted", stale: "muted", offline: "muted"}[state] || "");
+
 const buildPartyMembers = party => {
   const section = partyElement("div", "party-members");
   const members = partyMembers();
   const total = Math.max(0, Number(party.maxMembers) || 0);
   const header = partyElement("div", "party-members-header");
   header.appendChild(partyElement("span", "party-label", party.seatsLabel || ""));
-  const dots = partyElement("div", "party-seat-dots");
-  for (let index = 0; index < total; index += 1) {
-    dots.appendChild(partyElement("span", index < members.length ? "party-seat-dot filled" : "party-seat-dot"));
+  const overall = partyOverallSync(members);
+  if (overall) {
+    const chip = partyElement("span", `party-sync-pill ${overall[1]}`);
+    if (overall[1] === "ok") chip.appendChild(partyIcon("icon-check"));
+    chip.appendChild(partyElement("span", "", overall[0]));
+    header.appendChild(chip);
   }
-  header.appendChild(dots);
   section.appendChild(header);
 
   const known = partyKnownMemberIds;
   members.forEach(member => {
     const entering = known !== null && !known.has(member.id);
     const row = partyElement("div", entering ? "party-member-row entering" : "party-member-row");
-    row.appendChild(buildPartyAvatar(member, 44, member.presence || "offline"));
+    row.appendChild(buildPartyAvatar(member, 36, member.presence || "offline"));
     const copy = partyElement("div", "party-member-copy");
     const nameRow = partyElement("div", "party-row");
     nameRow.appendChild(partyElement("span", "party-member-name", member.name || ""));
     if (member.isHost) nameRow.appendChild(partyElement("span", "party-host-tag", partyLabel("host")));
     copy.appendChild(nameRow);
-    copy.appendChild(partyElement("span", "party-member-status", member.status || ""));
+    const tone = partySyncTone(member.syncState);
+    copy.appendChild(partyElement("span", tone ? `party-member-status ${tone}` : "party-member-status", member.status || ""));
     row.appendChild(copy);
     if (member.familyShare) row.appendChild(buildPartyShareToggle(member));
     if (member.canRemove) {
@@ -365,31 +372,29 @@ const buildPartyMembers = party => {
   partyKnownMemberIds = new Set(members.map(member => member.id));
   const familyStatus = String(party.familyStatus || "").trim();
   if (members.some(member => member.familyShare) && familyStatus) section.appendChild(partyElement("p", "party-detail", familyStatus));
-  // Own player back to the party time / everyone to the host's party time.
-  if (party.canSyncMe) section.appendChild(partyIconTextButton("icon-sync", "Mich synchronisieren", "", "syncMe", () => closeAndSendParty("partySyncMe")));
-  if (party.canSyncAll) section.appendChild(partyIconTextButton("icon-sync", "Alle synchronisieren", "", "syncAll", () => send("partySyncAll", 0)));
-  const syncAll = String(party.syncAllStatus || "").trim();
-  if (syncAll) section.appendChild(partyElement("p", syncAll.startsWith("Alle synchron") ? "party-detail ok" : "party-detail", syncAll));
 
   if (members.length < total) {
     const invite = partyAction(partyElement("button", "party-open-seat-row"), "invite", copyPartyInvite);
-    invite.appendChild(buildPartyOpenSeat(44));
+    invite.appendChild(buildPartyOpenSeat(36));
     invite.appendChild(partyElement("span", "party-open-seat-label", partyLabel("openSeat")));
     section.appendChild(invite);
   }
+  // Own player back to the party time / everyone to the host's party time.
+  if (party.canSyncAll) section.appendChild(partyIconTextButton("icon-sync", "Alle synchronisieren", "party-sync-button", "syncAll", () => send("partySyncAll", 0)));
+  if (party.canSyncMe) section.appendChild(partyIconTextButton("icon-sync", "Mich synchronisieren", "party-sync-button", "syncMe", () => closeAndSendParty("partySyncMe")));
+  const syncAll = String(party.syncAllStatus || "").trim();
+  if (syncAll) section.appendChild(partyElement("p", syncAll.startsWith("Alle synchron") ? "party-detail center ok" : "party-detail center", syncAll));
   return section;
 };
 
-// Stream share per member: only members switched on here receive a TorBox
-// stream that carries the account token (through the family share service).
+// Stream share per member (shield): only members switched on here receive a
+// TorBox stream that carries the account token (family share service).
 const buildPartyShareToggle = member => {
   const on = member.familyShare === "on";
-  const toggle = partyAction(partyElement("button", on ? "party-share-toggle on" : "party-share-toggle"), `family:${member.id}`,
-    () => send(`partyFamilyAdmit:${String(member.id)}`, on ? 0 : 1));
+  const label = on ? "Stream freigegeben – klicken zum Entziehen" : "Stream für dieses Mitglied freigeben";
+  const toggle = partyIconButton(on ? "icon-shield-check" : "icon-shield", label, on ? "party-share-shield on" : "party-share-shield muted",
+    `family:${member.id}`, () => send(`partyFamilyAdmit:${String(member.id)}`, on ? 0 : 1));
   toggle.setAttribute("aria-pressed", String(on));
-  toggle.title = on ? "Stream freigegeben – klicken zum Entziehen" : "Stream für dieses Mitglied freigeben";
-  toggle.appendChild(partyIcon(on ? "icon-check" : "icon-add"));
-  toggle.appendChild(partyElement("span", "", on ? "Freigegeben" : "Freigeben"));
   return toggle;
 };
 
@@ -453,8 +458,7 @@ const partyBrowserHost = () => {
 // browser). The note only shows feedback or an address problem.
 const buildPartyBrowserShare = party => {
   setPartyBrowserDefaultHost(String(party.browserOrigin || ""));
-  const section = partyElement("div", "party-section party-card party-invite-card");
-  section.appendChild(partyElement("p", "party-card-title", "Einladen"));
+  const section = partyElement("div", "party-invite-card");
   const address = partyElement("input", "party-browser-host");
   address.setAttribute("aria-label", "Adresse der Browser-Seite");
   address.setAttribute("type", "url");
@@ -465,6 +469,7 @@ const buildPartyBrowserShare = party => {
   address.dataset.partyFocus = "browserHost";
   address.addEventListener("click", event => event.stopPropagation());
   address.addEventListener("keydown", event => event.stopPropagation());
+  address.hidden = partyBrowserDefaultHost === partyBrowserAllowedPreviewHost;
   section.appendChild(address);
   const note = partyElement("p", "party-detail");
   note.hidden = true;
@@ -500,8 +505,12 @@ const buildPartyBrowserShare = party => {
     showNote("");
   };
   // Same party code: the original Nuvio invite, then the browser invite (last).
-  section.appendChild(partyIconTextButton("icon-play", "Watch in Nuvio – Copy link", "", "nuvioShare", () => send("partyCopyNuvioLink", 0)));
-  section.appendChild(partyIconTextButton("icon-open", "Watch in Browser – Copy link", "primary", "browserShare", onClick));
+  const nuvio = partyIconTextButton("icon-monitor", "Watch in Nuvio", "", "nuvioShare", () => send("partyCopyNuvioLink", 0));
+  nuvio.title = "Nuvio-Einladungslink kopieren";
+  const browser = partyIconTextButton("icon-globe", "Watch in Browser", "light", "browserShare", onClick);
+  browser.title = "Browser-Einladungslink kopieren";
+  section.appendChild(nuvio);
+  section.appendChild(browser);
   return section;
 };
 
@@ -521,39 +530,52 @@ const partyIconTextButton = (icon, label, variant, focusKey, onClick) => {
 const partyCompactButton = (label, focusKey, onClick, variant = "") =>
   partyButtonElement(label, `compact ${variant}`.trim(), focusKey, onClick);
 
-// One line: "Browser-HLS" + status chip + refresh. Details only on problems.
+// Technical detail (errors) below the stream card; the short state lives in
+// the "Stream freigeben" subtitle.
 const buildPartyStreamStatus = party => {
   const phase = String(party.hlsPhase || "");
-  if (!phase) return null;
-  const box = partyElement("div", "party-stream-status");
-  const row = partyElement("div", "party-inline-row");
-  row.appendChild(partyElement("span", "party-row-label", "Browser-HLS"));
-  const [label, tone] = partyHlsPhaseLabels[phase] || [phase, ""];
-  const chip = partyElement("span", tone ? `party-chip ${tone}` : "party-chip", label);
   const detail = String(party.hlsStatus || "").trim();
-  if (detail) chip.title = detail;
-  row.appendChild(chip);
+  const problem = phase === "error" || (party.sharing && /can't be shared|nicht geteilt/i.test(String(party.shareNote || "")));
+  const note = String(phase === "error" ? detail : party.shareNote || "").trim();
+  return problem && note ? partyElement("p", "party-detail error", note) : null;
+};
+
+// "Stream freigeben" (switch + short HLS state), the stream card (title,
+// source, edit, refresh), the own-link option and "Nur ich steuere".
+const buildPartyHostSettings = party => {
+  const section = partyElement("div", "party-host-settings");
+  const [hlsLabel] = partyHlsPhaseLabels[String(party.hlsPhase || "")] || [""];
+  const shareSubtitle = hlsLabel ? `Browser-HLS: ${hlsLabel}` : partyLabel("shareDescription");
+  section.appendChild(buildPartySwitch("sharing", "Stream freigeben", shareSubtitle, party.sharing, "partySharing"));
+  if (party.torboxChoicesOpen) section.appendChild(buildPartyTorboxLink(party));
+  else if (party.streamTitle) section.appendChild(buildPartyStreamCard(party));
+  const problem = buildPartyStreamStatus(party);
+  if (problem) section.appendChild(problem);
+  if (party.hostHlsAllowed) section.appendChild(buildPartyHostHls(party));
+  section.appendChild(buildPartySwitch("hostOnly", partyLabel("hostOnlyTitle"), partyLabel("hostOnlyDescription"), party.hostOnly, "partyHostOnly"));
+  return section;
+};
+
+const buildPartyStreamCard = party => {
+  const card = partyElement("div", "party-stream-card");
+  card.appendChild(partyIcon("icon-film"));
+  const copy = partyElement("div", "party-stream-copy");
+  copy.appendChild(partyElement("span", "party-stream-title party-ellipsis", String(party.streamTitle || "")));
+  const linked = String(party.torboxLinkedName || "").trim();
+  const source = partyElement("span", "party-stream-source party-ellipsis", linked ? `${party.streamSource} · ${linked}` : String(party.streamSource || ""));
+  source.title = linked;
+  copy.appendChild(source);
+  card.appendChild(copy);
   if (party.hlsAvailable) {
     const refresh = partyIconButton("icon-sync", "HLS neu vorbereiten", "muted", "hlsRefresh", () => send("partyHlsRefresh", 0));
     if (party.hlsBusy) refresh.disabled = true;
-    row.appendChild(refresh);
+    card.appendChild(refresh);
   }
-  box.appendChild(row);
-  const problem = phase === "error" || phase === "unavailable" || (party.sharing && /can't be shared|nicht geteilt/i.test(String(party.shareNote || "")));
-  const note = String((phase === "error" || phase === "unavailable") ? detail : party.shareNote || "").trim();
-  if (problem && note) box.appendChild(partyElement("p", "party-detail", note));
-  return box;
-};
-
-const buildPartyHostSettings = party => {
-  const section = partyElement("div", "party-host-settings party-card");
-  section.appendChild(buildPartySwitch("hostOnly", partyLabel("hostOnlyTitle"), partyLabel("hostOnlyDescription"), party.hostOnly, "partyHostOnly"));
-  section.appendChild(buildPartySwitch("sharing", partyLabel("shareTitle"), partyLabel("shareDescription"), party.sharing, "partySharing"));
-  const status = buildPartyStreamStatus(party);
-  if (status) section.appendChild(status);
-  if (party.torboxLinkAvailable) section.appendChild(buildPartyTorboxLink(party));
-  if (party.hostHlsAllowed) section.appendChild(buildPartyHostHls(party));
-  return section;
+  if (party.torboxLinkAvailable) {
+    card.appendChild(partyIconButton("icon-edit", linked ? "Cloud-Datei ändern" : "Cloud-Datei verknüpfen", "muted", "torboxList",
+      () => { partyTorboxFilter = String(party.torboxSuggestedFilter || ""); send("partyTorboxList", 0); }));
+  }
+  return card;
 };
 
 
@@ -648,52 +670,43 @@ const buildPartyHostHls = party => {
   return box;
 };
 
-// Cloud file of an addon stream: linked automatically when unique (info hash
-// or exact title); the name is shown once with "change" and "remove".
+// Manual choice of the cloud file (opened from the stream card's pencil):
+// search prefilled with the title, confirm, or remove the current link.
 const buildPartyTorboxLink = party => {
-  const box = partyElement("div", "party-torbox-link");
-  const linked = String(party.torboxLinkedName || "").trim();
-  if (party.torboxChoicesOpen) {
-    const filter = partyInputElement("party-torbox-filter", "TorBox-Dateien suchen", "torboxFilter");
-    filter.placeholder = "Datei suchen …";
-    filter.value = partyTorboxFilter;
-    box.appendChild(filter);
-    const list = partyElement("div", "party-torbox-list");
-    const render = () => {
-      list.textContent = "";
-      const words = partyTorboxFilter.toLowerCase().split(/\s+/).filter(Boolean);
-      const matches = normalizeItems(party.torboxChoices)
-        .filter(choice => words.every(word => String(choice.name || "").toLowerCase().includes(word)));
-      matches.slice(0, partyTorboxVisibleLimit).forEach(choice => {
-        const name = String(choice.name || "");
-        const item = partyButtonElement(name, "compact list", `torboxPick:${choice.id}`, () => showPartyConfirm({
-          title: "Diese Datei verknüpfen?",
-          message: `„${name}“ – nur wählen, wenn es genau dieser Film bzw. diese Folge ist.`,
-          confirmLabel: "Verknüpfen",
-          danger: false,
-          onConfirm: () => send(`partyTorboxPick:${String(choice.id)}`, 0),
-        }));
-        if (choice.size) item.appendChild(partyElement("span", "party-list-meta", String(choice.size)));
-        list.appendChild(item);
-      });
-      if (matches.length > partyTorboxVisibleLimit) list.appendChild(partyElement("p", "party-detail", `${matches.length - partyTorboxVisibleLimit} weitere Treffer – Suche genauer eingeben.`));
-      if (!party.torboxChoicesBusy && !matches.length) list.appendChild(partyElement("p", "party-detail", "Keine passende Datei."));
-    };
-    filter.addEventListener("input", () => { partyTorboxFilter = filter.value; render(); });
-    render();
-    box.appendChild(list);
-    box.appendChild(partyCompactButton("Schließen", "torboxClose", () => send("partyTorboxClose", 0)));
-  } else {
-    const row = partyElement("div", "party-inline-row");
-    const name = partyElement("span", "party-row-label party-ellipsis", linked ? `Verknüpft: ${linked}` : "Keine Cloud-Datei verknüpft");
-    name.title = linked;
-    row.appendChild(name);
-    if (linked && party.torboxLinkAuto) row.appendChild(partyElement("span", "party-chip", "automatisch"));
-    const open = () => { partyTorboxFilter = String(party.torboxSuggestedFilter || ""); send("partyTorboxList", 0); };
-    row.appendChild(partyCompactButton(linked ? "Ändern" : "Verknüpfen", "torboxList", open));
-    if (linked) row.appendChild(partyCompactButton("Lösen", "torboxUnlink", () => send("partyTorboxUnlink", 0)));
-    box.appendChild(row);
-  }
+  const box = partyElement("div", "party-torbox-link party-card");
+  const filter = partyInputElement("party-torbox-filter", "TorBox-Dateien suchen", "torboxFilter");
+  filter.placeholder = "Datei suchen …";
+  filter.value = partyTorboxFilter;
+  box.appendChild(filter);
+  const list = partyElement("div", "party-torbox-list");
+  const render = () => {
+    list.textContent = "";
+    const words = partyTorboxFilter.toLowerCase().split(/\s+/).filter(Boolean);
+    const matches = normalizeItems(party.torboxChoices)
+      .filter(choice => words.every(word => String(choice.name || "").toLowerCase().includes(word)));
+    matches.slice(0, partyTorboxVisibleLimit).forEach(choice => {
+      const name = String(choice.name || "");
+      const item = partyButtonElement(name, "compact list", `torboxPick:${choice.id}`, () => showPartyConfirm({
+        title: "Diese Datei verknüpfen?",
+        message: `„${name}“ – nur wählen, wenn es genau dieser Film bzw. diese Folge ist.`,
+        confirmLabel: "Verknüpfen",
+        danger: false,
+        onConfirm: () => send(`partyTorboxPick:${String(choice.id)}`, 0),
+      }));
+      if (choice.size) item.appendChild(partyElement("span", "party-list-meta", String(choice.size)));
+      list.appendChild(item);
+    });
+    if (matches.length > partyTorboxVisibleLimit) list.appendChild(partyElement("p", "party-detail", `${matches.length - partyTorboxVisibleLimit} weitere Treffer – Suche genauer eingeben.`));
+    if (!party.torboxChoicesBusy && !matches.length) list.appendChild(partyElement("p", "party-detail", "Keine passende Datei."));
+  };
+  filter.addEventListener("input", () => { partyTorboxFilter = filter.value; render(); });
+  render();
+  box.appendChild(list);
+  const actions = partyElement("div", "party-inline-row");
+  if (String(party.torboxLinkedName || "").trim()) actions.appendChild(partyCompactButton("Verknüpfung lösen", "torboxUnlink", () => send("partyTorboxUnlink", 0)));
+  actions.appendChild(partyElement("span", "party-row-label"));
+  actions.appendChild(partyCompactButton("Schließen", "torboxClose", () => send("partyTorboxClose", 0)));
+  box.appendChild(actions);
   const status = String(party.torboxChoicesStatus || "").trim();
   if (status) box.appendChild(partyElement("p", "party-detail", status));
   return box;
@@ -740,7 +753,10 @@ const buildPartyContent = party => {
     content.appendChild(section);
   }
 
-  if (party.isHost) content.appendChild(buildPartyHostSettings(party));
+  if (party.isHost) {
+    content.appendChild(partyElement("div", "party-divider"));
+    content.appendChild(buildPartyHostSettings(party));
+  }
   if (!party.isHost && party.hostOnly) {
     const note = partyElement("div", "party-host-only-note");
     note.appendChild(partyIcon("icon-lock"));
@@ -750,7 +766,9 @@ const buildPartyContent = party => {
   if (party.isHost) content.appendChild(buildPartyBrowserShare(party));
 
   const actions = partyElement("div", "party-actions");
-  actions.appendChild(partyButtonElement(partyLabel("leave"), "", "leave", () => closeAndSendParty("partyLeave")));
+  const leave = partyButtonElement(partyLabel("leave"), "party-leave-row", "leave", () => closeAndSendParty("partyLeave"));
+  leave.appendChild(partyIcon("icon-logout"));
+  actions.appendChild(leave);
   if (party.canEnd) {
     actions.appendChild(partyButtonElement(partyLabel("end"), "danger", "end", () => showPartyConfirm({
       title: partyLabel("endTitle"),
