@@ -1845,3 +1845,19 @@ test('countdowns from other members, other titles or invalid lengths are ignored
   h.session.receive('countdown', {member_id: 'host', media_key: 'movie|tt1||', start_at: 4000, seconds: 30});
   assert.equal(h.get('message').textContent, 'before');
 });
+
+test('a TorBox link with token shared directly by the host loads automatically and passes the token to TorBox variants only', async () => {
+  const keyed = 'https://flux-007.wnam.tb-cdn.io/stream/p/master.m3u8?token=FAKE_ACCOUNT_TOKEN_FOR_TESTS';
+  const h = await harness({autoHost: true});
+  h.session.receive('stream', {member_id: 'host', stream: {media_key: 'movie|tt1||', url: keyed, stream_type: 'hls', browser_hls: {url: keyed, label: 'TorBox HLS', propagate_token: true}}});
+  const instance = h.desktopHls();
+  assert.equal(instance.source, keyed);
+  h.metadata(); await settlePlayback();
+  assert.equal(h.sync(), true); assert.equal(h.player.currentTime, 5);
+  const opened = [], xhr = {open: (...args) => opened.push(args), setRequestHeader() {}};
+  instance.config.xhrSetup(xhr, 'https://flux-007.wnam.tb-cdn.io/stream/p/720.m3u8');
+  assert.equal(opened[0][1], 'https://flux-007.wnam.tb-cdn.io/stream/p/720.m3u8?token=FAKE_ACCOUNT_TOKEN_FOR_TESTS');
+  opened.length = 0; instance.config.xhrSetup(xhr, 'https://cdn.example.test/x.ts');
+  assert.equal(opened.length, 0);
+  assert.ok(!JSON.stringify(h.storageWrites).includes('FAKE_ACCOUNT_TOKEN_FOR_TESTS')); // Memory only.
+});

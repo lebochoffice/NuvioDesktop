@@ -999,7 +999,10 @@ function loadStream() {
     if (streamIsHls(stream)) {
       if (player.canPlayType('application/vnd.apple.mpegurl') && !Object.keys(stream.headers || {}).length) { player.src = stream.url; renderQuality(null, true); }
       else if (Hls.isSupported()) {
-        const familyToken = familyStream && familyStream.url === stream.url ? familyStream.token : null;
+        // TorBox link with token: variants/segments that lost the query get the same token.
+        let ownToken = null;
+        try { ownToken = stream.propagate_token === true ? new URL(stream.url).searchParams.get('token') : null; } catch { ownToken = null; }
+        const familyToken = (familyStream && familyStream.url === stream.url ? familyStream.token : null) || ownToken;
         const instance = new Hls({...HLS_TUNING, debug: false, enableWorker: true, xhrSetup: (xhr, requestUrl) => {
           // Family share with propagate_token: variants that lost the query get the same token.
           const target = familyToken ? withFamilyToken(requestUrl, familyToken) : requestUrl;

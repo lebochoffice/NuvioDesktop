@@ -247,7 +247,7 @@ internal fun PlayerScreenRuntime.rememberPartyControlsState(): PlayerControlPart
         streamTitle = if (party.isHost && !elsewhere) party.media.displayTitle() else "",
         streamSource = when {
             !party.isHost || elsewhere -> ""
-            activeHostPartyHls != null -> if (activeHostPartyHls?.familyOnly == true) "Eigener Link · Familie" else "Eigener Link"
+            activeHostPartyHls != null -> if (activeHostPartyHls?.familyOnly == true) "Eigener TorBox-Link" else "Eigener Link"
             activeStream?.torboxPartyFile != null -> "TorBox-Cloud"
             torboxManualFor == partyKey -> if (torboxLinkAuto) "TorBox automatisch verknüpft" else "TorBox verknüpft"
             activeStream != null -> "Keine Cloud-Datei verknüpft"
@@ -275,7 +275,7 @@ internal fun PlayerScreenRuntime.rememberPartyControlsState(): PlayerControlPart
             !party.isHost || elsewhere -> ""
             activeHostPartyHls != null -> if (activeHostPartyHls?.familyOnly == true) "family-link" else "link"
             effectiveTorboxFile != null -> when (torboxPartyPhase) {
-                com.nuvio.app.features.debrid.TorboxHlsPhase.Ready -> if (party.sharing) (if (torboxFamilyOnly) "family" else "sent") else "ready"
+                com.nuvio.app.features.debrid.TorboxHlsPhase.Ready -> if (party.sharing) "sent" else "ready"
                 com.nuvio.app.features.debrid.TorboxHlsPhase.Preparing -> "preparing"
                 com.nuvio.app.features.debrid.TorboxHlsPhase.Processing -> "processing"
                 com.nuvio.app.features.debrid.TorboxHlsPhase.Expired -> "renewing"
@@ -576,8 +576,9 @@ private fun PlayerScreenRuntime.shareHostPartyHls(url: String, label: String) {
         // A TorBox stream link whose account key is only its `token` cannot be
         // shared openly (TorBox rejects it without the token). With the family
         // share service it goes only to admitted members, never by broadcast.
-        val family = com.nuvio.app.features.party.PartyFamilyShare.configured && torboxKey.isNotBlank() &&
-            com.nuvio.app.features.debrid.torboxKeyFreeUrl(url.trim(), torboxKey) != null
+        // A TorBox stream link whose account key is only its `token`: shared as
+        // it is with all party members (TorBox rejects it without the token).
+        val family = torboxKey.isNotBlank() && com.nuvio.app.features.debrid.torboxKeyFreeUrl(url.trim(), torboxKey) != null
         val result = try { com.nuvio.app.features.party.checkPartyHostHls(url, if (family) keys - torboxKey else keys) }
             catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
             catch (_: Exception) { com.nuvio.app.features.party.PartyHostHlsCheck.Problem("Unerwarteter Fehler bei der Prüfung. Link kontrollieren und erneut versuchen.") }
@@ -591,7 +592,7 @@ private fun PlayerScreenRuntime.shareHostPartyHls(url: String, label: String) {
             is com.nuvio.app.features.party.PartyHostHlsCheck.Ok -> {
                 hostPartyHls = com.nuvio.app.features.party.PartyHostHls(result.url, mediaKey, label, familyOnly = family)
                 if (PartyRepository.state.value.party?.sharing != true) PartyRepository.setSharing(true)
-                hostPartyHlsStatus = if (family) "Geteilt per Familienfreigabe: nur angehakte Mitglieder erhalten den Link."
+                hostPartyHlsStatus = if (family) "Mit allen Mitgliedern geteilt (TorBox-Link mit Account-Key)."
                     else "Geteilt mit allen Mitgliedern."
             }
         }

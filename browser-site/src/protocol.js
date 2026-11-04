@@ -79,7 +79,7 @@ export function browserPartyStream(stream) {
   // label: optional display name of the Desktop host (e.g. its own video link).
   const label = typeof browser.label === 'string' ? browser.label.replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 80) : '';
   return {media_key: stream.media_key, url: browser.url, headers: browser.headers || {},
-    response_headers: {}, name: label || 'TorBox HLS', stream_type: 'hls'};
+    response_headers: {}, name: label || 'TorBox HLS', stream_type: 'hls', propagate_token: browser.propagate_token === true};
 }
 
 export function publicConfigProblem(url, key) {

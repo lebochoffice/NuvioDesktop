@@ -112,3 +112,10 @@ test('a member watching alone on purpose (solo) is labelled "Allein", without dr
   assert.equal(memberSyncLabel(memberSync(alone, party, 'movie|tt1||', 15000)), 'Allein');
   assert.equal(memberSync({...alone, solo: undefined}, party, 'movie|tt1||', 15000).state, 'unsynced'); // Older clients.
 });
+
+test('browser_hls propagate_token is passed through only when true', () => {
+  const base = {media_key: 'movie|tt1||', url: 'https://a.tb-cdn.io/m.m3u8?token=T'};
+  assert.equal(browserPartyStream({...base, browser_hls: {url: base.url, propagate_token: true}}).propagate_token, true);
+  assert.equal(browserPartyStream({...base, browser_hls: {url: base.url, propagate_token: 'yes'}}).propagate_token, false);
+  assert.equal(browserPartyStream({...base, browser_hls: {url: base.url}}).propagate_token, false);
+});

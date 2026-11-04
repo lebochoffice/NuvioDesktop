@@ -56,6 +56,8 @@ data class PartyBrowserHls(
     // state "family": the address is only available from the family share
     // service for admitted guests; rev changes with every new share there.
     val rev: Int? = null,
+    // The TorBox token must also go on variant/segment requests (relative URIs lose it).
+    @SerialName("propagate_token") val propagateToken: Boolean? = null,
 )
 
 @Serializable
