@@ -139,3 +139,15 @@ test('the login form page sends its real origin on submit (Referrer-Policy same-
   assert.equal(nullOrigin.response.status, 403); assert.equal(nullOrigin.response.headers.get('Set-Cookie'), null);
   assert.equal((await login()).response.status, 303); // Same-origin submit works.
 });
+
+test('one login per device lasts 30 days, never without an expiry; a password change still ends it', async () => {
+  assert.equal(SESSION_S, 30 * 24 * 3600);
+  const now = Date.UTC(2026, 10, 5, 12);
+  const {response} = await call(`${PREVIEW}${LOGIN_PATH}`, {...form({password: env.PREVIEW_PASSWORD, next: '/'}), now});
+  assert.match(response.headers.get('Set-Cookie'), /Max-Age=2592000; Secure; HttpOnly; SameSite=Lax/);
+  const cookie = cookieOf(response);
+  assert.equal((await call(`${PREVIEW}/`, {headers: {Cookie: cookie}, now: now + 29 * 86400 * 1000})).response.status, 200);
+  assert.equal((await call(`${PREVIEW}/`, {headers: {Cookie: cookie}, now: now + 31 * 86400 * 1000})).response.status, 401);
+  const rotated = {...env, PREVIEW_PASSWORD: 'another-test-password-987654'};
+  assert.equal((await call(`${PREVIEW}/`, {headers: {Cookie: cookie}, environment: rotated, now: now + 1000})).response.status, 401);
+});
