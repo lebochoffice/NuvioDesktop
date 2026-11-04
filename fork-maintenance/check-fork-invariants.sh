@@ -38,6 +38,9 @@ need_text composeApp/src/commonMain/kotlin/com/nuvio/app/features/party/PartyMod
 need_file composeApp/src/commonMain/kotlin/com/nuvio/app/features/party/PartyLinks.kt
 need_text browser-site/src/shared-source.js 'export const LINK_PROTOCOL = 1;'
 need_text composeApp/src/commonMain/kotlin/com/nuvio/app/features/party/PartyChannel.kt '"shared_source"'
+# ... played in the Desktop player view (WebView2 virtual HTTPS host for link-player.html).
+need_file composeApp/src/desktopMain/resources/player-ui/link-player.html
+need_text composeApp/src/desktopMain/native/windows/player_bridge.cpp 'NUVIO_LINK_HOST = L"nuvio-link.example"'
 # Intro-skip configuration guard.
 need_text composeApp/build.gradle.kts 'INTRODB_API_URL missing or not https'
 # WebView2 loader guard: SDK path relative to the root, staged runtime checked.

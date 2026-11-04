@@ -129,6 +129,34 @@ object PartyRepository {
         }
     }
 
+    /** Host: absolute play/pause/seek of the link (from the in-player link view). */
+    fun setLink(paused: Boolean, positionMs: Long) {
+        val at = clock.nowMs()
+        scope.launch {
+            val party = _state.value.party ?: return@launch
+            if (!party.isHost || _sharedSource.value == null) return@launch
+            publishLink(paused = paused, positionMs = positionMs.coerceAtLeast(0L), at = at)
+        }
+    }
+
+    /**
+     * Desktop guest: play/pause/seek of the link as a host-sequenced command,
+     * exactly like a browser guest. Only while the host allows guest control;
+     * the result arrives as the host's next link state.
+     */
+    fun commandLink(paused: Boolean, positionMs: Long) {
+        scope.launch {
+            val party = _state.value.party ?: return@launch
+            val source = _sharedSource.value ?: return@launch
+            val host = party.hostMemberId ?: return@launch
+            if (party.isHost || party.hostOnly) return@launch
+            val id = "dl-" + PartyLinks.newId() + PartyLinks.newId()
+            val command = PartyCommand(commandId = id, memberId = party.memberId, paused = paused, positionMs = positionMs.coerceAtLeast(0L),
+                baseSeq = _linkPlayback.value?.seq, mediaKey = source.key, hostMemberId = host)
+            runCatching { channel?.send("command", PartyApi.json.encodeToJsonElement(PartyCommand.serializer(), command).jsonObject) }
+        }
+    }
+
     /** Host: shared start of the link in server time; it plays when the countdown ends. */
     fun startLinkCountdown(seconds: Int) {
         scope.launch {
@@ -139,6 +167,7 @@ object PartyRepository {
             val startAt = clock.nowMs() + length * 1_000L
             val position = _linkPlayback.value?.let { PartySync.expectedPositionMs(it, clock.nowMs()) } ?: 0L
             publishLink(paused = true, positionMs = position)
+            _countdown.value = PartyCountdown(startAt, length, source.key) // In-player countdown for the host.
             runCatching {
                 channel?.send("countdown", buildJsonObject {
                     put("member_id", party.memberId)
@@ -150,6 +179,7 @@ object PartyRepository {
             sessionScope?.launch {
                 delay((startAt - clock.nowMs()).coerceAtLeast(0L))
                 val same = _sharedSource.value?.key == source.key && _linkPlayback.value?.paused == true
+                if (_countdown.value?.mediaKey == source.key) _countdown.value = null
                 if (same) publishLink(paused = false, positionMs = position, at = startAt)
             }
         }
@@ -549,8 +579,15 @@ object PartyRepository {
             "shared_source" -> {
                 // Desktop guests cannot play these sources; they only show a notice.
                 if (party.isHost || payload.string("member_id") != party.hostMemberId) return
-                val source = payload["source"]?.takeIf { it !is JsonNull }?.let { decode(it, PartySharedSource.serializer()) }
-                _sharedSource.value = source?.takeIf { PartyLinks.valid(it, party.media.key) }
+                val raw = payload["source"]?.takeIf { it !is JsonNull }
+                val source = raw?.let { decode(it, PartySharedSource.serializer()) }?.takeIf { PartyLinks.valid(it, party.media.key) }
+                if (raw != null && source == null) return // Malformed: ignored, like in the browser.
+                if (source?.key == _sharedSource.value?.key) return // Re-sent unchanged.
+                // New epoch: the previous link's timeline never steers the next one.
+                _sharedSource.value = source
+                _linkPlayback.value = null
+                if (_countdown.value?.mediaKey?.let(PartyLinks::isLinkKey) == true) _countdown.value = null
+                requestState(party)
             }
             "status" -> decode(payload, PartyPresence.serializer())?.let(::applyStatus)
             "control" -> {
@@ -585,7 +622,9 @@ object PartyRepository {
             }
             "countdown" -> {
                 if (party.isHost) return
-                when (val signal = partyCountdownFrom(payload.string("member_id"), party.hostMemberId, party.media.key, payload, clock.nowMs())) {
+                // A shared link has its own countdowns (its key); the film's runtime ignores them.
+                val countdownKey = _sharedSource.value?.key?.takeIf { it == payload.string("media_key") } ?: party.media.key
+                when (val signal = partyCountdownFrom(payload.string("member_id"), party.hostMemberId, countdownKey, payload, clock.nowMs())) {
                     PartyCountdownSignal.Cancel -> _countdown.value = null
                     is PartyCountdownSignal.Start -> _countdown.value = signal.countdown
                     null -> Unit
@@ -860,6 +899,15 @@ object PartyRepository {
 
     private fun accept(candidate: PartyPlayback) {
         val party = _state.value.party ?: return
+        // The shared link's own timeline (desktop guests watch it in the player view):
+        // only the host's states for exactly the current revision count.
+        val link = _sharedSource.value
+        if (link != null && candidate.mediaKey == link.key) {
+            if (!party.isHost && candidate.memberId == party.hostMemberId && PartySync.isNewer(candidate, _linkPlayback.value)) {
+                _linkPlayback.value = candidate
+            }
+            return
+        }
         if (candidate.mediaKey != null && candidate.mediaKey != party.media.key) return
         if (party.hostOnly && candidate.memberId != party.hostMemberId) return
         val current = _playback.value

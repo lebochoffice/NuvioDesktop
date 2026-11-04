@@ -1,20 +1,22 @@
 # Smart Video Link Phase 2: Gemeinsame YouTube-, MP4- und WebM-Wiedergabe
 
-Stand: Basis `2b85dde8` auf `feature/party-premium-ui`. Implementiert, **nicht getestet, nicht gebaut, nicht committet**.
+Stand:
+- **Phase 2a** (`8aeda48e5`): Browser-Gäste, der Desktop-Host steuert nur.
+- **Phase 2b** (darauf aufbauend): Wiedergabe direkt im NUVIO-Desktop-Player, siehe Abschnitt 9. Implementiert, **nicht getestet, nicht gebaut, nicht committet**.
 
 ## 1. Ergebnis in Kürze
 
-| Quelle | Gemeinsam für Browser-Gäste | Desktop-Host | Desktop-Gäste |
+| Quelle | Browser-Gäste | Desktop-Host | Desktop-Gäste |
 |---|---|---|---|
-| **YouTube** | ja, offizieller IFrame-Player, Party-Zeit vom Host | steuert die Party-Zeit im Party-Menü, spielt **nicht** in NUVIO ab | Hinweis, keine Wiedergabe |
-| **MP4 / WebM** (direkt, HTTPS) | ja, HTML5-`<video>` über den bestehenden Sync-Pfad (`applySync`) | prüft die Datei (HTTP 206, Typ), steuert die Party-Zeit, spielt **nicht** in NUVIO ab | Hinweis, keine Wiedergabe |
+| **YouTube** | offizieller IFrame-Player | offizieller IFrame-Player **im NUVIO-Player** (Phase 2b), steuert die Party-Zeit | offizieller IFrame-Player **im NUVIO-Player** (Phase 2b) |
+| **MP4 / WebM** (direkt, HTTPS) | HTML5-`<video>` über den bestehenden Sync-Pfad (`applySync`) | HTML5-`<video>` **im NUVIO-Player** (Phase 2b); prüft die Datei vorher (HTTP 206, Typ) | HTML5-`<video>` **im NUVIO-Player** (Phase 2b) |
 | HLS / TorBox (Film) | unverändert | unverändert | unverändert |
 
-**Warum der Desktop-Host YouTube und Dateien nicht selbst abspielt:**
-- **YouTube in mpv:** Dafür müsste mpv das Video extrahieren (`ytdl`). Das ist ausgeschlossen.
-- **YouTube im Player-Overlay:** Das Overlay ist eine `file://`-Seite (`NativePlayerBridge.kt`: `controls.html`). YouTube braucht eine gültige Herkunft und einen Referer, sonst kommt Fehler 153. Abhilfe wäre eine virtuelle HTTPS-Herkunft in `player_bridge.cpp` plus eine zweite Player-Engine in `PlayerScreenRuntime`. Das würde die Player-Bridge ändern und fällt deshalb aus.
-- **Dateien in mpv:** Technisch möglich. Der Host-Player öffnet Quellen aber nur über den Stream-Bildschirm. Ein Wechsel mitten in der Wiedergabe auf eine beliebige URL wäre ein Eingriff in die Navigation und Synchronisierung des Desktop-Players. Den lasse ich für diese Phase bewusst weg.
-- **Konsequenz:** Der Host ist **Zeitgeber**. Er kann über den Browser-Link der Party selbst mitschauen. Die Party-Zeit läuft über Serverzeit, Position und Tempo, also genau wie beim Film.
+**Warum nicht mpv** (auch in Phase 2b):
+- **YouTube:** mpv müsste das Video extrahieren (`ytdl`). Das ist ausgeschlossen.
+- **MP4/WebM:** Der mpv-Player des Films trägt alles, was er abspielt, als Fortschritt und Verlauf des geöffneten Titels ein. Außerdem führt er dessen Party-Sync aus: Veröffentlichung, Warten auf Puffernde, Drift-Korrektur, Countdown-Start. Eine fremde Datei darin würde die Film-Position der Party und den Verlauf verfälschen.
+  - Abhilfe wäre, die Film-Party-Logik der `PlayerScreenRuntime` vollständig umzuschalten. Das ist der empfindlichste Teil der Synchronisierung und gezielt ausgeschlossen.
+  - Die Dateien sind ohnehin geprüft browserkompatibel (MP4/WebM), WebView2 (Chromium) spielt sie also genauso ab wie die Browser-Gäste.
 
 ## 2. Protokoll (Fork, „links“-Protokoll 1, rein additiv)
 
@@ -133,3 +135,66 @@ bash fork-maintenance/check-fork-invariants.sh
    - Den Link beenden, während ein Gast offline ist → nach dem Reconnect zurück zum Film.
 9. **Ende:** „Beenden“ → alle Browser zurück zur Film-Quelle; TorBox-HLS und Desktop-zu-Desktop laufen unverändert weiter.
 10. **Film- oder Hostwechsel** beendet den Link bei allen.
+
+## 9. Phase 2b: Gemeinsame Videos direkt im NUVIO-Desktop-Player
+
+### Aufbau
+- **Overlay:** Die Player-Oberfläche (`controls.html`, WebView2 über mpv) bleibt eine `file://`-Seite. Es gibt keine Änderung an Bildern, Speicher oder bestehenden Funktionen der Oberfläche.
+- **Neue Seite:** `link-player.html` (mit `link-player.js` und `link-policy.js`, im selben Ordner) liefert WebView2 zusätzlich über einen **virtuellen HTTPS-Host** aus: `https://nuvio-link.example/`.
+  - `player_bridge.cpp` nutzt dafür `ICoreWebView2_3::SetVirtualHostNameToFolderMapping` mit `DENY_CORS`.
+  - YouTube erhält damit eine echte Einbettungs-Herkunft statt `file://`; das verhindert Fehler 153.
+  - Ohne `ICoreWebView2_3` (sehr alte Runtime) bleibt alles wie bisher, nur YouTube meldet dann einen Fehler.
+- **Einbindung:** `party.js` legt während eines gemeinsamen Videos eine Ebene über das (pausierte) mpv-Bild:
+  - die Link-Seite als Iframe
+  - darunter eine Leiste mit Play/Pause, −10 s, +10 s, Zeit, Status/Countdown, „Allein schauen“/„Zur Party“, „Party“ und (nur Host) „Video beenden“
+  - Kopfzeile, Party-Menü, Dialoge und Hinweise bleiben darüber erreichbar.
+- **Film-Steuerung:** Mittelknöpfe, Zeitleiste, Skip-/Next-Hinweise sind ausgeblendet. Tastatur (Leertaste/K, Pfeile, J/L) und Klicks erreichen mpv nicht, solange das Video läuft; die Tasten steuern stattdessen das gemeinsame Video.
+- **Härtung der WebView:**
+  - Pop-up-Fenster werden blockiert (z. B. der YouTube-Logo-Link).
+  - Die Hauptseite kann nur innerhalb des lokalen Player-Ordners navigieren, eingebettete Inhalte können sie nicht wegleiten.
+  - Nachrichten zwischen Overlay und Link-Seite werden nur von genau dem jeweiligen Fenster (`event.source`) und von der Herkunft `https://nuvio-link.example` angenommen.
+  - Die Link-Seite hat eine eigene CSP: nur YouTube-API, -Player und -Embed, Medien über HTTPS, kein `eval`.
+
+### Synchronisierung
+- **Party-Zeit:**
+  - Kotlin übergibt den rohen Link-Stand (Position, `at`, Tempo, Pause, `seq`, Quellen-Key) und den Versatz zur Serverzeit.
+  - Die Seite rechnet die Party-Zeit selbst fort: `Position + (Jetzt + Versatz − at) · Tempo`.
+  - Ein Stand mit anderem Key (alte Revision) wird verworfen. Ein neuer Key ersetzt den Player vollständig, und Rückrufe des alten Players werden ignoriert.
+- **YouTube:** gleiche Regeln wie im Browser (`link-policy.js` = `link-sync.js`, durch einen Test abgesichert):
+  - Kein Tempo-Nudging.
+  - Seek ab 2 s Abweichung, bei Pause ab 0,75 s.
+  - Mindestens 5 s zwischen Korrektur-Seeks, höchstens 3 pro Minute.
+  - Beim Puffern und während Werbung wird nicht geseekt.
+  - Bei blockiertem Autoplay startet erst der Klick auf Play.
+- **MP4/WebM:**
+  - Seek ab 1,5 s Abweichung, bei Pause ab 0,5 s.
+  - Mindestens 3 s zwischen Korrektur-Seeks, höchstens 5 pro Minute.
+  - Sanftes Nudging (±5 %) mit Hysterese 0,25 s/0,08 s wie `PartySync`.
+  - Bei blockiertem Autoplay startet das Video stumm.
+- **Steuerung:**
+  - **Host:** Leiste, Tasten und Play/Pause im YouTube-Player setzen die Party-Zeit (`setLink`, `controlLink`). Countdown über das Party-Menü.
+  - **Desktop-Gast mit Gaststeuerung:** dieselben Aktionen als vom Host eingereihte Befehle mit dem Link-Key (`commandLink`), genau wie bei Browser-Gästen.
+  - **Host-only:** Eine eigene Aktion schaltet ehrlich auf „Allein“. „Zur Party“ übernimmt wieder die Party-Zeit.
+- **Gäste:** Desktop-Gäste übernehmen nur Link-Stände des Hosts für die aktuelle Revision (`accept`) und Countdowns mit dem Link-Key. Der Film-Countdown und die Film-Runtime ignorieren beides.
+- **Reconnect, später Beitritt:**
+  - Neuer Key → neue Epoche und `state_request`.
+  - Der Host beantwortet jedes `state_request` mit `shared_source` und dem Link-Stand.
+- **„Alle synchronisieren“:** bleibt für den Film. Für das Video gleichen die Seiten ohnehin jede Sekunde mit der Party-Zeit ab.
+
+### Neu bzw. geändert
+- **Neu:**
+  - `player-ui/link-player.html`, `link-player.js`, `link-policy.js`
+  - `browser-site/tests/desktop-link-player.test.js` (Regelgleichheit, Nachrichtenprotokoll, Verdrahtung)
+- **Geändert:**
+  - `player_bridge.cpp` (virtueller Host, Pop-up-Sperre, Navigationsschutz)
+  - `NativePlayerBridge.kt` (Assets)
+  - `party.js`, `party.css`
+  - `PlayerControlParty.kt`, `PlayerScreenRuntimePartyControls.kt`, `PartyRepository.kt`
+  - `check-fork-invariants.sh`
+- **Wichtig:** `player_bridge.cpp` hat sich geändert. Der nächste Build baut die Player-Bridge neu (`buildWindowsPlayerBridge`), dafür ist `-Pnuvio.webview2.dir=…` nötig.
+
+### Offene Einschränkungen
+- **Statusanzeige:** Desktop-Teilnehmer melden für das Video keinen eigenen Status (Puffert/Synchron) an die anderen; es gibt nur ihre lokale Anzeige. Browser-Gäste melden ihn wie bisher.
+- **Herkunft für YouTube:** Ob YouTube `https://nuvio-link.example` als Herkunft akzeptiert (kein Fehler 153), lässt sich nur live prüfen. Falls nicht, wäre ein anderer virtueller Hostname der nächste Versuch.
+- **Steuerung:** Die NUVIO-Zeitleiste steuert das Video nicht; dafür gibt es die eigene Leiste, die Tasten und die YouTube-Bedienelemente.
+- **Bildmodi:** Bild-in-Bild und Vollbild des YouTube-Players innerhalb von WebView2 sind live zu prüfen.

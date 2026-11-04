@@ -174,6 +174,32 @@ std::wstring toWide(const std::string &value) {
     return result;
 }
 
+// Shared party videos (YouTube/MP4/WebM): the controls page stays file://.
+// Only link-player.html is additionally served from this virtual HTTPS host
+// (same folder, no CORS), because YouTube needs a real embedding origin
+// (otherwise error 153) and rejects file://.
+const wchar_t *const NUVIO_LINK_HOST = L"nuvio-link.example";
+
+// Folder of a file:///…/controls.html URL (percent-decoded UTF-8), or "".
+std::wstring folderOfFileUrl(const std::string &url) {
+    const std::string prefix = "file:///";
+    if (url.size() <= prefix.size() || _strnicmp(url.c_str(), prefix.c_str(), prefix.size()) != 0) return std::wstring();
+    std::string decoded;
+    for (size_t i = prefix.size(); i < url.size(); ++i) {
+        char c = url[i];
+        if (c == '?' || c == '#') break;
+        if (c == '%' && i + 2 < url.size() && std::isxdigit((unsigned char)url[i + 1]) && std::isxdigit((unsigned char)url[i + 2])) {
+            decoded.push_back((char)std::stoi(url.substr(i + 1, 2), nullptr, 16));
+            i += 2;
+        } else {
+            decoded.push_back(c == '/' ? '\\' : c);
+        }
+    }
+    size_t slash = decoded.find_last_of('\\');
+    if (slash == std::string::npos || slash < 2) return std::wstring();
+    return toWide(decoded.substr(0, slash));
+}
+
 std::string toUtf8(const std::wstring &value) {
     if (value.empty()) return std::string();
     int size = WideCharToMultiByte(CP_UTF8, 0, value.data(), (int)value.size(), nullptr, 0, nullptr, nullptr);
@@ -1387,6 +1413,8 @@ private:
     ComPtr<ICoreWebView2> webView;
     EventRegistrationToken messageToken = {};
     EventRegistrationToken acceleratorToken = {};
+    EventRegistrationToken newWindowToken = {};
+    EventRegistrationToken navigationGuardToken = {};
 
     std::mutex uiTaskMutex;
     std::deque<std::function<void()>> uiTasks;
@@ -1531,6 +1559,14 @@ private:
         if (webView && messageToken.value != 0) {
             webView->remove_WebMessageReceived(messageToken);
             messageToken.value = 0;
+        }
+        if (webView && newWindowToken.value != 0) {
+            webView->remove_NewWindowRequested(newWindowToken);
+            newWindowToken.value = 0;
+        }
+        if (webView && navigationGuardToken.value != 0) {
+            webView->remove_NavigationStarting(navigationGuardToken);
+            navigationGuardToken.value = 0;
         }
         if (controller && acceleratorToken.value != 0) {
             controller->remove_AcceleratorKeyPressed(acceleratorToken);
@@ -1686,6 +1722,45 @@ private:
                                             }
                                         ).Get(),
                                         &controllerSelf->messageToken
+                                    );
+                                    // Shared party videos: link-player.html from the
+                                    // controls folder under a virtual HTTPS origin.
+                                    // Without ICoreWebView2_3 YouTube stays unavailable;
+                                    // everything else works as before.
+                                    std::wstring folder = folderOfFileUrl(controlsUrl);
+                                    ComPtr<ICoreWebView2_3> webView3;
+                                    if (!folder.empty() && SUCCEEDED(controllerSelf->webView->QueryInterface(IID_PPV_ARGS(&webView3))) && webView3) {
+                                        webView3->SetVirtualHostNameToFolderMapping(
+                                            NUVIO_LINK_HOST, folder.c_str(), COREWEBVIEW2_HOST_RESOURCE_ACCESS_KIND_DENY_CORS);
+                                    }
+                                    // No pop-up windows (e.g. the YouTube logo link).
+                                    controllerSelf->webView->add_NewWindowRequested(
+                                        Callback<ICoreWebView2NewWindowRequestedEventHandler>(
+                                            [](ICoreWebView2 *, ICoreWebView2NewWindowRequestedEventArgs *args) -> HRESULT {
+                                                if (args) args->put_Handled(TRUE);
+                                                return S_OK;
+                                            }
+                                        ).Get(),
+                                        &controllerSelf->newWindowToken
+                                    );
+                                    // The top-level page stays the local controls page;
+                                    // embedded frames cannot navigate it elsewhere.
+                                    std::wstring allowedPrefix = toWide(controlsUrl.substr(0, controlsUrl.find_last_of('/') + 1));
+                                    controllerSelf->webView->add_NavigationStarting(
+                                        Callback<ICoreWebView2NavigationStartingEventHandler>(
+                                            [allowedPrefix](ICoreWebView2 *, ICoreWebView2NavigationStartingEventArgs *args) -> HRESULT {
+                                                if (!args) return S_OK;
+                                                PWSTR uri = nullptr;
+                                                if (SUCCEEDED(args->get_Uri(&uri)) && uri) {
+                                                    std::wstring target(uri);
+                                                    CoTaskMemFree(uri);
+                                                    bool allowed = target.rfind(allowedPrefix, 0) == 0 || target == L"about:blank";
+                                                    if (!allowed) args->put_Cancel(TRUE);
+                                                }
+                                                return S_OK;
+                                            }
+                                        ).Get(),
+                                        &controllerSelf->navigationGuardToken
                                     );
                                     controllerSelf->layoutNativeSubviews();
                                     std::wstring url = toWide(controlsUrl);

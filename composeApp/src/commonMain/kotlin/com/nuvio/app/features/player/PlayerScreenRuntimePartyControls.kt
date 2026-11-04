@@ -321,6 +321,16 @@ internal fun PlayerScreenRuntime.rememberPartyControlsState(): PlayerControlPart
         // Party time of the link when this state was built; the panel extrapolates it.
         linkPositionMs = linkPlayback?.takeIf { it.mediaKey == sharedSource?.key }
             ?.let { com.nuvio.app.features.party.PartySync.expectedPositionMs(it, PartyRepository.nowMs()) } ?: 0L,
+        linkKey = sharedSource?.takeIf { it.partyKey == party.media.key }?.key.orEmpty(),
+        linkVideoId = sharedSource?.takeIf { it.partyKey == party.media.key }?.videoId.orEmpty(),
+        linkUrl = sharedSource?.takeIf { it.partyKey == party.media.key }?.url.orEmpty(),
+        linkSeq = linkPlayback?.takeIf { it.mediaKey == sharedSource?.key }?.seq ?: -1L,
+        linkStatePositionMs = linkPlayback?.takeIf { it.mediaKey == sharedSource?.key }?.positionMs ?: 0L,
+        linkAt = linkPlayback?.takeIf { it.mediaKey == sharedSource?.key }?.at ?: 0L,
+        linkRate = linkPlayback?.takeIf { it.mediaKey == sharedSource?.key }?.rate ?: 1f,
+        linkServerOffsetMs = PartyRepository.nowMs() - kotlin.time.Clock.System.now().toEpochMilliseconds(),
+        linkCanControl = sharedSource != null && (party.isHost || !party.hostOnly),
+        linkCountdownAt = countdown?.takeIf { sharedSource != null && it.mediaKey == sharedSource?.key }?.startAt ?: 0L,
         // Manual linking only when no unique cloud file was found automatically
         // (or to change an existing manual link).
         torboxLinkAvailable = party.isHost && !elsewhere && activeStream != null && activeStream?.torboxPartyFile == null &&
@@ -458,6 +468,21 @@ internal fun PlayerScreenRuntime.handlePartyControlsEvent(type: String, value: D
         "partyLinkRestart" -> PartyRepository.controlLink(paused = true, restart = true)
         "partyLinkCountdown" -> PartyRepository.startLinkCountdown(partyCountdownSeconds)
         "partyLinkStop" -> PartyRepository.stopLink()
+        // In-player link view (link-player.html): absolute actions of this viewer,
+        // value = position in seconds. Host: new party time; guest: sequenced command.
+        "partyLinkViewerPlay", "partyLinkViewerPause", "partyLinkViewerSeek" -> {
+            val party = PartyRepository.state.value.party
+            val source = PartyRepository.sharedSource.value
+            if (party != null && source != null && value.isFinite() && value >= 0.0) {
+                val positionMs = (value * 1000).toLong().coerceIn(0L, 24L * 3_600_000L)
+                val paused = when (type) {
+                    "partyLinkViewerPlay" -> false
+                    "partyLinkViewerPause" -> true
+                    else -> PartyRepository.linkPlayback.value?.takeIf { it.mediaKey == source.key }?.paused ?: true
+                }
+                if (party.isHost) PartyRepository.setLink(paused, positionMs) else PartyRepository.commandLink(paused, positionMs)
+            }
+        }
         "partyTorboxList" -> loadTorboxCloudChoices()
         "partyTorboxClose" -> { torboxChoices = null; torboxChoicesFor = null; torboxChoicesStatus = "" }
         "partyTorboxUnlink" -> {
@@ -654,7 +679,7 @@ private fun PlayerScreenRuntime.shareSuggestedLink(suggestion: com.nuvio.app.fea
         if (shouldPlay) applyNativePlaybackState(play = false)
         PartyRepository.shareLink(candidate, label)
         PartyRepository.answerSuggestion(suggestion, accepted = true)
-        hostPartyHlsStatus = "Gemeinsames Video ($label) für Browser-Gäste freigegeben. Starte es im Party-Menü."
+        hostPartyHlsStatus = "Gemeinsames Video ($label) für alle freigegeben. Es startet pausiert; Abspielen oder Countdown im Player."
     }
     if (candidate.kind == com.nuvio.app.features.party.PartyLinks.YOUTUBE) { share(); return }
     val mediaKey = partyKey

@@ -190,6 +190,7 @@ const updatePartyBadge = (badge, count) => {
 };
 
 const renderPartyChrome = () => {
+  renderSharedVideoLayer();
   const party = currentParty();
   const title = partyLabel("title", "Watch party");
   partyButton.hidden = !party.available;
@@ -688,8 +689,8 @@ const buildPartyHlsSuggestion = party => {
   const accept = partyCompactButton("Für alle abspielen", "hlsSuggestionAccept", () => showPartyConfirm(separate ? {
     title: `${kindLabel} für die Party freigeben?`,
     message: kind === "youtube"
-      ? "Browser-Gäste sehen dieses YouTube-Video gemeinsam im offiziellen YouTube-Player. Du steuerst die Party-Zeit hier im Party-Menü; in NUVIO Desktop selbst wird es nicht abgespielt. Dein Film wird pausiert."
-      : `Das Video von ${host} wird geprüft und für Browser-Gäste freigegeben. Du steuerst die Party-Zeit hier; in NUVIO Desktop selbst wird es nicht abgespielt. Dein Film wird pausiert.`,
+      ? "Alle sehen dieses YouTube-Video gemeinsam im offiziellen YouTube-Player, in NUVIO Desktop und im Browser. Dein Film wird dafür pausiert."
+      : `Das Video von ${host} wird geprüft und für alle freigegeben, in NUVIO Desktop und im Browser. Dein Film wird dafür pausiert.`,
     confirmLabel: kind === "youtube" ? "Freigeben" : "Prüfen und freigeben",
     danger: false,
     onConfirm: () => send("partyHlsSuggestionAccept", id),
@@ -722,7 +723,7 @@ const buildPartyLink = party => {
   const label = String(party.linkLabel || (kind === "youtube" ? "YouTube" : kind.toUpperCase()));
   card.appendChild(partyElement("p", "party-card-title", `Gemeinsames Video · ${label}`));
   if (!party.isHost) {
-    card.appendChild(partyElement("p", "party-text", "Der Host zeigt Browser-Gästen gerade ein separates Video. NUVIO Desktop spielt diese Quelle nicht ab; öffne den Browser-Link der Party, um mitzuschauen."));
+    card.appendChild(partyElement("p", "party-text", "Der Host zeigt gerade ein gemeinsames Video. Es läuft hier im Player; dein Film ist so lange pausiert."));
     return card;
   }
   // Party time of the link, extrapolated locally between state updates.
@@ -743,7 +744,7 @@ const buildPartyLink = party => {
   more.appendChild(partyCompactButton("Von vorn", "linkRestart", () => send("partyLinkRestart", 0)));
   more.appendChild(partyCompactButton("Beenden", "linkStop", () => send("partyLinkStop", 0), "danger"));
   card.appendChild(more);
-  card.appendChild(partyElement("p", "party-detail", "Nur Browser-Gäste sehen dieses Video. Du kannst über den Browser-Link der Party selbst mitschauen."));
+  card.appendChild(partyElement("p", "party-detail", "Das Video läuft im Player für alle Teilnehmer, in NUVIO Desktop und im Browser."));
   const status = String(party.hostHlsStatus || "").trim();
   if (status && status.startsWith("Nicht geteilt")) card.appendChild(partyElement("p", "party-detail", status));
   return card;
@@ -1300,3 +1301,181 @@ partyConfirmAccept.addEventListener("click", event => {
   closePartyConfirm();
   if (handler) handler();
 });
+
+// --- Shared party video in the player view (links protocol 1) ---------------
+// YouTube (official IFrame player) or a direct MP4/WebM file plays in
+// link-player.html, served from the WebView2 virtual host below (a real HTTPS
+// origin; YouTube rejects file://). The film in mpv stays paused meanwhile and
+// its own controls are hidden; this bar steers the shared video instead.
+const PARTY_LINK_ORIGIN = "https://nuvio-link.example";
+let partyLinkLayer = null, partyLinkFrame = null, partyLinkReady = false, partyLinkSentKey = "", partyLinkSentState = "";
+let partyLinkSolo = false, partyLinkStatus = { status: "loading", message: "" }, partyLinkPosition = null, partyLinkBarKey = "";
+const partyLinkActive = () => {
+  const party = currentParty();
+  return Boolean(party.active && party.linkActive && party.linkKey &&
+    (party.linkKind === "youtube" ? party.linkVideoId : party.linkUrl));
+};
+const postPartyLink = message => {
+  if (partyLinkFrame && partyLinkFrame.contentWindow && partyLinkReady) {
+    partyLinkFrame.contentWindow.postMessage({ nuvioLink: 1, ...message }, PARTY_LINK_ORIGIN);
+  }
+};
+const partyLinkSource = party => ({ key: party.linkKey, kind: party.linkKind, videoId: party.linkVideoId || null, url: party.linkUrl || null });
+const partyLinkState = party => Number(party.linkSeq) >= 0 ? {
+  key: party.linkKey, seq: party.linkSeq, paused: party.linkPaused !== false, positionMs: Number(party.linkStatePositionMs) || 0,
+  at: Number(party.linkAt) || 0, rate: Number(party.linkRate) || 1, offsetMs: Number(party.linkServerOffsetMs) || 0,
+} : null;
+const sendPartyLinkUpdate = (force = false) => {
+  const party = currentParty();
+  if (!partyLinkReady || !partyLinkActive()) return;
+  if (force || partyLinkSentKey !== party.linkKey) {
+    partyLinkSentKey = party.linkKey;
+    partyLinkSentState = "";
+    postPartyLink({ type: "source", source: partyLinkSource(party) });
+    postPartyLink({ type: "solo", solo: partyLinkSolo });
+  }
+  const linkState = partyLinkState(party);
+  // The server offset changes slightly with every state; only real changes count.
+  const stateKey = linkState ? [linkState.key, linkState.seq, linkState.paused, linkState.positionMs, linkState.at, linkState.rate].join("|") : "";
+  if (linkState && (force || stateKey !== partyLinkSentState)) {
+    partyLinkSentState = stateKey;
+    postPartyLink({ type: "party", party: linkState });
+  }
+};
+const teardownPartyLink = () => {
+  if (!partyLinkLayer) return;
+  partyLinkLayer.remove();
+  partyLinkLayer = partyLinkFrame = null;
+  partyLinkReady = false;
+  partyLinkSentKey = partyLinkSentState = partyLinkBarKey = "";
+  partyLinkSolo = false;
+  partyLinkPosition = null;
+  partyLinkStatus = { status: "loading", message: "" };
+  document.body.classList.remove("party-link-active");
+};
+const partyLinkTime = ms => {
+  const total = Math.max(0, Math.floor((Number(ms) || 0) / 1000));
+  const h = Math.floor(total / 3600), m = Math.floor((total % 3600) / 60), s = total % 60;
+  return h ? `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}` : `${m}:${String(s).padStart(2, "0")}`;
+};
+// The viewer's own position (reported by the link page), else the party time.
+const partyLinkNowMs = () => {
+  if (partyLinkPosition) return partyLinkPosition.positionMs + (partyLinkPosition.playing ? Date.now() - partyLinkPosition.receivedAt : 0);
+  return Number(currentParty().linkPositionMs) || 0;
+};
+const partyLinkSetSolo = (solo, message = "") => {
+  partyLinkSolo = solo;
+  postPartyLink({ type: "solo", solo });
+  if (message) partyLinkStatus = { status: solo ? "solo" : "ready", message };
+  renderPartyLinkBar(true);
+};
+const partyLinkAction = (action, seconds = 0) => {
+  const party = currentParty();
+  if (partyLinkSolo) { postPartyLink({ type: "local", action, seconds }); return; }
+  if (!party.linkCanControl) {
+    // Host-only: playing on alone is allowed, but marked honestly as "Allein".
+    partyLinkSetSolo(true, "Nur der Host steuert gerade. Du schaust allein weiter; „Zur Party“ holt dich zurück.");
+    postPartyLink({ type: "local", action, seconds });
+    return;
+  }
+  const paused = party.linkPaused !== false;
+  if (party.isHost) {
+    if (action === "toggle") send(paused ? "partyLinkPlay" : "partyLinkPause", 0);
+    else send("partyLinkSeekBy", seconds);
+    return;
+  }
+  if (action === "toggle") send(paused ? "partyLinkViewerPlay" : "partyLinkViewerPause", partyLinkNowMs() / 1000);
+  else send("partyLinkViewerSeek", Math.max(0, partyLinkNowMs() / 1000 + seconds));
+};
+const renderPartyLinkBar = (force = false) => {
+  if (!partyLinkLayer) return;
+  const party = currentParty();
+  const bar = partyLinkLayer.querySelector(".party-link-bar");
+  const serverNow = Date.now() + (Number(party.linkServerOffsetMs) || 0);
+  const countdownLeft = Number(party.linkCountdownAt) > 0 ? Math.max(0, Math.ceil((Number(party.linkCountdownAt) - serverNow) / 1000)) : 0;
+  const key = [party.linkKey, party.linkPaused, party.isHost, party.linkCanControl, partyLinkSolo,
+    partyLinkStatus.status, partyLinkStatus.message, countdownLeft].join("|");
+  if (!force && key === partyLinkBarKey) {
+    const time = bar.querySelector(".party-link-time");
+    if (time) time.textContent = partyLinkTime(partyLinkNowMs());
+    return;
+  }
+  partyLinkBarKey = key;
+  bar.replaceChildren();
+  const label = String(party.linkLabel || (party.linkKind === "youtube" ? "YouTube" : String(party.linkKind || "").toUpperCase()));
+  const paused = partyLinkSolo ? !(partyLinkPosition && partyLinkPosition.playing) : party.linkPaused !== false;
+  bar.appendChild(partyCompactButton(paused ? "Abspielen" : "Pause", "linkBarToggle", () => partyLinkAction("toggle"), "primary"));
+  bar.appendChild(partyCompactButton("−10 s", "linkBarBack", () => partyLinkAction("seekBy", -10)));
+  bar.appendChild(partyCompactButton("+10 s", "linkBarForward", () => partyLinkAction("seekBy", 10)));
+  bar.appendChild(partyElement("span", "party-link-time", partyLinkTime(partyLinkNowMs())));
+  const info = countdownLeft > 0 ? `Gemeinsamer Start in ${countdownLeft} …`
+    : partyLinkSolo ? "Allein" : partyLinkStatus.message || (partyLinkStatus.status === "buffering" ? "Puffert …" : "");
+  bar.appendChild(partyElement("span", "party-link-info", `${label} · Gemeinsam${info ? ` · ${info}` : ""}`));
+  bar.appendChild(partyCompactButton(partyLinkSolo ? "Zur Party" : "Allein schauen", "linkBarSolo", () =>
+    partyLinkSetSolo(!partyLinkSolo, partyLinkSolo ? "Zurück bei der Party-Zeit." : "Du schaust allein weiter.")));
+  bar.appendChild(partyCompactButton("Party", "linkBarParty", () => openPlayerModal("party")));
+  if (party.isHost) bar.appendChild(partyCompactButton("Video beenden", "linkBarStop", () => send("partyLinkStop", 0), "danger"));
+};
+const renderSharedVideoLayer = () => {
+  if (!partyLinkActive()) { teardownPartyLink(); return; }
+  if (!partyLinkLayer) {
+    partyLinkLayer = partyElement("div", "party-link-layer");
+    partyLinkFrame = document.createElement("iframe");
+    partyLinkFrame.className = "party-link-frame";
+    partyLinkFrame.title = "Gemeinsames Video";
+    partyLinkFrame.allow = "autoplay; encrypted-media; picture-in-picture; fullscreen";
+    partyLinkFrame.allowFullscreen = true;
+    partyLinkFrame.referrerPolicy = "strict-origin-when-cross-origin";
+    partyLinkFrame.src = `${PARTY_LINK_ORIGIN}/link-player.html`;
+    partyLinkLayer.appendChild(partyLinkFrame);
+    const bar = partyElement("div", "party-link-bar");
+    bar.addEventListener("click", event => event.stopPropagation());
+    partyLinkLayer.appendChild(bar);
+    document.body.appendChild(partyLinkLayer);
+    document.body.classList.add("party-link-active");
+  }
+  sendPartyLinkUpdate();
+  renderPartyLinkBar();
+};
+window.addEventListener("message", event => {
+  const data = event.data;
+  if (!partyLinkFrame || event.source !== partyLinkFrame.contentWindow || event.origin !== PARTY_LINK_ORIGIN || !data || data.nuvioLink !== 1) return;
+  if (data.type === "hello") { partyLinkReady = true; sendPartyLinkUpdate(true); return; }
+  if (data.type === "status") {
+    const status = ["idle", "loading", "ready", "buffering", "blocked", "behind", "error", "solo"].includes(data.status) ? data.status : "ready";
+    partyLinkStatus = { status, message: String(data.message || "").slice(0, 160) };
+    renderPartyLinkBar(true);
+    return;
+  }
+  if (data.type === "position" && Number.isFinite(data.positionMs)) {
+    partyLinkPosition = { positionMs: data.positionMs, playing: data.playing === true, receivedAt: Date.now() };
+    return;
+  }
+  // The viewer pressed play/pause inside YouTube: a party action if allowed,
+  // otherwise this viewer continues alone (never a silent desync).
+  if (data.type === "viewer" && !partyLinkSolo && (data.action === "play" || data.action === "pause") && Number.isFinite(data.positionMs)) {
+    if (!currentParty().linkCanControl) { partyLinkSetSolo(true, "Nur der Host steuert gerade. Du schaust allein weiter."); return; }
+    send(data.action === "play" ? "partyLinkViewerPlay" : "partyLinkViewerPause", Math.max(0, data.positionMs / 1000));
+  }
+});
+setInterval(() => { if (partyLinkLayer) renderPartyLinkBar(); }, 1000);
+// While the shared video is shown, the film's keyboard and click controls must
+// not resume mpv behind it. Space/K toggle and arrows/J/L seek the shared video.
+window.addEventListener("keydown", event => {
+  if (!partyLinkLayer || activeModal || (event.target && event.target.closest && event.target.closest("input, textarea, select, [contenteditable]"))) return;
+  const key = event.key;
+  if (![" ", "Spacebar", "k", "K", "ArrowLeft", "ArrowRight", "j", "J", "l", "L"].includes(key)) return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  if (event.repeat) return;
+  if (key === "ArrowLeft" || key === "j" || key === "J") partyLinkAction("seekBy", -10);
+  else if (key === "ArrowRight" || key === "l" || key === "L") partyLinkAction("seekBy", 10);
+  else partyLinkAction("toggle");
+}, true);
+for (const type of ["click", "dblclick", "wheel"]) {
+  window.addEventListener(type, event => {
+    const target = event.target;
+    if (!partyLinkLayer || (target && target.closest && target.closest(".header-actions, .party-link-layer, .modal-layer, .party-pill, .player-toast, [role=dialog]"))) return;
+    event.stopImmediatePropagation();
+  }, true);
+}

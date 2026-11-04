@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <!-- Served only as https://nuvio-link.example/link-player.html (WebView2 virtual
+       host) inside the NUVIO player view. The origin, never a path with party
+       data, identifies the embedding page to YouTube. -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' https://www.youtube.com/iframe_api https://www.youtube.com/s/player/; frame-src https://www.youtube.com/embed/; media-src https:; img-src https: data:; style-src 'self' 'unsafe-inline'; connect-src https:; base-uri 'none'; form-action 'none'">
+  <meta name="referrer" content="strict-origin-when-cross-origin">
+  <title>NUVIO Gemeinsames Video</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #000; color: #eee; font-family: system-ui, sans-serif; overflow: hidden; }
+    #player, #player iframe, #player video { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: #000; }
+    #player video { object-fit: contain; }
+    #status { position: absolute; left: 50%; bottom: 16px; transform: translateX(-50%); max-width: 80%; padding: 6px 12px; border-radius: 8px;
+      background: rgba(0, 0, 0, .65); font-size: 13px; text-align: center; pointer-events: none; }
+    #status:empty { display: none; }
+  </style>
+</head>
+<body>
+  <div id="player"></div>
+  <p id="status" role="status"></p>
+  <script src="link-policy.js"></script>
+  <script src="link-player.js"></script>
+</body>
+</html>

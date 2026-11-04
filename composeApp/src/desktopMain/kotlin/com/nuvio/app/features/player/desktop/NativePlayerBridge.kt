@@ -312,6 +312,10 @@ internal object NativePlayerBridge {
             "party.css" to readResourceBytes("/player-ui/party.css"),
             "party.js" to readResourceBytes("/player-ui/party.js"),
             "loading-indicator.js" to readResourceBytes("/player-ui/loading-indicator.js"),
+            // Shared party videos: served under https://nuvio-link.example/ (virtual host, player_bridge.cpp).
+            "link-player.html" to readResourceBytes("/player-ui/link-player.html"),
+            "link-player.js" to readResourceBytes("/player-ui/link-player.js"),
+            "link-policy.js" to readResourceBytes("/player-ui/link-policy.js"),
             "fonts/jetbrains_sans_regular.ttf" to readResourceBytes(
                 "/composeResources/nuvio.composeapp.generated.resources/font/jetbrains_sans_regular.ttf",
             ),

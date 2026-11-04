@@ -73,6 +73,21 @@ data class PlayerControlPartyState(
     val linkLabel: String = "",
     val linkPaused: Boolean = true,
     val linkPositionMs: Long = 0L,
+    // In-player playback of the shared video (link-player.html). The party
+    // state is passed raw; the page computes the party time itself:
+    // position + (now + serverOffset - at) * rate while playing.
+    val linkKey: String = "",
+    val linkVideoId: String = "",
+    val linkUrl: String = "",
+    val linkSeq: Long = -1L,
+    val linkStatePositionMs: Long = 0L,
+    val linkAt: Long = 0L,
+    val linkRate: Float = 1f,
+    val linkServerOffsetMs: Long = 0L,
+    // Host, or a guest while the host allows guest control.
+    val linkCanControl: Boolean = false,
+    // Server time of a running shared start for the link, 0 = none.
+    val linkCountdownAt: Long = 0L,
     // "Mit TorBox-Datei verknüpfen" for addon streams without TorBox identity.
     val torboxLinkAvailable: Boolean = false,
     val torboxLinkedName: String = "",
