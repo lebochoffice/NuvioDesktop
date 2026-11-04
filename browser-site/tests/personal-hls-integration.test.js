@@ -762,7 +762,7 @@ test('an existing session joins directly without credentials; the cover play but
   const joins = []; h.session.join = async (...args) => { joins.push(args); };
   h.get('invitePlay').fire('click'); await settlePlayback();
   assert.equal(h.logins.length, 0); assert.equal(joins.length, 1);
-  assert.equal(joins[0][1], 'Nuvio-Mitglied'); // No profile, no metadata name → neutral, never the e-mail.
+  assert.equal(joins[0][1], 'me'); // No profile or metadata name: the part before "@", never the full e-mail.
 });
 
 test('wrong password: clear message, no join; missing fields ask for credentials without any request', async () => {
@@ -797,7 +797,10 @@ test('display name: profile name, then account metadata; e-mail addresses are ne
   assert.equal(await pick({sync_pull_profiles: () => [{profile_index: 1, name: 'me@example.test'}]}, {user_metadata: {full_name: 'Alan P'}}), 'Alan P');
   assert.equal(await pick({sync_pull_profiles: () => { throw Error('offline'); }}, {user_metadata: {name: 'friend@mail.test', username: 'Sam'}}), 'Sam');
   assert.equal(await pick({}, {user_metadata: {display_name: 'x'.repeat(80)}}), 'x'.repeat(36));
-  assert.equal(await pick({}, {user_metadata: {email: 'me@example.test'}}), 'Nuvio-Mitglied');
+  assert.equal(await pick({}, {user_metadata: {email: 'me@example.test'}}), 'me'); // Local part of the account e-mail.
+  assert.equal(await pick({}, {email: 'x@example.test'}), 'Nuvio-Mitglied'); // Too short: neutral fallback.
+  assert.equal(await pick({}, {email: '', user_metadata: {}}), 'Nuvio-Mitglied');
+  for (const name of [await pick({}, {email: 'max.mustermann@example.test'})]) assert.ok(!name.includes('@') && name === 'max.mustermann');
 });
 
 test('an expired session shows the sign-in fields again; the guest-join flag never signs in anonymously', async () => {

@@ -356,12 +356,15 @@ const buildPartyMembers = party => {
     copy.appendChild(nameRow);
     copy.appendChild(partyElement("span", "party-member-status", member.status || ""));
     row.appendChild(copy);
+    if (member.familyShare) row.appendChild(buildPartyShareToggle(member));
     if (member.canRemove) {
       row.appendChild(partyIconButton("icon-remove", partyLabel("remove"), "muted", `remove:${member.id}`, () => confirmPartyRemoval(member)));
     }
     section.appendChild(row);
   });
   partyKnownMemberIds = new Set(members.map(member => member.id));
+  const familyStatus = String(party.familyStatus || "").trim();
+  if (members.some(member => member.familyShare) && familyStatus) section.appendChild(partyElement("p", "party-detail", familyStatus));
 
   if (members.length < total) {
     const invite = partyAction(partyElement("button", "party-open-seat-row"), "invite", copyPartyInvite);
@@ -370,6 +373,19 @@ const buildPartyMembers = party => {
     section.appendChild(invite);
   }
   return section;
+};
+
+// Stream share per member: only members switched on here receive a TorBox
+// stream that carries the account token (through the family share service).
+const buildPartyShareToggle = member => {
+  const on = member.familyShare === "on";
+  const toggle = partyAction(partyElement("button", on ? "party-share-toggle on" : "party-share-toggle"), `family:${member.id}`,
+    () => send(`partyFamilyAdmit:${String(member.id)}`, on ? 0 : 1));
+  toggle.setAttribute("aria-pressed", String(on));
+  toggle.title = on ? "Stream freigegeben – klicken zum Entziehen" : "Stream für dieses Mitglied freigeben";
+  toggle.appendChild(partyIcon(on ? "icon-check" : "icon-add"));
+  toggle.appendChild(partyElement("span", "", on ? "Freigegeben" : "Freigeben"));
+  return toggle;
 };
 
 const buildPartySwitch = (key, title, description, checked, eventType) => {
@@ -385,9 +401,9 @@ const buildPartySwitch = (key, title, description, checked, eventType) => {
     };
     if (eventType === "partySharing" && next) {
       showPartyConfirm({
-        title: "Share this source with party members?",
-        message: "Participants may see and retain the source URL and its credentials. Membership removal cannot revoke a copied provider URL. Never share a full TorBox account key. Automatic restricted TorBox guest sessions are not configured.",
-        confirmLabel: "Share source", danger: false, onConfirm: apply,
+        title: "Stream mit der Party teilen?",
+        message: "Mitglieder können die Quelladresse sehen. TorBox-Streams mit Account-Key erhalten nur Mitglieder, die du in der Liste freigibst.",
+        confirmLabel: "Teilen", danger: false, onConfirm: apply,
       });
     } else apply();
   });
@@ -428,26 +444,26 @@ const partyBrowserHost = () => {
   } catch { return partyBrowserDefaultHost; }
 };
 
+// Invite block: heading, browser address, two copy buttons (Nuvio app and
+// browser). The note only shows feedback or an address problem.
 const buildPartyBrowserShare = party => {
   setPartyBrowserDefaultHost(String(party.browserOrigin || ""));
-  const section = partyElement("div", "party-section");
-  section.appendChild(partyElement("p", "party-switch-title", "Watch in Browser"));
-  section.appendChild(partyElement("p", "party-note", "TorBox HLS is prepared automatically for files resolved by this Nuvio account. See the source status above; enable the existing Share my stream only after consent. Full account keys are never accepted in the prepared HLS URL. Personal HLS remains a fallback. With Host only off, browser guests can play, pause and seek for everyone."));
-  section.appendChild(partyElement("p", "party-text", "Let friends watch from a browser, without installing Nuvio. Set up your own free HTTPS browser site once."));
+  const section = partyElement("div", "party-section party-card party-invite-card");
+  section.appendChild(partyElement("p", "party-card-title", "Einladen"));
   const address = partyElement("input", "party-browser-host");
-  address.setAttribute("aria-label", "Browser player URL");
+  address.setAttribute("aria-label", "Adresse der Browser-Seite");
   address.setAttribute("type", "url");
   address.setAttribute("inputmode", "url");
   address.placeholder = "https://your-project.pages.dev";
   address.value = partyBrowserHost();
   address.autocomplete = "off";
-  Object.assign(address.style, {
-    width: "100%", boxSizing: "border-box", margin: "10px 0",
-    border: "1px solid #555", borderRadius: "9px", color: "#f5f5f5",
-    padding: "10px 12px", background: "#242424", fontSize: "14px"
-  });
+  address.dataset.partyFocus = "browserHost";
+  address.addEventListener("click", event => event.stopPropagation());
+  address.addEventListener("keydown", event => event.stopPropagation());
   section.appendChild(address);
-  const note = partyElement("p", "party-note", "The browser viewer needs a Nuvio account. Sharing your stream may expose its underlying URL to party members. Never include a password or API key in this address.");
+  const note = partyElement("p", "party-detail");
+  note.hidden = true;
+  const showNote = text => { note.textContent = text; note.hidden = !text; };
   section.appendChild(note);
   address.addEventListener("change", () => {
     try { window.localStorage.setItem(partyBrowserHostStorage, address.value.trim()); } catch { /* session only */ }
@@ -459,12 +475,12 @@ const buildPartyBrowserShare = party => {
       parsed = new URL(raw);
       if (partyBrowserPreviewHost(new URL(raw).hostname) || !/^https:\/\/[^/?#@]+\/?$/i.test(raw) || /[\u0000-\u001f\u007f\\]/.test(address.value) || parsed.protocol !== "https:" || !parsed.hostname || parsed.username || parsed.password || parsed.search || parsed.hash || /[\u0000-\u0020\u007f\\]/.test(raw) || (parsed.pathname !== "/" && parsed.pathname !== "")) throw Error("invalid address");
     } catch {
-      note.textContent = "Enter the HTTPS home address of your deployed browser player (example: https://your-project.pages.dev).";
+      showNote("Bitte die HTTPS-Startadresse der Browser-Seite eintragen.");
       return;
     }
     const code = String(party.code || "").trim();
     if (!/^[A-HJ-NP-Z2-9]{6}$/.test(code)) {
-      note.textContent = "The party code is invalid.";
+      showNote("Der Party-Code ist ungültig.");
       return;
     }
     const invite = `${parsed.origin}/party/${encodeURIComponent(code)}`;
@@ -474,67 +490,68 @@ const buildPartyBrowserShare = party => {
   const onClick = () => {
     const invite = inviteUrl();
     if (!invite) return;
-    const copy = () => {
-      send(`partyBrowserInvite:${partyEncodeText(invite)}`, 0);
-      note.textContent = "Link requested. Check Nuvio's clipboard confirmation. Keep the host player open; stream compatibility is checked by each browser.";
-    };
-    // A party invite is also usable with each guest's personal HLS fallback.
     // Copying the link must never implicitly enable source sharing.
-    return copy();
+    send(`partyBrowserInvite:${partyEncodeText(invite)}`, 0);
+    showNote("");
   };
   // Same party code: the original Nuvio invite, then the browser invite (last).
-  section.appendChild(partyButtonElement("Watch in Nuvio – Copy link", "", "nuvioShare", () => send("partyCopyNuvioLink", 0)));
-  section.appendChild(partyButtonElement("Watch in Browser – Copy link", "primary", "browserShare", onClick));
+  section.appendChild(partyIconTextButton("icon-play", "Watch in Nuvio – Copy link", "", "nuvioShare", () => send("partyCopyNuvioLink", 0)));
+  section.appendChild(partyIconTextButton("icon-open", "Watch in Browser – Copy link", "primary", "browserShare", onClick));
   return section;
+};
+
+// Short labels for the browser HLS status chip.
+const partyHlsPhaseLabels = {
+  sent: ["Gesendet", "ok"], family: ["Familie", "ok"], ready: ["Bereit", "ok"], preparing: ["Wird vorbereitet", "busy"],
+  processing: ["TorBox verarbeitet", "busy"], renewing: ["Wird erneuert", "busy"], error: ["Fehler", "error"],
+  idle: ["Nicht gestartet", ""], unavailable: ["Keine Cloud-Datei", ""], link: ["Eigener Link", "ok"], "family-link": ["Eigener Link · Familie", "ok"],
+};
+
+const partyIconTextButton = (icon, label, variant, focusKey, onClick) => {
+  const button = partyButtonElement(label, variant, focusKey, onClick);
+  button.prepend(partyIcon(icon));
+  return button;
+};
+
+const partyCompactButton = (label, focusKey, onClick, variant = "") =>
+  partyButtonElement(label, `compact ${variant}`.trim(), focusKey, onClick);
+
+// One line: "Browser-HLS" + status chip + refresh. Details only on problems.
+const buildPartyStreamStatus = party => {
+  const phase = String(party.hlsPhase || "");
+  if (!phase) return null;
+  const box = partyElement("div", "party-stream-status");
+  const row = partyElement("div", "party-inline-row");
+  row.appendChild(partyElement("span", "party-row-label", "Browser-HLS"));
+  const [label, tone] = partyHlsPhaseLabels[phase] || [phase, ""];
+  const chip = partyElement("span", tone ? `party-chip ${tone}` : "party-chip", label);
+  const detail = String(party.hlsStatus || "").trim();
+  if (detail) chip.title = detail;
+  row.appendChild(chip);
+  if (party.hlsAvailable) {
+    const refresh = partyIconButton("icon-sync", "HLS neu vorbereiten", "muted", "hlsRefresh", () => send("partyHlsRefresh", 0));
+    if (party.hlsBusy) refresh.disabled = true;
+    row.appendChild(refresh);
+  }
+  box.appendChild(row);
+  const problem = phase === "error" || phase === "unavailable" || (party.sharing && /can't be shared|nicht geteilt/i.test(String(party.shareNote || "")));
+  const note = String((phase === "error" || phase === "unavailable") ? detail : party.shareNote || "").trim();
+  if (problem && note) box.appendChild(partyElement("p", "party-detail", note));
+  return box;
 };
 
 const buildPartyHostSettings = party => {
-  const section = partyElement("div", "party-host-settings");
+  const section = partyElement("div", "party-host-settings party-card");
   section.appendChild(buildPartySwitch("hostOnly", partyLabel("hostOnlyTitle"), partyLabel("hostOnlyDescription"), party.hostOnly, "partyHostOnly"));
   section.appendChild(buildPartySwitch("sharing", partyLabel("shareTitle"), partyLabel("shareDescription"), party.sharing, "partySharing"));
-  const note = String(party.shareNote || "").trim();
-  if (note) section.appendChild(partyElement("p", "party-note", note));
-  // Only for a suitable TorBox source of the host. Prepares or renews the
-  // browser HLS; distribution still requires the "sharing" switch above.
-  if (party.hlsAvailable) {
-    const hls = partyButtonElement("HLS erstellen / aktualisieren", "", "hlsRefresh", () => send("partyHlsRefresh", 0));
-    if (party.hlsBusy) hls.disabled = true;
-    section.appendChild(hls);
-  }
-  // Also explains why there is no button (e.g. an addon stream).
-  const hlsStatus = String(party.hlsStatus || "").trim();
-  if (hlsStatus) section.appendChild(partyElement("p", "party-note", `Browser-HLS: ${hlsStatus}`));
+  const status = buildPartyStreamStatus(party);
+  if (status) section.appendChild(status);
   if (party.torboxLinkAvailable) section.appendChild(buildPartyTorboxLink(party));
   if (party.hostHlsAllowed) section.appendChild(buildPartyHostHls(party));
-  if (party.familyAvailable) section.appendChild(buildPartyFamily(party));
   return section;
 };
 
-// Family share: TorBox addresses with the account token reach only the members
-// switched on here, through the protected share service. "Share my stream"
-// stays the host's decision; no extra confirmation.
-const buildPartyFamily = party => {
-  const box = partyElement("div", "party-family");
-  box.appendChild(partyElement("p", "party-switch-title", "Familienfreigabe (TorBox)"));
-  box.appendChild(partyElement("p", "party-note", "Nur eingeschaltete Mitglieder erhalten deinen TorBox-Stream samt Account-Token. Ein schon erhaltener Token bleibt bei ihnen nutzbar, bis du ihn bei TorBox neu erzeugst."));
-  const members = normalizeItems(party.familyMembers);
-  if (!members.length) box.appendChild(partyElement("p", "party-note", "Noch keine weiteren Mitglieder in der Party."));
-  members.forEach(member => {
-    const row = partyElement("label", "party-family-member");
-    const check = partyElement("input");
-    check.type = "checkbox";
-    check.checked = Boolean(member.admitted);
-    check.dataset.partyFocus = `family:${String(member.id)}`;
-    check.addEventListener("click", event => event.stopPropagation());
-    check.addEventListener("change", () => send(`partyFamilyAdmit:${String(member.id)}`, check.checked ? 1 : 0));
-    row.appendChild(check);
-    row.appendChild(document.createTextNode(` ${String(member.name || "Mitglied")}`));
-    box.appendChild(row);
-  });
-  const status = String(party.familyStatus || "").trim();
-  if (status) box.appendChild(partyElement("p", "party-note", status));
-  return box;
-};
+
 
 // Drafts survive panel rebuilds; they live only in this overlay's memory.
 let partyHostHlsDraft = "";
@@ -558,75 +575,82 @@ const partyInputElement = (className, label, focusKey) => {
   return input;
 };
 
-// Host's own HLS link for all guests. Sent only with the explicit consent
-// below; the desktop checks it (public HTTPS, finished VOD, no account key)
-// before anything is broadcast. Guest suggestions need the same confirmation.
+// Own HLS link for the party, folded away by default. Sent only with the
+// explicit consent tick; the desktop checks it before anything is shared.
+let partyHostHlsOpen = false;
 const buildPartyHostHls = party => {
   const box = partyElement("div", "party-host-hls");
-  box.appendChild(partyElement("p", "party-switch-title", "Video-Link für alle teilen"));
   const from = String(party.hlsSuggestionFrom || "").trim();
   if (from) {
     const host = String(party.hlsSuggestionHost || "").trim();
-    box.appendChild(partyElement("p", "party-text primary", `${from} schlägt einen Video-Link vor (${host}).`));
-    box.appendChild(partyButtonElement("Prüfen und für alle freigeben", "primary", "hlsSuggestionAccept", () => showPartyConfirm({
+    const suggestion = partyElement("div", "party-inline-row");
+    suggestion.appendChild(partyElement("span", "party-row-label", `Link-Vorschlag von ${from}`));
+    suggestion.appendChild(partyCompactButton("Prüfen", "hlsSuggestionAccept", () => showPartyConfirm({
       title: "Vorgeschlagenen Link freigeben?",
-      message: `Der Link von ${from} wird geprüft und danach an alle Party-Mitglieder gesendet. Enthaltene Zugangstokens sind dann für alle sichtbar, und jeder Browser meldet seine IP-Adresse an ${host}.`,
+      message: `Der Link von ${from} (${host}) wird geprüft und dann geteilt. Enthaltene Tokens sind für die Empfänger sichtbar.`,
       confirmLabel: "Prüfen und freigeben",
       danger: false,
       onConfirm: () => send("partyHlsSuggestionAccept", 0),
-    })));
-    box.appendChild(partyButtonElement("Ablehnen", "", "hlsSuggestionReject", () => send("partyHlsSuggestionReject", 0)));
-  }
-  if (party.hostHlsActive) {
-    box.appendChild(partyElement("p", "party-text", `Aktiv: ${String(party.hostHlsLabel || "Video-Link")}. Neue Gäste und Rejoins erhalten ihn automatisch.`));
-    box.appendChild(partyButtonElement("Video-Link-Freigabe beenden", "danger", "hostHlsClear", () => send("partyHostHlsClear", 0)));
-  } else {
-    const input = partyInputElement("party-host-hls-url", "HLS-Adresse für alle", "hostHlsUrl");
-    input.setAttribute("type", "url");
-    input.setAttribute("inputmode", "url");
-    input.placeholder = "https://…/playlist.m3u8";
-    input.value = partyHostHlsDraft;
-    box.appendChild(input);
-    const consent = partyElement("label", "party-note");
-    const check = partyElement("input");
-    check.type = "checkbox";
-    check.checked = partyHostHlsConsent;
-    check.dataset.partyFocus = "hostHlsConsent";
-    check.addEventListener("click", event => event.stopPropagation());
-    consent.appendChild(check);
-    consent.appendChild(document.createTextNode(" Ich gebe diesen Link für alle Party-Mitglieder frei. Er wird an alle gesendet; enthaltene Tokens sind für sie sichtbar. „Share my stream“ wird dabei eingeschaltet."));
-    box.appendChild(consent);
-    const share = partyButtonElement("Für alle freigeben", "primary", "hostHlsShare", () => {
-      const url = input.value.trim();
-      if (!url || !check.checked || party.hostHlsBusy) return;
-      partyHostHlsDraft = ""; partyHostHlsConsent = false;
-      input.value = ""; check.checked = false;
-      send(`partyHostHls:${partyEncodeText(url)}`, 0);
-    });
-    const update = () => { share.disabled = Boolean(party.hostHlsBusy) || !check.checked || !input.value.trim(); };
-    input.addEventListener("input", () => { partyHostHlsDraft = input.value; update(); });
-    check.addEventListener("change", () => { partyHostHlsConsent = check.checked; update(); });
-    update();
-    box.appendChild(share);
+    }), "primary"));
+    suggestion.appendChild(partyCompactButton("Ablehnen", "hlsSuggestionReject", () => send("partyHlsSuggestionReject", 0)));
+    box.appendChild(suggestion);
   }
   const status = String(party.hostHlsStatus || "").trim();
-  if (status) box.appendChild(partyElement("p", "party-note", status));
+  if (party.hostHlsActive) {
+    const row = partyElement("div", "party-inline-row");
+    row.appendChild(partyElement("span", "party-row-label", "Eigener Link aktiv"));
+    row.appendChild(partyCompactButton("Beenden", "hostHlsClear", () => send("partyHostHlsClear", 0), "danger"));
+    box.appendChild(row);
+    if (status) box.appendChild(partyElement("p", "party-detail", status));
+    return box;
+  }
+  const details = partyElement("details", "party-disclosure");
+  details.open = partyHostHlsOpen || Boolean(status && status.startsWith("Nicht geteilt"));
+  details.addEventListener("toggle", () => { partyHostHlsOpen = details.open; });
+  const summary = partyElement("summary", "party-row-label", "Eigenen Video-Link teilen");
+  summary.addEventListener("click", event => event.stopPropagation());
+  details.appendChild(summary);
+  const input = partyInputElement("party-host-hls-url", "HLS-Adresse", "hostHlsUrl");
+  input.setAttribute("type", "url");
+  input.setAttribute("inputmode", "url");
+  input.placeholder = "https://…/playlist.m3u8";
+  input.value = partyHostHlsDraft;
+  details.appendChild(input);
+  const consent = partyElement("label", "party-consent");
+  const check = partyElement("input");
+  check.type = "checkbox";
+  check.checked = partyHostHlsConsent;
+  check.dataset.partyFocus = "hostHlsConsent";
+  check.addEventListener("click", event => event.stopPropagation());
+  consent.appendChild(check);
+  consent.appendChild(document.createTextNode(" Freigeben – Tokens im Link sind für Empfänger sichtbar"));
+  consent.title = "Der Link wird geprüft und an die Party gesendet; „Share my stream“ wird eingeschaltet. TorBox-Links mit Account-Key gehen nur an freigegebene Mitglieder.";
+  details.appendChild(consent);
+  const share = partyButtonElement("Teilen", "primary compact", "hostHlsShare", () => {
+    const url = input.value.trim();
+    if (!url || !check.checked || party.hostHlsBusy) return;
+    partyHostHlsDraft = ""; partyHostHlsConsent = false;
+    input.value = ""; check.checked = false;
+    send(`partyHostHls:${partyEncodeText(url)}`, 0);
+  });
+  const update = () => { share.disabled = Boolean(party.hostHlsBusy) || !check.checked || !input.value.trim(); };
+  input.addEventListener("input", () => { partyHostHlsDraft = input.value; update(); });
+  check.addEventListener("change", () => { partyHostHlsConsent = check.checked; update(); });
+  update();
+  details.appendChild(share);
+  if (status) details.appendChild(partyElement("p", status.startsWith("Nicht geteilt") ? "party-detail error" : "party-detail", status));
+  box.appendChild(details);
   return box;
 };
 
-// Manual TorBox link for addon streams without TorBox identity: the host
-// picks the exact file from its own cloud list (real torrent/file IDs).
+// Cloud file of an addon stream: linked automatically when unique (info hash
+// or exact title); the name is shown once with "change" and "remove".
 const buildPartyTorboxLink = party => {
   const box = partyElement("div", "party-torbox-link");
   const linked = String(party.torboxLinkedName || "").trim();
-  if (linked) {
-    box.appendChild(partyElement("p", "party-text", `Mit TorBox-Datei verknüpft: ${linked}`));
-    box.appendChild(partyButtonElement("Verknüpfung lösen", "", "torboxUnlink", () => send("partyTorboxUnlink", 0)));
-  } else if (!party.torboxChoicesOpen) {
-    box.appendChild(partyButtonElement("Mit TorBox-Datei verknüpfen", "", "torboxList", () => { partyTorboxFilter = ""; send("partyTorboxList", 0); }));
-  } else {
-    const filter = partyInputElement("party-torbox-filter", "TorBox-Dateien filtern", "torboxFilter");
-    filter.placeholder = "Dateiname filtern …";
+  if (party.torboxChoicesOpen) {
+    const filter = partyInputElement("party-torbox-filter", "TorBox-Dateien suchen", "torboxFilter");
+    filter.placeholder = "Datei suchen …";
     filter.value = partyTorboxFilter;
     box.appendChild(filter);
     const list = partyElement("div", "party-torbox-list");
@@ -637,25 +661,36 @@ const buildPartyTorboxLink = party => {
         .filter(choice => words.every(word => String(choice.name || "").toLowerCase().includes(word)));
       matches.slice(0, partyTorboxVisibleLimit).forEach(choice => {
         const name = String(choice.name || "");
-        const label = choice.size ? `${name} · ${choice.size}` : name;
-        list.appendChild(partyButtonElement(label, "", `torboxPick:${choice.id}`, () => showPartyConfirm({
-          title: "TorBox-Datei verknüpfen?",
-          message: `„${name}“ mit genau diesem Titel verknüpfen? Nur wählen, wenn es exakt dieser Film bzw. diese Folge ist. Danach wird TorBox-HLS für diese Datei vorbereitet.`,
+        const item = partyButtonElement(name, "compact list", `torboxPick:${choice.id}`, () => showPartyConfirm({
+          title: "Diese Datei verknüpfen?",
+          message: `„${name}“ – nur wählen, wenn es genau dieser Film bzw. diese Folge ist.`,
           confirmLabel: "Verknüpfen",
           danger: false,
           onConfirm: () => send(`partyTorboxPick:${String(choice.id)}`, 0),
-        })));
+        }));
+        if (choice.size) item.appendChild(partyElement("span", "party-list-meta", String(choice.size)));
+        list.appendChild(item);
       });
-      if (matches.length > partyTorboxVisibleLimit) list.appendChild(partyElement("p", "party-note", `${matches.length - partyTorboxVisibleLimit} weitere Treffer. Filter genauer eingeben.`));
-      if (!party.torboxChoicesBusy && !matches.length) list.appendChild(partyElement("p", "party-note", "Keine passende Datei."));
+      if (matches.length > partyTorboxVisibleLimit) list.appendChild(partyElement("p", "party-detail", `${matches.length - partyTorboxVisibleLimit} weitere Treffer – Suche genauer eingeben.`));
+      if (!party.torboxChoicesBusy && !matches.length) list.appendChild(partyElement("p", "party-detail", "Keine passende Datei."));
     };
     filter.addEventListener("input", () => { partyTorboxFilter = filter.value; render(); });
     render();
     box.appendChild(list);
-    box.appendChild(partyButtonElement("Schließen", "", "torboxClose", () => send("partyTorboxClose", 0)));
+    box.appendChild(partyCompactButton("Schließen", "torboxClose", () => send("partyTorboxClose", 0)));
+  } else {
+    const row = partyElement("div", "party-inline-row");
+    const name = partyElement("span", "party-row-label party-ellipsis", linked ? `Verknüpft: ${linked}` : "Keine Cloud-Datei verknüpft");
+    name.title = linked;
+    row.appendChild(name);
+    if (linked && party.torboxLinkAuto) row.appendChild(partyElement("span", "party-chip", "automatisch"));
+    const open = () => { partyTorboxFilter = String(party.torboxSuggestedFilter || ""); send("partyTorboxList", 0); };
+    row.appendChild(partyCompactButton(linked ? "Ändern" : "Verknüpfen", "torboxList", open));
+    if (linked) row.appendChild(partyCompactButton("Lösen", "torboxUnlink", () => send("partyTorboxUnlink", 0)));
+    box.appendChild(row);
   }
   const status = String(party.torboxChoicesStatus || "").trim();
-  if (status) box.appendChild(partyElement("p", "party-note", status));
+  if (status) box.appendChild(partyElement("p", "party-detail", status));
   return box;
 };
 
@@ -668,7 +703,7 @@ const buildPartyContent = party => {
   const content = partyElement("div", "party-content");
   const behind = String(party.behindTitle || "").trim();
   if (behind) {
-    const section = partyElement("div", "party-section");
+    const section = partyElement("div", "party-section party-card");
     section.appendChild(partyElement("p", "party-text primary", behind));
     section.appendChild(partyButtonElement(partyLabel("catchUp"), "primary", "catchUp", () => closeAndSendParty("partyCatchUp")));
     content.appendChild(section);
@@ -679,25 +714,17 @@ const buildPartyContent = party => {
   overview.appendChild(buildPartyMembers(party));
   content.appendChild(overview);
 
-  if (party.isHost) {
-    content.appendChild(buildPartyHostSettings(party));
-    content.appendChild(buildPartyBrowserShare(party));
-  }
-  if (!party.isHost && party.hostOnly) {
-    const note = partyElement("div", "party-host-only-note");
-    note.appendChild(partyIcon("icon-lock"));
-    note.appendChild(partyElement("span", "", partyLabel("hostOnlyNote")));
-    content.appendChild(note);
-  }
-
+  // Different title than the party: what happens to me vs. to everyone.
   const nowWatching = String(party.nowWatching || "").trim();
   if (nowWatching) {
-    const section = partyElement("div", "party-section");
-    section.appendChild(partyElement("p", "party-text primary", nowWatching));
-    section.appendChild(partyButtonElement(partyLabel("watchWithParty"), "primary", "watch", () => closeAndSendParty("partyWatch")));
+    const section = partyElement("div", "party-section party-card party-switch-card");
+    section.appendChild(partyElement("p", "party-card-title", "Anderer Titel"));
+    section.appendChild(partyElement("p", "party-text", nowWatching));
+    section.appendChild(partyIconTextButton("icon-party", partyLabel("watchWithParty"), "primary", "watch", () => closeAndSendParty("partyWatch")));
     const switchLabel = String(party.switchLabel || "").trim();
     if (switchLabel) {
-      section.appendChild(partyButtonElement(switchLabel, "", "switch", () => showPartyConfirm({
+      section.appendChild(partyElement("div", "party-divider"));
+      section.appendChild(partyIconTextButton("icon-swap", switchLabel, "", "switch", () => showPartyConfirm({
         title: partyLabel("switchTitle"),
         message: party.switchMessage,
         confirmLabel: partyLabel("switchConfirm"),
@@ -707,6 +734,15 @@ const buildPartyContent = party => {
     }
     content.appendChild(section);
   }
+
+  if (party.isHost) content.appendChild(buildPartyHostSettings(party));
+  if (!party.isHost && party.hostOnly) {
+    const note = partyElement("div", "party-host-only-note");
+    note.appendChild(partyIcon("icon-lock"));
+    note.appendChild(partyElement("span", "", partyLabel("hostOnlyNote")));
+    content.appendChild(note);
+  }
+  if (party.isHost) content.appendChild(buildPartyBrowserShare(party));
 
   const actions = partyElement("div", "party-actions");
   actions.appendChild(partyButtonElement(partyLabel("leave"), "", "leave", () => closeAndSendParty("partyLeave")));

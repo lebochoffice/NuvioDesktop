@@ -88,4 +88,15 @@ class PartyHostHlsTest {
         assertEquals("cdn.example.net", partyHlsDisplayHost("https://cdn.example.net/a.m3u8?token=private"))
         assertEquals("unbekannter Host", partyHlsDisplayHost("not a url"))
     }
+    @Test
+    fun memberNamesUseTheAccountNameThenTheMailLocalPartThenANumber() {
+        assertEquals("Anna", partyMemberLabel("Anna", 0))
+        assertEquals("Mitglied 2", partyMemberLabel("Nuvio-Mitglied", 1))
+        assertEquals("Mitglied 3", partyMemberLabel("  ", 2))
+        assertEquals("Mitglied 1", partyMemberLabel("Nuvio", 0))
+        assertEquals("max.mustermann", partyEmailName("max.mustermann@example.test"))
+        assertNull(partyEmailName("a@example.test")) // Too short to be a name.
+        assertNull(partyEmailName(null)); assertNull(partyEmailName("no-at-sign"))
+        assertTrue("@" !in partyEmailName("x<y>z@example.test").orEmpty())
+    }
 }

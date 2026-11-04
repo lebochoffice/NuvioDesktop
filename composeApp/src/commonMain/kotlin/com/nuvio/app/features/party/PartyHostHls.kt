@@ -12,7 +12,19 @@ import kotlinx.serialization.Serializable
  * browser source (typed by the host, or a guest suggestion the host accepted).
  * Memory only: never persisted, logged or put into an invitation.
  */
-data class PartyHostHls(val url: String, val mediaKey: String, val label: String)
+data class PartyHostHls(val url: String, val mediaKey: String, val label: String, val familyOnly: Boolean = false)
+
+private val GENERIC_MEMBER_NAMES = setOf("", "nuvio", "nuvio-mitglied", "nuvio mitglied", "nuvio member", "member", "mitglied", "gast", "guest")
+
+/** Display name of a member; generic or empty names become "Mitglied N" (1-based). */
+internal fun partyMemberLabel(displayName: String, index: Int): String =
+    displayName.trim().takeUnless { it.lowercase() in GENERIC_MEMBER_NAMES } ?: "Mitglied ${index + 1}"
+
+/** Part before "@" of an e-mail address, as a readable name; never the full address. */
+internal fun partyEmailName(email: String?): String? =
+    email?.substringBefore('@', missingDelimiterValue = "")?.trim()
+        ?.filter { it.isLetterOrDigit() || it in "._- " }?.trim('.', '_', '-', ' ')?.take(36)
+        ?.takeIf { it.length >= 2 }
 
 /** A guest's proposal; it never replaces the host source without the host's confirmation. */
 @Serializable
@@ -122,7 +134,8 @@ internal suspend fun checkPartyHostHls(
         loaded ?: return PartyHostHlsCheck.Problem("Variante: ${problem.orEmpty()}")
     } else master
     if (!media.body.contains("#EXT-X-ENDLIST")) {
-        return PartyHostHlsCheck.Problem("Live- oder unfertige Playlist (kein #EXT-X-ENDLIST). Für die Party sind nur abgeschlossene VOD-Playlists erlaubt.")
+        return PartyHostHlsCheck.Problem(if (torbox) "TorBox bereitet den Stream noch vor (Playlist noch nicht vollständig). In ein paar Minuten erneut versuchen."
+            else "Live- oder unfertige Playlist (kein #EXT-X-ENDLIST). Für die Party sind nur abgeschlossene VOD-Playlists erlaubt.")
     }
     if (!media.body.contains("#EXTINF")) return PartyHostHlsCheck.Problem("Die Playlist enthält keine Segmente.")
     return PartyHostHlsCheck.Ok(url, keyRemoved = keyFree != null)

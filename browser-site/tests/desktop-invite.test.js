@@ -13,11 +13,11 @@ const bridge = source.slice(start, source.indexOf('const buildPartyHostSettings'
 function setup(party, initialStorage = {}) {
   const events = [], confirmations = [];
   const stored = new Map(Object.entries(initialStorage));
-  const element = (tag, className) => ({tag, className, attrs: new Map(), children: [], style: {}, appendChild(child) {this.children.push(child);}, setAttribute(k, v) {this.attrs.set(k, v);}, getAttribute(k) {return this.attrs.get(k);}, addEventListener() {}});
+  const element = (tag, className) => ({tag, className, attrs: new Map(), children: [], style: {}, dataset: {}, appendChild(child) {this.children.push(child);}, setAttribute(k, v) {this.attrs.set(k, v);}, getAttribute(k) {return this.attrs.get(k);}, addEventListener() {}});
   const context = {URL, TextEncoder, btoa, partySwitchSettleMs: 0, window:{setTimeout() {}, localStorage:{getItem:k => stored.get(k), setItem:(k,v) => stored.set(k,v)}}, partyElement: element,
     partyAction: (el, _key, click) => Object.assign(el, {click}),
     partyEncodeText: text => Buffer.from(text).toString('base64url'),
-    partyButtonElement: (_label, _style, _action, click) => ({click}),
+    partyButtonElement: (_label, _style, _action, click) => ({click, prepend() {}}), partyIcon: () => ({}),
     send: (type, value) => events.push({type, value}), showPartyConfirm: config => confirmations.push(config)};
   vm.createContext(context);
   const switches = source.slice(source.indexOf('const buildPartySwitch ='), start);

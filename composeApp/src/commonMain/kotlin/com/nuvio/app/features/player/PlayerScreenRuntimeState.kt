@@ -304,6 +304,9 @@ internal class PlayerScreenRuntime(
     var torboxManualFile by mutableStateOf<com.nuvio.app.features.debrid.TorboxPartyFile?>(null)
     var torboxManualFor by mutableStateOf<String?>(null)
     var torboxManualName by mutableStateOf("")
+    // True when the link above was found automatically (info hash or title).
+    var torboxLinkAuto by mutableStateOf(false)
+    var torboxAutoTriedFor by mutableStateOf<String?>(null)
     // Cloud file list for "Mit TorBox-Datei verknüpfen" (open picker only).
     var torboxChoices by mutableStateOf<List<com.nuvio.app.features.debrid.TorboxCloudChoice>?>(null)
     var torboxChoicesFor by mutableStateOf<String?>(null)

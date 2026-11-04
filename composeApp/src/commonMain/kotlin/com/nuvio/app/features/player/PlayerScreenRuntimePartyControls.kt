@@ -147,8 +147,10 @@ internal fun PlayerScreenRuntime.rememberPartyControlsState(): PlayerControlPart
     val storage = "${ServerConfigurationRepository.active.value.backendUrl}/storage/v1/object/"
     val you = stringResource(Res.string.party_you)
     val nowMs = PartyRepository.nowMs()
-    val members = party.members.map { member ->
+    val familyToggles = party.isHost && party.sharing && !elsewhere && com.nuvio.app.features.party.PartyFamilyShare.configured
+    val members = party.members.mapIndexed { index, member ->
         val isSelf = member.id == party.memberId
+        val label = com.nuvio.app.features.party.partyMemberLabel(member.displayName, index)
         val behindMs = if (isSelf) selfBehindMs else party.behindMs(member)
         // Estimated distance to the party time (display only). Own row uses
         // the live player position instead of the last report.
@@ -160,8 +162,8 @@ internal fun PlayerScreenRuntime.rememberPartyControlsState(): PlayerControlPart
         val syncLabel = PartySync.memberSyncLabel(PartySync.memberSync(reported, playback, party.media.key, nowMs))
         PlayerControlPartyMember(
             id = member.id,
-            name = if (isSelf) "${member.displayName} ($you)" else member.displayName,
-            initial = member.displayName.initial(),
+            name = if (isSelf) "$label ($you)" else label,
+            initial = label.initial(),
             imageUrl = member.avatarUrl?.takeIf { it.startsWith(storage) }.orEmpty(),
             color = member.avatarColor.orEmpty(),
             isHost = member.id == party.hostMemberId,
@@ -172,7 +174,8 @@ internal fun PlayerScreenRuntime.rememberPartyControlsState(): PlayerControlPart
             }).let { base -> if (syncLabel.isEmpty()) base else "$base · $syncLabel" },
             presence = party.presenceState(member).name.lowercase(),
             canRemove = party.isHost && !isSelf,
-            removeTitle = stringResource(Res.string.party_remove_title, member.displayName),
+            removeTitle = stringResource(Res.string.party_remove_title, label),
+            familyShare = if (familyToggles && !isSelf) (if (member.id in familyAdmitted) "on" else "off") else "",
         )
     }
     val chat = if (chatVisible) {
@@ -225,15 +228,28 @@ internal fun PlayerScreenRuntime.rememberPartyControlsState(): PlayerControlPart
         hlsAvailable = party.isHost && !elsewhere && effectiveTorboxFile != null && activeHostPartyHls == null,
         hlsBusy = torboxPartyPhase == com.nuvio.app.features.debrid.TorboxHlsPhase.Preparing,
         browserOrigin = com.nuvio.app.features.party.watchPartyBrowserOrigin,
+        hlsPhase = when {
+            !party.isHost || elsewhere -> ""
+            activeHostPartyHls != null -> if (activeHostPartyHls?.familyOnly == true) "family-link" else "link"
+            effectiveTorboxFile != null -> when (torboxPartyPhase) {
+                com.nuvio.app.features.debrid.TorboxHlsPhase.Ready -> if (party.sharing) (if (torboxFamilyOnly) "family" else "sent") else "ready"
+                com.nuvio.app.features.debrid.TorboxHlsPhase.Preparing -> "preparing"
+                com.nuvio.app.features.debrid.TorboxHlsPhase.Processing -> "processing"
+                com.nuvio.app.features.debrid.TorboxHlsPhase.Expired -> "renewing"
+                com.nuvio.app.features.debrid.TorboxHlsPhase.Unavailable -> "idle"
+                else -> "error"
+            }
+            activeStream != null -> "unavailable"
+            else -> ""
+        },
+        partyMediaTitle = if (elsewhere) party.media.displayTitle() else "",
+        playerMediaTitle = if (elsewhere) playerMedia.displayTitle() else "",
+        torboxLinkAuto = torboxManualFor == partyKey && torboxLinkAuto,
+        torboxSuggestedFilter = if (party.isHost) playerMedia.title.take(60) else "",
         hlsStatus = when {
             !party.isHost || elsewhere -> ""
             activeHostPartyHls != null -> "Der geteilte Video-Link ersetzt TorBox-HLS, solange er aktiv ist."
-            effectiveTorboxFile != null -> com.nuvio.app.features.debrid.torboxHlsStatusLabel(torboxPartyPhase, party.sharing) +
-                when {
-                    activeStream?.torboxPartyFile != null -> ""
-                    torboxManualFor == partyKey && effectiveTorboxFile == torboxManualFile -> " (manuell verknüpfte TorBox-Datei: $torboxManualName)"
-                    else -> " (Datei per Infohash in deiner TorBox-Cloud gefunden)"
-                }
+            effectiveTorboxFile != null -> com.nuvio.app.features.debrid.torboxHlsStatusLabel(torboxPartyPhase, party.sharing)
             // A provider name such as "[TB+] …" is no TorBox file identity.
             party.sharing && activeStream != null -> if (activeTorrentInfoHash.isNullOrBlank())
                 "Nicht verfügbar: Addon-Stream ohne Infohash und ohne TorBox-Dateikennung. „Mit TorBox-Datei verknüpfen“ wählen oder einen Video-Link für alle teilen."
@@ -252,7 +268,6 @@ internal fun PlayerScreenRuntime.rememberPartyControlsState(): PlayerControlPart
         // Manual linking only when no unique cloud file was found automatically
         // (or to change an existing manual link).
         torboxLinkAvailable = party.isHost && !elsewhere && activeStream != null && activeStream?.torboxPartyFile == null &&
-            (effectiveTorboxFile == null || torboxManualFor == partyKey) &&
             com.nuvio.app.features.debrid.DebridSettingsRepository.snapshot().apiKeyFor(com.nuvio.app.features.debrid.DebridProviders.TORBOX_ID).isNotBlank(),
         familyAvailable = party.isHost && !elsewhere && com.nuvio.app.features.party.PartyFamilyShare.configured,
         familyStatus = if (party.isHost) familyShareStatus else "",
@@ -363,7 +378,7 @@ internal fun PlayerScreenRuntime.handlePartyControlsEvent(type: String, value: D
         "partyHostHlsClear" -> {
             if (PartyRepository.state.value.party?.isHost == true && hostPartyHls != null) {
                 hostPartyHls = null
-                hostPartyHlsStatus = "Video-Link-Freigabe beendet. Laufende Browser-Wiedergaben dieser Quelle werden gestoppt; einen bereits übertragenen Link kann nur der Anbieter selbst ungültig machen."
+                hostPartyHlsStatus = "Link-Freigabe beendet."
             }
         }
         "partyHlsSuggestionAccept" -> {
@@ -378,8 +393,8 @@ internal fun PlayerScreenRuntime.handlePartyControlsEvent(type: String, value: D
         "partyTorboxList" -> loadTorboxCloudChoices()
         "partyTorboxClose" -> { torboxChoices = null; torboxChoicesFor = null; torboxChoicesStatus = "" }
         "partyTorboxUnlink" -> {
-            torboxManualFile = null; torboxManualFor = null; torboxManualName = ""
-            torboxChoicesStatus = "TorBox-Verknüpfung gelöst."
+            torboxManualFile = null; torboxManualFor = null; torboxManualName = ""; torboxLinkAuto = false
+            torboxChoicesStatus = ""
         }
         "partyWatch" -> watchWithParty()
         "partySwitch" -> switchPartyMedia()
@@ -458,10 +473,17 @@ private fun PlayerScreenRuntime.shareHostPartyHls(url: String, label: String) {
     hostPartyHlsBusy = true
     hostPartyHlsStatus = "Video-Link wird geprüft …"
     scope.launch {
-        val keys = com.nuvio.app.features.debrid.DebridSettingsRepository.snapshot().providerApiKeys.values.filter { it.isNotBlank() }
-        val result = try { com.nuvio.app.features.party.checkPartyHostHls(url, keys) }
+        val settings = com.nuvio.app.features.debrid.DebridSettingsRepository.snapshot()
+        val keys = settings.providerApiKeys.values.filter { it.isNotBlank() }
+        val torboxKey = settings.apiKeyFor(com.nuvio.app.features.debrid.DebridProviders.TORBOX_ID)
+        // A TorBox stream link whose account key is only its `token` cannot be
+        // shared openly (TorBox rejects it without the token). With the family
+        // share service it goes only to admitted members, never by broadcast.
+        val family = com.nuvio.app.features.party.PartyFamilyShare.configured && torboxKey.isNotBlank() &&
+            com.nuvio.app.features.debrid.torboxKeyFreeUrl(url.trim(), torboxKey) != null
+        val result = try { com.nuvio.app.features.party.checkPartyHostHls(url, if (family) keys - torboxKey else keys) }
             catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
-            catch (_: Exception) { com.nuvio.app.features.party.PartyHostHlsCheck.Problem("Prüfung fehlgeschlagen.") }
+            catch (_: Exception) { com.nuvio.app.features.party.PartyHostHlsCheck.Problem("Unerwarteter Fehler bei der Prüfung. Link kontrollieren und erneut versuchen.") }
         hostPartyHlsBusy = false
         if (partyKey != mediaKey || PartyRepository.state.value.party?.media?.key != mediaKey) {
             hostPartyHlsStatus = "Titel gewechselt. Der Link wurde nicht geteilt."
@@ -470,10 +492,10 @@ private fun PlayerScreenRuntime.shareHostPartyHls(url: String, label: String) {
         when (result) {
             is com.nuvio.app.features.party.PartyHostHlsCheck.Problem -> hostPartyHlsStatus = "Nicht geteilt: ${result.message}"
             is com.nuvio.app.features.party.PartyHostHlsCheck.Ok -> {
-                hostPartyHls = com.nuvio.app.features.party.PartyHostHls(result.url, mediaKey, label)
+                hostPartyHls = com.nuvio.app.features.party.PartyHostHls(result.url, mediaKey, label, familyOnly = family)
                 if (PartyRepository.state.value.party?.sharing != true) PartyRepository.setSharing(true)
-                hostPartyHlsStatus = (if (result.keyRemoved) "TorBox-Link ohne Account-Key geprüft. " else "") +
-                    "Abgeschlossene HLS-Playlist geprüft und an alle Teilnehmer gesendet. Ob jeder Browser sie abspielen darf (CORS, Gerätegrenzen), zeigt erst die Wiedergabe."
+                hostPartyHlsStatus = if (family) "Geteilt per Familienfreigabe: nur angehakte Mitglieder erhalten den Link."
+                    else "Geteilt mit allen Mitgliedern."
             }
         }
     }
@@ -514,7 +536,8 @@ private fun PlayerScreenRuntime.linkTorboxCloudFile(torrentId: Int, fileId: Int)
     torboxManualFile = com.nuvio.app.features.debrid.TorboxPartyFile(torrentId, fileId, com.nuvio.app.features.debrid.torboxAccountFingerprint(key))
     torboxManualFor = partyKey
     torboxManualName = choice.name
+    torboxLinkAuto = false
     torboxChoices = null; torboxChoicesFor = null
-    torboxChoicesStatus = "Verknüpft: ${choice.name}. TorBox-HLS wird für diese Datei vorbereitet."
+    torboxChoicesStatus = "" // The linked name is shown once in its own row.
 }
 private const val CHAT_RETRY_EVENT = "partyChatRetry:"

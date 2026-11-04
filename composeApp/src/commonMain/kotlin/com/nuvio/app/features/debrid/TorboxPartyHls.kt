@@ -292,6 +292,46 @@ internal suspend fun listTorboxCloudChoices(apiKey: String): List<TorboxCloudCho
     return torboxCloudVideoChoices(response.body?.data ?: return null)
 }
 
+private fun titleTokens(text: String): List<String> = text.lowercase()
+    .replace("ä", "ae").replace("ö", "oe").replace("ü", "ue").replace("ß", "ss")
+    .replace(Regex("[^a-z0-9]+"), " ").trim().split(' ').filter { it.isNotEmpty() }
+
+private val RELEASE_MARKER = Regex("^(19|20)\\d{2}$|^s\\d{1,2}e\\d{1,3}$|^\\d{1,2}x\\d{1,3}$|^(2160p|1080p|720p|480p|4k|uhd|hdr|web|webrip|webdl|bluray|bdrip|remux|x264|x265|h264|h265|hevc|dv|proper|repack|multi|german|dl)$")
+
+/**
+ * Addon stream without info hash: link a cloud file only if its name, up to
+ * the first year/episode/quality marker, is exactly the title (and, for an
+ * episode, contains that SxxEyy). Unique match only; "Spider-Man 2" never
+ * matches "Spider-Man". The host can always change or remove the link.
+ */
+internal fun matchTorboxCloudByTitle(choices: List<TorboxCloudChoice>, title: String, season: Int?, episode: Int?): TorboxCloudChoice? {
+    val wanted = titleTokens(title).takeIf { it.isNotEmpty() } ?: return null
+    val episodeTags = if (season != null && episode != null) setOf(
+        "s${season.toString().padStart(2, '0')}e${episode.toString().padStart(2, '0')}", "s${season}e${episode}",
+        "s${season.toString().padStart(2, '0')}e${episode}", "${season}x${episode.toString().padStart(2, '0')}",
+    ) else emptySet()
+    return choices.filter { choice ->
+        val tokens = titleTokens(choice.name.substringBeforeLast('.'))
+        if ("sample" in tokens) return@filter false
+        val head = tokens.takeWhile { !RELEASE_MARKER.matches(it) }
+        val hasEpisode = tokens.any { Regex("^s\\d{1,2}e\\d{1,3}$|^\\d{1,2}x\\d{1,3}$").matches(it) }
+        head == wanted && if (episodeTags.isEmpty()) !hasEpisode else tokens.any { it in episodeTags }
+    }.singleOrNull()
+}
+
+/** One mylist call: unique info-hash match first, then the conservative title match. */
+internal suspend fun autoLinkTorboxCloud(apiKey: String, infoHash: String?, filename: String?, title: String, season: Int?, episode: Int?): Pair<TorboxPartyFile, String>? {
+    if (apiKey.isBlank()) return null
+    val response = TorboxApiClient.listCloudTorrents(apiKey)
+    if (!response.isSuccessful) return null
+    val items = response.body?.data ?: return null
+    val choices = torboxCloudVideoChoices(items)
+    val byHash = infoHash?.takeIf { it.isNotBlank() }?.let { matchTorboxCloudFile(items, it, filename) }
+    val choice = byHash?.let { (t, f) -> choices.firstOrNull { it.torrentId == t && it.fileId == f } ?: TorboxCloudChoice(t, f, filename.orEmpty(), null) }
+        ?: matchTorboxCloudByTitle(choices, title, season, episode) ?: return null
+    return TorboxPartyFile(choice.torrentId, choice.fileId, torboxAccountFingerprint(apiKey)) to choice.name
+}
+
 /** Host-side state of the browser HLS source; shown in the party panel. */
 enum class TorboxHlsPhase { Unavailable, Preparing, Processing, NotReady, Ready, Denied, Unsupported, Expired, Failed }
 

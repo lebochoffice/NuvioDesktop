@@ -1176,6 +1176,9 @@ async function accountDisplayName(user, profileIndex) {
     const name = cleanName(metadata[key]);
     if (name) return name;
   }
+  // 3. The part before "@" of the account e-mail (never the full address).
+  const local = cleanName(String(user?.email || '').split('@')[0].replace(/[^\p{L}\p{N}._ -]/gu, ''));
+  if (local.length >= 2) return local;
   return 'Nuvio-Mitglied';
 }
 const usableSession = auth => !!auth?.user && !auth.user.is_anonymous;

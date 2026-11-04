@@ -3,6 +3,8 @@ package com.nuvio.app.features.party
 import co.touchlab.kermit.Logger
 import com.nuvio.app.core.auth.AuthRepository
 import com.nuvio.app.core.auth.AuthState
+import com.nuvio.app.core.network.SupabaseProvider
+import io.github.jan.supabase.auth.auth
 import com.nuvio.app.core.network.ServerConfigurationRepository
 import com.nuvio.app.core.sync.AppForegroundMonitor
 import com.nuvio.app.core.sync.AppVisibility
@@ -764,7 +766,9 @@ object PartyRepository {
         val profile = ProfileRepository.state.value.activeProfile
         return PartyIdentity(
             deviceId = deviceId(),
-            displayName = profile?.name?.trim()?.takeIf { it.isNotEmpty() }?.take(40) ?: DEFAULT_NAME,
+            displayName = profile?.name?.trim()?.takeIf { it.isNotEmpty() }?.take(40)
+                ?: partyEmailName(runCatching { SupabaseProvider.client.auth.currentUserOrNull()?.email }.getOrNull())
+                ?: DEFAULT_NAME,
             avatarUrl = profile?.let { AvatarRepository.shareableImageUrl(it) }?.takeIf { it.startsWith("https://") && it.length <= 512 },
             avatarColor = profile?.avatarColorHex?.takeIf { COLOR_PATTERN.matches(it) },
             profileIndex = profile?.profileIndex,

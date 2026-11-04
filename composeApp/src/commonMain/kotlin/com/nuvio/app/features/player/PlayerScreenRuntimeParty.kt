@@ -225,8 +225,9 @@ internal fun PlayerScreenRuntime.torboxMappingKey(): String? =
 internal fun PlayerScreenRuntime.currentPartyStream(): PartyStream? {
     val stream = activeStream ?: return null
     // An explicitly shared host link replaces the TorBox HLS as browser source.
-    val hostLink = activeHostPartyHls?.takeUnless { link -> configuredDebridKeys().any { link.url.contains(it) } }
-    val torboxFile = effectiveTorboxFile.takeIf { hostLink == null }
+    val hostLink = activeHostPartyHls?.takeUnless { link -> link.familyOnly || configuredDebridKeys().any { link.url.contains(it) } }
+    val familyHostLink = activeHostPartyHls?.takeIf { it.familyOnly }
+    val torboxFile = effectiveTorboxFile.takeIf { hostLink == null && familyHostLink == null }
     if (torboxFile != null) {
         if (PartyRepository.state.value.party?.media?.key != partyKey) return null
     }
@@ -235,7 +236,7 @@ internal fun PlayerScreenRuntime.currentPartyStream(): PartyStream? {
     if (torboxFile != null && torboxFile.accountFingerprint != com.nuvio.app.features.debrid.torboxAccountFingerprint(accountKey)) return null
     val ready = torboxPartyStream?.takeIf { torboxFile != null && it.mediaKey == partyKey && torboxPreparedFile == torboxFile }
     // The address with the account token goes only to the family share service.
-    val family = hostLink == null && ready != null && torboxFamilyOnly
+    val family = familyHostLink != null || (hostLink == null && ready != null && torboxFamilyOnly)
     val prepared = if (hostLink != null) PartyStream(mediaKey = partyKey, url = hostLink.url, streamType = "hls")
         else ready?.takeUnless { family }
     val browserHls = if (hostLink != null) {
@@ -368,16 +369,22 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
     val torboxKey = debridSettings.apiKeyFor(com.nuvio.app.features.debrid.DebridProviders.Torbox.id)
     // Addon stream without TorBox identity: look for exactly one matching file
     // in the user's own TorBox cloud (by info hash), once per stream. Host only.
-    val mappingKey = if (activeStream?.torboxPartyFile == null && partyState.party?.isHost == true) torboxMappingKey() else null
-    LaunchedEffect(mappingKey, torboxKey) {
-        if (mappingKey == null || torboxKey.isBlank() || torboxMappedFor == mappingKey) return@LaunchedEffect
-        val hash = activeTorrentInfoHash ?: return@LaunchedEffect
-        val filename = activeSourceFilename ?: activeStream?.behaviorHints?.filename
-        val found = try { com.nuvio.app.features.debrid.findTorboxCloudFile(torboxKey, hash, filename) }
-            catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
-            catch (_: Exception) { null }
-        torboxMappedFile = found
-        torboxMappedFor = mappingKey
+    // Addon stream without TorBox identity: link a cloud file automatically
+    // (unique info hash, else exact title), once per stream; the host can
+    // change or remove it. A manual link always wins.
+    val autoKey = if (activeStream != null && activeStream?.torboxPartyFile == null && partyState.party?.isHost == true)
+        "$key|${activeTorrentInfoHash.orEmpty()}|${activeSourceFilename ?: activeStream?.behaviorHints?.filename.orEmpty()}" else null
+    LaunchedEffect(autoKey, torboxKey) {
+        if (autoKey == null || torboxKey.isBlank() || torboxAutoTriedFor == autoKey || torboxManualFor == key) return@LaunchedEffect
+        torboxAutoTriedFor = autoKey
+        val media = currentPartyMedia()
+        val found = try {
+            com.nuvio.app.features.debrid.autoLinkTorboxCloud(torboxKey, activeTorrentInfoHash,
+                activeSourceFilename ?: activeStream?.behaviorHints?.filename, media.title, media.season, media.episode)
+        } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled } catch (_: Exception) { null }
+        if (found != null && torboxManualFor != key) {
+            torboxManualFile = found.first; torboxManualFor = key; torboxManualName = found.second; torboxLinkAuto = true
+        }
     }
     val torboxFile = effectiveTorboxFile
     // torboxPartyRefresh restarts this single producer (button); the previous
@@ -490,7 +497,8 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
     // Family share: publish the token address for the admitted members while
     // "Share my stream" is on; revoke when it is off, the title changes or the
     // party ends. Guests that already loaded it keep playing.
-    val familyUrl = torboxPartyStream?.url?.takeIf { torboxFamilyOnly && torboxPartyStream?.mediaKey == key }
+    val familyUrl = activeHostPartyHls?.takeIf { it.familyOnly }?.url
+        ?: torboxPartyStream?.url?.takeIf { torboxFamilyOnly && torboxPartyStream?.mediaKey == key && activeHostPartyHls == null }
     val familyHost = partyState.party?.isHost == true && partyState.party?.media?.key == key
     // Republish when members change, so kicked or departed members lose their grants at once.
     val familyMembers = partyState.party?.members.orEmpty().map { it.id }.sorted()
@@ -515,7 +523,8 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
         if (admitted != familyAdmitted) { familyAdmitted = admitted; return@LaunchedEffect } // Restarts with the pruned set.
         // Short-lived share, renewed while it is on: a crash or host change ends it by itself.
         while (isActive) {
-            val result = com.nuvio.app.features.party.PartyFamilyShare.publish(partyId, key, familyUrl, admitted, torboxPropagateToken)
+            val propagate = activeHostPartyHls?.familyOnly != true && torboxPropagateToken
+            val result = com.nuvio.app.features.party.PartyFamilyShare.publish(partyId, key, familyUrl, admitted, propagate)
             familySharePartyId = partyId
             // Throttled: keep the last rev (guests keep their state) and retry sooner.
             if (result.retryAfterMs == null) familyShareRev = result.rev
@@ -531,7 +540,7 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
             hostPartyHlsStatus = if (partyId == null) "" else "Der geteilte Video-Link galt für den vorherigen Titel und wurde beendet."
         }
         if (torboxManualFor != null && (partyId == null || torboxManualFor != key)) {
-            torboxManualFile = null; torboxManualFor = null; torboxManualName = ""
+            torboxManualFile = null; torboxManualFor = null; torboxManualName = ""; torboxLinkAuto = false
         }
         if (torboxChoicesFor != key) { torboxChoices = null; torboxChoicesFor = null; torboxChoicesStatus = "" }
     }

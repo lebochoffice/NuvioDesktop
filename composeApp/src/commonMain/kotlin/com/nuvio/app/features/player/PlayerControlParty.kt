@@ -22,6 +22,14 @@ data class PlayerControlPartyState(
     val hlsAvailable: Boolean = false,
     val hlsBusy: Boolean = false,
     val hlsStatus: String = "",
+    // Short browser HLS state for a status chip ("sent", "ready", "preparing", …).
+    val hlsPhase: String = "",
+    // Titles for the "different title" card (only while the player is elsewhere).
+    val partyMediaTitle: String = "",
+    val playerMediaTitle: String = "",
+    // The cloud link was found automatically; filter text for the manual picker.
+    val torboxLinkAuto: Boolean = false,
+    val torboxSuggestedFilter: String = "",
     // Default origin of "Watch in Browser" (production, or the preview in a test build).
     val browserOrigin: String = "",
     // Host's own video link for all browser guests (never the URL itself here).
@@ -86,6 +94,8 @@ data class PlayerControlPartyMember(
     val presence: String = "",
     val canRemove: Boolean = false,
     val removeTitle: String = "",
+    // Family share toggle for the host: "" (none), "off" or "on".
+    val familyShare: String = "",
 )
 
 @Serializable

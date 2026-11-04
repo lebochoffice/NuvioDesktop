@@ -167,4 +167,17 @@ class TorboxPartyHlsTest {
         assertNull(matchTorboxCloudFile(items, "ffff", "a.mkv")) // Not in the cloud.
         assertNull(matchTorboxCloudFile(items, " ", "a.mkv"))
     }
+    @Test fun `title auto link matches only the exact title and episode, uniquely`() {
+        fun c(id: Int, name: String) = TorboxCloudChoice(1, id, name, null)
+        val movies = listOf(c(1, "Spider-Man.2002.1080p.BluRay.x264.mkv"), c(2, "Spider-Man.2.2004.2160p.mkv"), c(3, "Spider-Man.2002.sample.mkv"))
+        assertEquals(1, matchTorboxCloudByTitle(movies, "Spider-Man", null, null)?.fileId)
+        assertEquals(2, matchTorboxCloudByTitle(movies, "Spider-Man 2", null, null)?.fileId)
+        assertNull(matchTorboxCloudByTitle(movies + c(4, "Spider Man 2002 720p.mp4"), "Spider-Man", null, null)) // Two plausible files: no guess.
+        val episodes = listOf(c(5, "Dark.S01E02.German.1080p.mkv"), c(6, "Dark.S01E03.German.1080p.mkv"), c(7, "Dark.Matter.S01E02.mkv"))
+        assertEquals(5, matchTorboxCloudByTitle(episodes, "Dark", 1, 2)?.fileId)
+        assertNull(matchTorboxCloudByTitle(episodes, "Dark", 2, 1))
+        assertNull(matchTorboxCloudByTitle(episodes, "Dark", null, null)) // A movie never matches an episode file.
+        assertNull(matchTorboxCloudByTitle(movies, "", null, null))
+        assertEquals(8, matchTorboxCloudByTitle(listOf(c(8, "Die.Schöne.und.das.Biest.2017.mkv")), "Die Schöne und das Biest", null, null)?.fileId)
+    }
 }
