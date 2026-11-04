@@ -2,7 +2,7 @@
 // Pages context, fake asset response. Test-only secrets, never real ones.
 import {test} from 'node:test';
 import {strict as assert} from 'node:assert';
-import {gate, safeNext, isProductionHost, COOKIE_NAME, LOGIN_PATH, LOGOUT_PATH, FAIL_LIMIT, SESSION_S} from '../functions/_middleware.js';
+import {gate, gateConfig, createSession, safeNext, isProductionHost, COOKIE_NAME, LOGIN_PATH, LOGOUT_PATH, FAIL_LIMIT, SESSION_S} from '../functions/_middleware.js';
 
 const PREVIEW = 'https://feature-party-premium-ui.nuvio-watch-friends.pages.dev';
 const HASH = 'https://3f2a9c1b.nuvio-watch-friends.pages.dev';
@@ -26,9 +26,13 @@ const cookieOf = response => (response.headers.get('Set-Cookie') || '').split(';
 
 test('production is never gated, not even with missing or broken configuration', async () => {
   for (const environment of [env, {}, {PREVIEW_PASSWORD: 'short'}]) {
-    const {response, assetCalls} = await call(`${PRODUCTION}/party/ABC234`, {environment});
-    assert.equal(response.status, 200); assert.equal(assetCalls(), 1);
-    assert.equal(response.headers.get('Cache-Control'), 'public, max-age=31536000'); // Untouched.
+    for (const path of ['/party/ABC234', LOGIN_PATH]) {
+      const {response, assetCalls} = await call(`${PRODUCTION}${path}`, {environment});
+      assert.equal(response.status, 200); assert.equal(assetCalls(), 1);
+      assert.equal(response.headers.get('Cache-Control'), 'public, max-age=31536000');
+      assert.equal(response.headers.get('Set-Cookie'), null);
+      assert.match(await response.text(), /ASSET_BODY_MARKER/);
+    }
   }
   assert.ok(isProductionHost('NUVIO-WATCH-FRIENDS.PAGES.DEV'));
   assert.ok(!isProductionHost('feature-party-premium-ui.nuvio-watch-friends.pages.dev'));
@@ -121,7 +125,10 @@ test('login and logout reject cross-site posts; logout clears the cookie', async
   assert.equal((await call(`${PREVIEW}${LOGIN_PATH}`, form({password: env.PREVIEW_PASSWORD, next: '/'}, 'https://evil.example'))).response.status, 403);
   assert.equal((await call(`${PREVIEW}${LOGOUT_PATH}`, {method: 'POST', headers: {Origin: 'https://evil.example'}})).response.status, 403);
   const out = await call(`${PREVIEW}${LOGOUT_PATH}`, {method: 'POST', headers: {Origin: PREVIEW}});
-  assert.equal(out.response.status, 303); assert.match(out.response.headers.get('Set-Cookie'), /Max-Age=0/);
+  assert.equal(out.response.status, 303);
+  assert.equal(out.response.headers.get('Location'), LOGIN_PATH);
+  assert.equal(out.response.headers.get('Set-Cookie'), `${COOKIE_NAME}=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Lax`);
+  assert.equal(out.response.headers.get('Cache-Control'), 'private, no-store');
   const loginGet = await call(`${PREVIEW}${LOGIN_PATH}?next=${encodeURIComponent('"><script>alert(1)</script>')}`);
   assert.equal(loginGet.response.status, 200);
   assert.ok(!(await loginGet.response.text()).includes('<script>alert'));
@@ -131,6 +138,7 @@ test('the login form page sends its real origin on submit (Referrer-Policy same-
   for (const url of [`${PREVIEW}/party/ABC234`, `${PREVIEW}${LOGIN_PATH}`]) {
     const {response} = await call(url);
     assert.equal(response.headers.get('Referrer-Policy'), 'same-origin', url); // no-referrer would make the POST send "Origin: null".
+    assert.equal(response.headers.get('Cache-Control'), 'private, no-store', url);
   }
   const wrong = await login(PREVIEW, 'wrong-password-123456', '/', {'CF-Connecting-IP': '192.0.2.200'});
   assert.equal(wrong.response.headers.get('Referrer-Policy'), 'same-origin');
@@ -140,14 +148,34 @@ test('the login form page sends its real origin on submit (Referrer-Policy same-
   assert.equal((await login()).response.status, 303); // Same-origin submit works.
 });
 
-test('one login per device lasts 30 days, never without an expiry; a password change still ends it', async () => {
-  assert.equal(SESSION_S, 30 * 24 * 3600);
+const DAY_MS = 86400 * 1000;
+
+test('a new login expires after 365 days and protected requests do not renew it', async () => {
+  assert.equal(SESSION_S, 365 * 24 * 3600);
   const now = Date.UTC(2026, 10, 5, 12);
   const {response} = await call(`${PREVIEW}${LOGIN_PATH}`, {...form({password: env.PREVIEW_PASSWORD, next: '/'}), now});
-  assert.match(response.headers.get('Set-Cookie'), /Max-Age=2592000; Secure; HttpOnly; SameSite=Lax/);
+  assert.match(response.headers.get('Set-Cookie'), /Max-Age=31536000; Secure; HttpOnly; SameSite=Lax/);
   const cookie = cookieOf(response);
-  assert.equal((await call(`${PREVIEW}/`, {headers: {Cookie: cookie}, now: now + 29 * 86400 * 1000})).response.status, 200);
-  assert.equal((await call(`${PREVIEW}/`, {headers: {Cookie: cookie}, now: now + 31 * 86400 * 1000})).response.status, 401);
-  const rotated = {...env, PREVIEW_PASSWORD: 'another-test-password-987654'};
-  assert.equal((await call(`${PREVIEW}/`, {headers: {Cookie: cookie}, environment: rotated, now: now + 1000})).response.status, 401);
+  const visit = offset => call(`${PREVIEW}/`, {headers: {Cookie: cookie}, now: now + offset});
+  const late = await visit(364 * DAY_MS);
+  assert.equal(late.response.status, 200);
+  assert.equal(late.response.headers.get('Set-Cookie'), null);
+  assert.equal(late.response.headers.get('Cache-Control'), 'private, no-store');
+  for (const offset of [365 * DAY_MS, 365 * DAY_MS + 1000]) {
+    const expired = await visit(offset);
+    assert.equal(expired.response.status, 401);
+    assert.equal(expired.assetCalls(), 0);
+    assert.equal(expired.response.headers.get('Set-Cookie'), null);
+  }
+});
+
+test('a signed legacy cookie keeps its original 30-day expiry', async () => {
+  const now = Date.UTC(2026, 10, 5, 12);
+  // The signed format is unchanged. Backdate issuance to reproduce the old expiry.
+  const token = await createSession(gateConfig(env), new URL(PREVIEW).hostname, now - 335 * DAY_MS);
+  const headers = {Cookie: `${COOKIE_NAME}=${token}`};
+  const active = await call(`${PREVIEW}/`, {headers, now: now + 29 * DAY_MS});
+  assert.equal(active.response.status, 200);
+  assert.equal(active.response.headers.get('Set-Cookie'), null);
+  assert.equal((await call(`${PREVIEW}/`, {headers, now: now + 30 * DAY_MS})).response.status, 401);
 });
