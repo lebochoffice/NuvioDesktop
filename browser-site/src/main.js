@@ -1263,6 +1263,15 @@ async function joinParty({auto = false} = {}) {
 }
 $('joinForm').addEventListener('submit', e => { e.preventDefault(); joinParty(); });
 // Sign out: visible only with a session (inside the account line).
+// Preview password gate (functions/_middleware.js): the logout POST must carry
+// the real Origin, which "no-referrer" pages would send as "null"; this one
+// request therefore uses referrerPolicy "same-origin". Not on production.
+const PRODUCTION_HOST = 'nuvio-watch-friends.pages.dev';
+$('previewLogoutRow').hidden = !globalThis.location?.hostname || globalThis.location.hostname === PRODUCTION_HOST;
+$('previewLogout').addEventListener('click', async () => {
+  try { await fetch('/__preview/logout', {method: 'POST', credentials: 'same-origin', referrerPolicy: 'same-origin', redirect: 'manual'}); } catch { /* Login page follows anyway. */ }
+  globalThis.location?.assign?.('/__preview/login');
+});
 $('logoutButton').addEventListener('click', async () => { forgetJoinedParty(); await session?.close(); await client?.auth.signOut(); renderAuthState(false); showPanel('join'); status('Abgemeldet.'); });
 $('invitePlay').addEventListener('click', () => joinParty());
 $('passwordToggle').addEventListener('click', () => {
