@@ -293,6 +293,9 @@ data class ActiveParty(
     val canControl: Boolean
         get() = !hostOnly || isHost
 
+    fun blocksManualPlayback(playerMediaKey: String, solo: Boolean): Boolean =
+        !solo && !canControl && media.key == playerMediaKey
+
     fun member(id: String?): PartyMember? = members.firstOrNull { it.id == id }
 }
 

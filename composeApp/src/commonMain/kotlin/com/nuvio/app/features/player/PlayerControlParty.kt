@@ -7,6 +7,7 @@ data class PlayerControlPartyState(
     val available: Boolean = false,
     val active: Boolean = false,
     val synced: Boolean = false,
+    val solo: Boolean = false,
     val panelToken: Long = 0L,
     val busy: Boolean = false,
     val canStart: Boolean = false,

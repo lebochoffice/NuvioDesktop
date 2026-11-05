@@ -52,6 +52,7 @@ export class PartySession {
     this.presence = {status: 'browsing'};
     this.closing = null;
     this.hostCommands = false; this.commands = new Map(); this.latestCommand = null;
+    this.hostStream = null; // Browser host only: the link it currently shares (memory only).
     this.commandTimers = new Set(); this.ackTimeoutMs = ACK_TIMEOUT_MS;
     // Latest informational status/position report per member (display only).
     this.memberStatus = new Map(); this.positionProvider = null;
@@ -63,9 +64,44 @@ export class PartySession {
       commands: 0, lastCommandResult: null, reconnects: 0, connectionLog: []};
   }
   // Authoritative DB snapshot only (join/heartbeat); never a broadcast claim.
+  // The server-confirmed host always controls (watch_party_update authorizes it).
   canControl() {
     const room = this.room;
-    return !!room && !!this.channel && room.info.host_only === false && !!room.info.host_member_id && room.info.host_member_id !== room.memberId;
+    if (!room || !this.channel) return false;
+    if (this.isHost()) return true;
+    return room.info.host_only === false && !!room.info.host_member_id && room.info.host_member_id !== room.memberId;
+  }
+  // --- Browser host: shared video link (same `stream` offer as a Desktop host) --
+  // Distributed over the private party channel and answered again on every
+  // state_request (late joiners, reconnects). Memory only: after a reload of
+  // the host page the link has to be shared again (no URLs are stored).
+  async shareHostStream(stream) {
+    if (!this.isHost()) throw new Error('Host-Rolle nicht vom Backend bestätigt.');
+    if (!this.channel) throw new Error('Keine Party-Verbindung.');
+    this.hostStream = stream;
+    await this.sendHostStream();
+  }
+  async stopHostStream() {
+    if (!this.isHost()) return;
+    this.hostStream = null;
+    await this.sendHostStream();
+  }
+  async sendHostStream() {
+    if (!this.isHost() || !this.channel) return;
+    const sent = await this.channel.send({type: 'broadcast', event: 'stream', payload: {member_id: this.room.memberId, stream: this.hostStream ?? null}});
+    if (sent && sent !== 'ok') throw new Error('Videofreigabe nicht gesendet (' + sent + ').');
+  }
+  // Host's own play/pause/seek: broadcast first, then persisted by the
+  // authorized watch_party_update (the same order as Nuvio Desktop).
+  hostPublish({paused, positionMs}) {
+    if (!this.isHost()) return Promise.reject(Object.assign(new Error('host_only'), {code: 'host_only'}));
+    return this.commitControl(this.prepareControl({paused, positionMs}), {mode: 'desktop'});
+  }
+  // Host decision about a member's proposal (display only for that member).
+  answerProposal(memberId, accepted) {
+    if (!this.isHost() || !this.channel) return Promise.resolve();
+    return this.channel.send({type: 'broadcast', event: 'stream_suggest_result',
+      payload: {member_id: this.room.memberId, target_member_id: memberId, status: accepted ? 'accepted' : 'declined'}}).catch(() => {});
   }
   prepareControl({paused, positionMs}) {
     const room = this.room;
@@ -241,24 +277,63 @@ export class PartySession {
   // allowAnonymous is only passed by builds whose backend authorizes anonymous
   // Supabase members server-side; the server remains the authority.
   async join(code, displayName, profileIndex, {allowAnonymous = false} = {}) {
+    return this.openMembership('watch_party_join', {p_code: code}, displayName, profileIndex, {allowAnonymous});
+  }
+  async create(media, displayName, profileIndex) {
+    if (!media || !['movie', 'series'].includes(media.meta_type) || !/^tt[0-9]{7,12}$/.test(media.meta_id || '') ||
+        !media.title?.trim() || media.type !== media.meta_type ||
+        media.meta_type === 'series' && (!Number.isInteger(media.season) || media.season < 0 ||
+          !Number.isInteger(media.episode) || media.episode < 1 || !media.video_id)) throw new Error('Gültigen Film oder eine konkrete Episode auswählen.');
+    return this.openMembership('watch_party_create', {p_media: media, p_playback: null}, displayName, profileIndex);
+  }
+  isHost() {
+    return !!this.room?.memberId && this.room.info.host_member_id === this.room.memberId &&
+      this.room.members.some(member => member.id === this.room.memberId);
+  }
+  async hostAction(name, fields = {}) {
+    const room = this.room;
+    if (!this.isHost()) throw new Error('Host-Rolle nicht vom Backend bestätigt.');
+    const result = await this.rpc(name, {p_party_id: room.info.id, p_device_id: this.deviceId, ...fields});
+    if (room === this.room) {
+      if (result?.party?.id === room.info.id && result.member_id === room.memberId && Array.isArray(result.members)) {
+        room.info = result.party; room.members = result.members;
+        this.emit('room', room);
+      } else await this.refresh();
+    }
+    return result;
+  }
+  setHostOnly(enabled) { return this.hostAction('watch_party_set_host_only', {p_host_only: enabled === true}); }
+  removeMember(memberId) {
+    if (memberId === this.room?.memberId || !this.room?.members.some(member => member.id === memberId)) return Promise.reject(new Error('Ungültiges Mitglied.'));
+    return this.hostAction('watch_party_remove_member', {p_member_id: memberId});
+  }
+  async endParty() {
+    const room = this.room;
+    if (!this.isHost()) throw new Error('Host-Rolle nicht vom Backend bestätigt.');
+    await this.rpc('watch_party_end', {p_party_id: room.info.id, p_device_id: this.deviceId});
+    if (room === this.room) await this.finish('Die Party wurde beendet.', 'ended');
+  }
+  async openMembership(action, parameters, displayName, profileIndex, {allowAnonymous = false} = {}) {
     await this.close();
     const gen = ++this.generation;
     const {data: {session}, error} = await this.client.auth.getSession();
     if (error) throw error;
     if (!session?.user || (session.user.is_anonymous && !allowAnonymous)) throw new Error('Ein angemeldetes, nicht anonymes Nuvio-Konto ist erforderlich.');
     if (gen !== this.generation) return;
-    const args = {p_code: code, p_device_id: this.deviceId, p_display_name: displayName.slice(0, 40), p_avatar_url: null, p_avatar_color: null};
+    const args = {...parameters, p_device_id: this.deviceId, p_display_name: displayName.slice(0, 40), p_avatar_url: null, p_avatar_color: null};
     let snapshot;
     const sent = Date.now();
     try {
-      snapshot = await this.rpc('watch_party_join', profileIndex == null ? args : {...args, p_profile_index: profileIndex});
+      snapshot = await this.rpc(action, profileIndex == null ? args : {...args, p_profile_index: profileIndex});
     } catch (e) {
       // Exactly the same backward compatibility as PartyApi.callWithProfile.
       if (e.code !== 'PGRST202' || profileIndex == null) throw e;
-      snapshot = await this.rpc('watch_party_join', args);
+      snapshot = await this.rpc(action, args);
     }
     if (gen !== this.generation) return;
     if (!snapshot?.party || !snapshot.member_id) throw new Error('Ungültige Party-Antwort ohne Party/Mitglied.');
+    if (action === 'watch_party_create' && (snapshot.party.host_member_id !== snapshot.member_id ||
+        !snapshot.members?.some(member => member.id === snapshot.member_id))) throw new Error('Das Backend hat die Host-Mitgliedschaft nicht bestätigt.');
     this.room = {info: snapshot.party, memberId: snapshot.member_id, members: snapshot.members || []};
     if (Number.isFinite(snapshot.server_time_ms)) this.clockOffset = snapshot.server_time_ms - (sent + Date.now()) / 2;
     this.emit('room', this.room);
@@ -279,7 +354,7 @@ export class PartySession {
     this.channel = ch;
     this.noteConnection('CONNECTING');
     this.emit('connection', 'CONNECTING');
-    for (const event of ['state', 'stream', 'media', 'control', 'chat', 'ended', 'member_left', 'member_joined', 'state_request', 'status', 'ack', 'countdown']) {
+    for (const event of ['state', 'stream', 'media', 'control', 'chat', 'ended', 'member_left', 'member_joined', 'state_request', 'status', 'ack', 'countdown', 'stream_suggest', 'stream_suggest_result']) {
       ch.on('broadcast', {event}, ({payload}) => {
         if (gen === this.generation && this.room === room && this.channel === ch) this.receive(event, payload);
       });
@@ -293,6 +368,8 @@ export class PartySession {
       if (state !== 'SUBSCRIBED') { this.scheduleReconnect(gen, state); return; }
       this.reconnectAttempts = 0;
       if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
+      // A browser host re-announces its shared link and party time after (re)connecting.
+      if (this.isHost()) { this.sendHostStream().catch(() => {}); if (this.playback) this.channel.send({type: 'broadcast', event: 'state', payload: this.playback}).catch(() => {}); }
       try { await Promise.all([this.sendPresence(), this.requestState(), this.refresh()]); }
       catch (e) { this.emit('error', e); }
     });
@@ -364,7 +441,19 @@ export class PartySession {
     // Database snapshots are authoritative for media, membership and host-only changes.
     if (['media', 'control', 'member_joined'].includes(event)) this.refresh();
     if (event === 'chat') this.loadMessages();
-    if (event === 'state_request' && payload.member_id !== this.room.memberId) this.sendPresence().catch(e => this.emit('error', e));
+    if (event === 'state_request' && payload.member_id !== this.room.memberId) {
+      this.sendPresence().catch(e => this.emit('error', e));
+      // Browser host: late joiners and reconnects get the shared link and the party time.
+      if (this.isHost()) {
+        this.sendHostStream().catch(() => {});
+        if (this.playback) this.channel?.send({type: 'broadcast', event: 'state', payload: this.playback}).catch(() => {});
+      }
+    }
+    // Proposals reach only the server-confirmed host; main checks them (host-share.js).
+    if (event === 'stream_suggest' && this.isHost()) this.emit('proposal', payload);
+    // The host's decision about this member's own proposal (display only).
+    if (event === 'stream_suggest_result' && payload.member_id === this.room.info.host_member_id &&
+        payload.target_member_id === this.room.memberId && ['accepted', 'declined'].includes(payload.status)) this.emit('proposalResult', payload.status);
     if (event === 'ended' || event === 'member_left') this.refresh();
   }
   acceptPlayback(next, source = 'snapshot') {
@@ -413,16 +502,14 @@ export class PartySession {
       if (changed || hostChanged) this.playback = null;
       // New epoch: commands for the previous host or film never become valid.
       if (hostChanged) this.hostCommands = false;
+      // A shared link belongs to its host and film; it is never carried over.
+      if (changed || hostChanged) this.hostStream = null;
       if (changed || hostChanged) this.dropCommands('stale_epoch');
       if (changed) { this.memberStatus.clear(); this.emit('members', this.memberStatus); }
       if (changed) { this.presence = {status: 'browsing'}; this.emit('media', room.info.media); }
       // A host change is not a revocation by the sharing host; main decides
       // whether an already loaded source may continue locally.
       if (changed || hostChanged) this.emit('stream', null, changed ? 'media_changed' : 'host_changed');
-      if (room.info.host_member_id === room.memberId) {
-        // This guest cannot provide media/coordinator duties if a backend promotes it.
-        return await this.finish('Der Desktop-Host hat die Party verlassen. Bitte eine neue Desktop-Party öffnen.', 'host_left');
-      }
       this.emit('room', room); this.acceptPlayback(result.party.playback, 'snapshot');
       if (changed || hostChanged) { await this.sendPresence(); await this.requestState(); }
     } catch (e) {
@@ -530,7 +617,7 @@ export class PartySession {
     if (this.closing) return this.closing;
     const old = this.room, ch = this.channel;
     this.room = null; this.channel = null; this.playback = null;
-    this.hostCommands = false; this.commands.clear(); this.latestCommand = null; this.memberStatus.clear();
+    this.hostCommands = false; this.commands.clear(); this.latestCommand = null; this.memberStatus.clear(); this.hostStream = null;
     this.commandTimers.forEach(clearTimeout); this.commandTimers.clear();
     if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
     this.reconnectAttempts = 0;

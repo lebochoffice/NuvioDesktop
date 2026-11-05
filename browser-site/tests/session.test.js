@@ -23,6 +23,73 @@ function fixture(handlers = {}) {
   };
   return {client, calls, messages, tracks, ch, connect: () => cb('SUBSCRIBED'), emit: (event, payload) => events.find(e => e.event === event).callback({payload}), session: new PartySession(client, 'device', handlers)};
 }
+test('browser creation requires account auth, real media identity and a server-confirmed host membership', async t => {
+  const f = fixture(); t.after(() => f.session.close());
+  const movie = {type: 'movie', meta_type: 'movie', meta_id: 'tt1234567', title: 'Catalog title'};
+  const original = f.client.rpc;
+  f.client.rpc = async (name, args) => {
+    if (name === 'watch_party_create') {
+      f.calls.push([name, args]);
+      return {data: {...snapshot(), member_id: 'host', party: {...snapshot().party, media: movie}}};
+    }
+    return original(name, args);
+  };
+  await f.session.create(movie, 'Host', 0);
+  assert.equal(f.session.isHost(), true);
+  const request = f.calls.find(call => call[0] === 'watch_party_create')[1];
+  assert.deepEqual(request.p_media, movie);
+  assert.equal(request.p_playback, null);
+  assert.equal(request.p_profile_index, 0);
+  assert.equal(request.p_device_id, 'device');
+  await f.session.close();
+  f.client.rpc = async () => ({data: snapshot()});
+  await assert.rejects(f.session.create(movie, 'Host'), /Host-Mitgliedschaft/);
+  assert.equal(f.session.isHost(), false);
+  f.client.auth.getSession = async () => ({data: {session: null}});
+  await assert.rejects(f.session.create(movie, 'Host'), /angemeldetes/);
+});
+
+test('host-only, kick and end use authorized RPCs and reject guests', async t => {
+  const f = fixture(); t.after(() => f.session.close());
+  await f.session.join('UXZ83H', 'Guest');
+  await assert.rejects(f.session.setHostOnly(false), /Host-Rolle/);
+  await assert.rejects(f.session.endParty(), /Host-Rolle/);
+  const original = f.client.rpc;
+  f.client.rpc = async (name, args) => {
+    if (name === 'watch_party_join' || name === 'watch_party_heartbeat' || name === 'watch_party_set_host_only' ||
+        name === 'watch_party_remove_member' || name === 'watch_party_end') {
+      f.calls.push([name, args]);
+      return {data: {...snapshot(), member_id: 'host', party: {...snapshot().party,
+        host_only: name === 'watch_party_set_host_only' ? args.p_host_only : true},
+        members: snapshot().members.filter(member => member.id !== args.p_member_id)}};
+    }
+    return original(name, args);
+  };
+  // A reload restores the host role from join, with no stored role flag.
+  await f.session.join('UXZ83H', 'Host');
+  assert.equal(f.session.isHost(), true);
+  await f.connect();
+  await f.session.reconnect();
+  await f.connect();
+  assert.equal(f.session.isHost(), true);
+  await f.session.setHostOnly(false);
+  assert.equal(f.session.room.info.host_only, false);
+  await f.session.removeMember('guest');
+  assert.equal(f.session.room.members.some(member => member.id === 'guest'), false);
+  await f.session.endParty();
+  assert.equal(f.session.room, null);
+  assert.ok(f.calls.some(call => call[0] === 'watch_party_end'));
+});
+
+test('a backend creation denial never grants local host rights', async () => {
+  const f = fixture();
+  f.client.rpc = async () => ({error: {code: '42501', message: 'denied'}});
+  await assert.rejects(f.session.create({type: 'movie', meta_type: 'movie', meta_id: 'tt1234567', title: 'Catalog title'}, 'Host'),
+    error => error.code === '42501');
+  assert.equal(f.session.room, null);
+  assert.equal(f.session.isHost(), false);
+});
+
 test('authenticated private channel, state request, browsing presence and cleanup', async t => {
   const f = fixture(); t.after(() => f.session.close());
   await f.session.join('UXZ83H', 'Guest'); await f.connect();
@@ -689,4 +756,65 @@ test('end reasons: a host change emits stream(null, "host_changed"); removal and
   const h = fixture({closed: reason => closes.push(reason)}); t.after(() => h.session.close());
   await h.session.join('UXZ83H', 'Guest'); await h.session.close();
   assert.equal(closes.at(-1), null); // An explicit leave carries no end reason.
+});
+
+// --- Browser host: shared video link, own playback, proposals ---------------
+async function hostFixture(t, handlers = {}) {
+  const f = fixture(handlers); t.after(() => f.session.close());
+  const rpc = f.client.rpc;
+  f.client.rpc = async (name, args) => {
+    const reply = await rpc(name, args);
+    return ['watch_party_join', 'watch_party_heartbeat'].includes(name) ? {data: {...reply.data, member_id: 'host'}} : reply;
+  };
+  await f.session.join('UXZ83H', 'Host'); await f.connect();
+  return f;
+}
+const hostLinkStream = {media_key: 'movie|tt1||', url: 'https://cdn.example.test/film.mp4', name: 'Video-Link des Hosts', stream_type: 'mp4', headers: {}, response_headers: {}};
+
+test('the server-confirmed host controls even with host_only; its states are broadcast, then persisted', async t => {
+  const f = await hostFixture(t);
+  assert.equal(f.session.isHost(), true);
+  assert.equal(f.session.room.info.host_only, true);
+  assert.equal(f.session.canControl(), true); // A guest with host_only=true could not.
+  const state = await f.session.hostPublish({paused: true, positionMs: 0});
+  assert.equal(state.member_id, 'host'); assert.equal(state.paused, true); assert.equal(state.media_key, 'movie|tt1||');
+  assert.ok(f.messages.some(m => m.event === 'state' && m.payload === state));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.ok(f.calls.some(c => c[0] === 'watch_party_update' && c[1].p_playback.seq === state.seq)); // Authorized by the backend.
+  assert.equal(f.session.playback.seq, state.seq);
+});
+
+test('a guest can neither publish as host nor share a link; only the host answers state requests with its link', async t => {
+  const g = fixture(); t.after(() => g.session.close());
+  await g.session.join('UXZ83H', 'Guest'); await g.connect();
+  await assert.rejects(g.session.hostPublish({paused: true, positionMs: 0}), e => e.code === 'host_only');
+  await assert.rejects(g.session.shareHostStream(hostLinkStream), /Host-Rolle/);
+  const f = await hostFixture(t);
+  await f.session.shareHostStream(hostLinkStream);
+  assert.deepEqual(f.messages.filter(m => m.event === 'stream').at(-1).payload, {member_id: 'host', stream: hostLinkStream});
+  await f.session.hostPublish({paused: false, positionMs: 5000});
+  const before = f.messages.length;
+  f.emit('state_request', {member_id: 'guest'}); // Late joiner or reconnect.
+  await new Promise(resolve => setImmediate(resolve));
+  const answers = f.messages.slice(before);
+  assert.ok(answers.some(m => m.event === 'stream' && m.payload.stream === hostLinkStream));
+  assert.ok(answers.some(m => m.event === 'state' && m.payload.position_ms === 5000));
+  await f.session.stopHostStream();
+  assert.deepEqual(f.messages.filter(m => m.event === 'stream').at(-1).payload, {member_id: 'host', stream: null});
+});
+
+test('proposals reach only the host; decisions reach only the proposing member', async t => {
+  const proposals = [], f = await hostFixture(t, {proposal: p => proposals.push(p)});
+  f.emit('stream_suggest', {member_id: 'guest', media_key: 'movie|tt1||', url: 'https://cdn.example.test/a.mp4'});
+  assert.equal(proposals.length, 1);
+  await f.session.answerProposal('guest', false);
+  assert.deepEqual(f.messages.at(-1).payload, {member_id: 'host', target_member_id: 'guest', status: 'declined'});
+  const results = [], g = fixture({proposal: p => proposals.push(p), proposalResult: r => results.push(r)}); t.after(() => g.session.close());
+  await g.session.join('UXZ83H', 'Guest'); await g.connect();
+  g.emit('stream_suggest', {member_id: 'guest', media_key: 'movie|tt1||', url: 'https://cdn.example.test/a.mp4'});
+  assert.equal(proposals.length, 1); // A guest never receives proposals.
+  g.emit('stream_suggest_result', {member_id: 'intruder', target_member_id: 'guest', status: 'accepted'}); // Not the host.
+  g.emit('stream_suggest_result', {member_id: 'host', target_member_id: 'other', status: 'accepted'});
+  g.emit('stream_suggest_result', {member_id: 'host', target_member_id: 'guest', status: 'accepted'});
+  assert.deepEqual(results, ['accepted']);
 });

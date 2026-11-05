@@ -289,6 +289,8 @@ internal class PlayerScreenRuntime(
         get() = showAudioModal || showSubtitleModal || showVideoSettingsModal || showStreamInfo ||
             showPartyPanel || showSourcesPanel || showEpisodesPanel || showSubmitIntroModal
     var partyBehind by mutableStateOf(false)
+    var partySolo by mutableStateOf(false)
+    var partyLockedNoticeAt: kotlin.time.TimeMark? = null
     // "Mich synchronisieren": incremented to re-apply the current party state
     // through the existing path (same as returning from background).
     var partyResyncRequest by mutableStateOf(0)

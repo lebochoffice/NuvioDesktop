@@ -12,6 +12,8 @@ import * as protocol from '../src/protocol.js';
 import {PersonalHlsSource, personalHlsUrlProblem} from '../src/personal-hls.js';
 import {PartySession as ActualPartySession} from '../src/session.js';
 import * as syncPolicy from '../src/sync-policy.js';
+import {loadRoomTitle, resolveRoomMedia, roomMediaForEpisode} from '../src/room-media.js';
+import * as hostShareModule from '../src/host-share.js';
 
 const privateUrl = 'https://media.example.test/private/master?token=INTEGRATION_PRIVATE_SENTINEL';
 const vod = {live: false, totalduration: 120, fragments: [{start: 0, duration: 120}]};
@@ -41,8 +43,8 @@ class FakeHls {
 // existing tests keep the manual flow, so the default here is a stored 'off'.
 // joined: party code remembered in this tab (reload rejoin); fakeJoin records
 // joins instead of calling the backend and leaves the room empty until then.
-async function harness({debug = false, guestControl = false, guestJoin = false, rpc = null, path = '/', autoHost = false, joined = null, fakeJoin = false, share = null} = {}) {
-  const elements = new Map(), storageWrites = [], sent = [], timers = [], historyCalls = [];
+async function harness({debug = false, guestControl = false, guestJoin = false, rpc = null, path = '/', autoHost = false, joined = null, fakeJoin = false, share = null, catalog = null, searchCatalog = null} = {}) {
+  const elements = new Map(), storageWrites = [], sent = [], timers = [], historyCalls = [], mediaActions = new Map();
   const location = {pathname: path, origin: 'https://watch.example.test'};
   let clock = 0, tick = () => {};
   const get = id => { if (!elements.has(id)) elements.set(id, new Element()); return elements.get(id); };
@@ -78,7 +80,7 @@ async function harness({debug = false, guestControl = false, guestJoin = false, 
     signInAnonymously: async () => { anonymousSignIns.push(1); return {data: {}}; }}};
   const windowEvents = new Map();
   const context = vm.createContext({
-    ...protocol, ...syncPolicy, PersonalHlsSource, personalHlsUrlProblem, Hls: FakeHls, PartySession: FakeSession,
+    ...protocol, ...syncPolicy, ...hostShareModule, PersonalHlsSource, personalHlsUrlProblem, Hls: FakeHls, PartySession: FakeSession,
     createClient: () => client, callRpc: (_client, name, args) => { if (rpc?.[name]) return rpc[name](args); throw Error('Unexpected RPC'); }, URL, Blob,
     // Family share Worker double: share.handle(action, body, headers) -> {status, body}.
     fetch: async (url, init) => {
@@ -89,6 +91,12 @@ async function harness({debug = false, guestControl = false, guestJoin = false, 
     env: {VITE_SUPABASE_URL: 'https://backend.example.test', VITE_SUPABASE_ANON_KEY: 'sb_publishable_TEST', ...(guestControl === true ? {VITE_PARTY_GUEST_CONTROL: '1'} : typeof guestControl === 'string' ? {VITE_PARTY_GUEST_CONTROL: guestControl} : {}), ...(guestJoin ? {VITE_PARTY_GUEST_JOIN: '1'} : {}), ...(share ? {VITE_PARTY_SHARE_WORKER: 'https://share.example.test'} : {})},
     document: {getElementById: get, createElement: () => new Element()}, location, history: {replaceState: (_state, _title, url) => { historyCalls.push(url); location.pathname = url; }},
     window: {addEventListener: (event, callback) => windowEvents.set(event, callback)},
+    navigator: {mediaSession: {setActionHandler: (action, handler) => mediaActions.set(action, handler)}},
+    resolveRoomMedia: (type, id, season, episode) => resolveRoomMedia(type, id, season, episode,
+      async () => ({ok: true, json: async () => ({meta: catalog})})),
+    searchRoomMedia: searchCatalog,
+    loadRoomTitle: (type, id) => loadRoomTitle(type, id, async () => ({ok: true, json: async () => ({meta: catalog})})),
+    roomMediaForEpisode,
     sessionStorage: {getItem: key => key === 'nuvio-party-debug' ? (debug ? '1' : null) : key === 'nuvio-party-joined' ? joined : 'test-device', setItem: (...args) => storageWrites.push(args)},
     localStorage: {getItem: key => key === 'nuvio-party-auto-host-stream' && autoHost !== null ? (autoHost ? '1' : '0') : null, setItem: (...args) => storageWrites.push(args)},
     crypto: {randomUUID: () => 'test-id'}, performance: {now: () => clock},
@@ -107,12 +115,104 @@ async function harness({debug = false, guestControl = false, guestJoin = false, 
   const source = () => vm.runInContext('personalHls', context);
   const enter = (submitter, url = privateUrl) => { get('personalHlsUrl').value = url; get('personalHlsForm').fire('submit', {submitter}); };
   const metadata = () => { player.readyState = 1; player.duration = 120; player.currentSrc = 'blob:local-test'; player.fire('loadedmetadata'); };
-  return {get, player, session, source, enter, metadata, sent, storageWrites, windowEvents, anonymousSignIns, logins, joins, historyCalls,
+  return {get, player, session, source, enter, metadata, sent, storageWrites, windowEvents, anonymousSignIns, logins, joins, historyCalls, mediaActions,
     runTimers: () => { const due = timers.splice(0); due.forEach(callback => callback?.()); },
     tick: () => tick(),
     advance: ms => { clock += ms; }, sync: () => vm.runInContext('syncEnabled', context),
     desktopHls: () => vm.runInContext('hls', context), run: code => vm.runInContext(code, context)};
 }
+
+test('the premium creation action uses verified media and opens the confirmed host room and invite', async () => {
+  const h = await harness({catalog: {id: 'tt1234567', type: 'movie', name: 'Catalog movie'},
+    rpc: {session: {access_token: 'test-token', user: {id: 'u', is_anonymous: false, user_metadata: {display_name: 'Host'}}}}});
+  await settlePlayback();
+  h.session.room = null;
+  h.get('roomMediaType').value = 'movie'; h.get('roomMediaId').value = 'https://www.imdb.com/title/tt1234567/';
+  const requests = [];
+  h.session.create = async (media, name) => {
+    requests.push({media, name});
+    h.session.room = {info: {id: 'party', code: 'UXZ83H', host_member_id: 'host', host_only: true, media},
+      memberId: 'host', members: [{id: 'host', display_name: name}]};
+    h.session.handlers.room(h.session.room);
+  };
+  const link = h.get('roomMediaId').value;
+  h.get('roomMediaId').value = '';
+  h.get('createRoomManual').fire('click');
+  assert.equal(requests.length, 0);
+  assert.match(h.get('message').textContent, /gültigen Titel/);
+  h.get('roomMediaId').value = link;
+  h.get('createRoomManual').fire('click');
+  await settlePlayback();
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].media.meta_id, 'tt1234567');
+  assert.equal(requests[0].name, 'Host');
+  assert.equal(h.get('roomOverview').hidden, false);
+  assert.equal(h.get('playerWrap').hidden, true);
+  assert.equal(h.get('roomInvite').value, 'https://watch.example.test/party/UXZ83H');
+  assert.equal(h.historyCalls.at(-1), '/party/UXZ83H');
+  await h.session.close();
+});
+
+test('title search ignores stale replies and requires a verified episode before creating a party without a video URL', async () => {
+  const replies = new Map(), id = 'tt1234567';
+  const h = await harness({
+    catalog: {id, type: 'series', name: 'Confirmed series', videos: [{id: id + ':2:3', season: 2, episode: 3}]},
+    searchCatalog: query => new Promise((resolve, reject) => replies.set(query, {resolve, reject})),
+    rpc: {session: {access_token: 'test-token', user: {id: 'u', is_anonymous: false, user_metadata: {display_name: 'Host'}}}},
+  });
+  h.session.room = null;
+  const requests = [];
+  h.session.create = async media => { requests.push(media); };
+  const search = h.get('roomSearch'), results = h.get('roomSearchResults'), button = h.get('createRoomButton');
+  search.value = 'Network error'; search.fire('input'); h.runTimers();
+  replies.get('Network error').reject(new Error('network error'));
+  await settlePlayback();
+  assert.match(h.get('roomSearchStatus').textContent, /Verbindung/);
+  search.value = 'Old query'; search.fire('input'); h.runTimers();
+  search.value = 'Confirmed series'; search.fire('input'); h.runTimers();
+  replies.get('Confirmed series').resolve([{id, type: 'series', title: 'Confirmed series', year: '2020'}]);
+  await settlePlayback();
+  replies.get('Old query').resolve([]);
+  await settlePlayback();
+  assert.equal(results.children.length, 1);
+  assert.match(results.children[0].children[0].children[0].textContent, /Confirmed series · 2020 · Serie/);
+  results.children[0].children[0].fire('click');
+  await settlePlayback();
+  assert.equal(button.disabled, true);
+  assert.equal(h.get('roomEpisodePicker').hidden, false);
+  h.get('roomSearchSeason').value = '2'; h.get('roomSearchSeason').fire('change');
+  assert.equal(button.disabled, true);
+  h.get('roomSearchEpisode').value = '3'; h.get('roomSearchEpisode').fire('change');
+  assert.equal(button.disabled, false);
+  button.fire('click');
+  await settlePlayback();
+  assert.deepEqual(requests, [{type: 'series', meta_type: 'series', meta_id: id, title: 'Confirmed series',
+    season: 2, episode: 3, video_id: id + ':2:3'}]);
+});
+
+test('a verified film result enables party creation without manual IMDb or video input', async () => {
+  const id = 'tt1234567';
+  const h = await harness({
+    catalog: {id, type: 'movie', name: 'Verified film', description: 'Film summary'},
+    searchCatalog: async () => [{id, type: 'movie', title: 'Film result'}],
+    rpc: {session: {access_token: 'test-token', user: {id: 'u', is_anonymous: false, user_metadata: {display_name: 'Host'}}}},
+  });
+  h.session.room = null;
+  const requests = [];
+  h.session.create = async media => { requests.push(media); };
+  const button = h.get('createRoomButton'), search = h.get('roomSearch');
+  button.fire('click');
+  assert.equal(requests.length, 0);
+  search.value = 'Film result'; search.fire('input'); h.runTimers();
+  await settlePlayback();
+  h.get('roomSearchResults').children[0].children[0].fire('click');
+  assert.equal(button.disabled, true);
+  await settlePlayback();
+  assert.equal(button.disabled, false);
+  button.fire('click');
+  await settlePlayback();
+  assert.deepEqual(requests, [{type: 'movie', meta_type: 'movie', meta_id: id, title: 'Verified film', description: 'Film summary'}]);
+});
 
 test('manual source survives incompatible, compatible and revoked Desktop stream broadcasts', async () => {
   const h = await harness(); h.enter(); const instance = h.source().instance, loads = h.player.loadCount;
@@ -398,7 +498,7 @@ test('a new host seek can escape buffering without repeating seeks for every clo
   h.player.fire('canplay'); assert.equal(current, 55); assert.equal(writes, 3);
 });
 
-test('unreported internal HLS seeking and delayed native pause events do not disable sync; native gestures do', async () => {
+test('internal HLS events preserve sync; host-only prevents native seek defaults while solo permits them', async () => {
   const h = await readyGuest(); h.get('resync').fire('click'); h.player.fire('seeked');
   h.player.currentTime = 5.2; h.player.fire('seeking'); h.player.fire('seeked');
   assert.equal(h.sync(), true);
@@ -407,7 +507,21 @@ test('unreported internal HLS seeking and delayed native pause events do not dis
   h.player.pause = () => {h.player.paused = true;};
   h.session.receive('state', {...playback, seq: 3, paused: true});
   h.advance(2000); h.player.fire('pause'); assert.equal(h.sync(), true);
-  h.player.fire('keydown', {key: 'ArrowRight'}); h.player.currentTime = 55; h.player.fire('seeking');
+  const position = h.player.currentTime;
+  let prevented = false;
+  h.player.fire('keydown', {key: 'ArrowRight', preventDefault() { prevented = true; }});
+  // Model the browser default only if the actual event handler allowed it.
+  if (!prevented) { h.player.currentTime = 55; h.player.fire('seeking'); }
+  assert.equal(prevented, true);
+  assert.equal(h.player.currentTime, position);
+  assert.equal(h.sync(), true);
+  h.get('ctlSolo').fire('click');
+  prevented = false;
+  h.player.fire('keydown', {key: 'ArrowRight', preventDefault() { prevented = true; }});
+  if (!prevented) { h.player.currentTime = 55; h.player.fire('seeking'); }
+  assert.equal(prevented, false);
+  assert.equal(h.player.currentTime, 55);
+  assert.equal(h.run('soloMode'), true);
   assert.equal(h.sync(), false);
 });
 
@@ -744,7 +858,7 @@ async function signedOutInvite(options = {}) {
   return h;
 }
 
-test('no name field: signed-out visitors see e-mail and password; "Jetzt ansehen" signs in and joins in one flow', async () => {
+test('no name field: signed-out visitors see e-mail and password; "Party beitreten" signs in and joins in one flow', async () => {
   const h = await signedOutInvite({rpc: {sync_pull_profiles: () => [{profile_index: 2, name: 'Zweit'}, {profile_index: 1, name: '  Alan  '}]}});
   assert.equal(h.get('credentials').hidden, false); assert.equal(h.get('accountLine').hidden, true);
   const joins = []; h.session.join = async (...args) => { joins.push(args); };
@@ -777,7 +891,7 @@ test('wrong password: clear message, no join; missing fields ask for credentials
   h.get('joinForm').fire('submit'); await settlePlayback();
   assert.equal(h.logins.length, 1); assert.match(h.get('message').textContent, /Anmeldung fehlgeschlagen/);
   assert.ok(!h.get('message').textContent.includes('wrong')); assert.equal(h.get('password').value, '');
-  assert.equal(h.get('joinButton').disabled, false); assert.equal(h.get('joinButton').textContent, 'Jetzt ansehen');
+  assert.equal(h.get('joinButton').disabled, false); assert.equal(h.get('joinButton').textContent, 'Party beitreten');
 });
 
 test('double clicks cannot sign in or join twice', async () => {
@@ -897,8 +1011,14 @@ test('own controls: ±10 s, fullscreen, drawer, participants strip and connectio
   assert.equal(h.get('memberCount').textContent, '2/8 Teilnehmer');
   assert.deepEqual(h.get('memberAvatars').children.map(a => [a.textContent, a.className]), [['A', 'avatar host'], ['S', 'avatar']]);
   assert.equal(h.get('drawerCode').textContent, 'UXZ83H');
+  h.get('ctlFwd10').fire('click');
+  assert.equal(h.player.currentTime, 5);
+  assert.equal(h.sync(), true);
+  h.get('ctlSolo').fire('click');
   h.get('ctlFwd10').fire('click'); assert.equal(h.player.currentTime, 15);
   h.get('ctlBack10').fire('click'); h.get('ctlBack10').fire('click'); assert.equal(h.player.currentTime, 0);
+  h.get('ctlSolo').fire('click'); await settlePlayback(); h.player.fire('seeked');
+  assert.equal(h.sync(), true);
   let fullscreen = 0; h.get('playerWrap').requestFullscreen = () => { fullscreen++; return Promise.resolve(); };
   h.get('ctlFullscreen').fire('click'); assert.equal(fullscreen, 1);
   h.get('membersButton').fire('click'); assert.equal(h.get('infoDrawer').hidden, false); assert.equal(h.get('drawerScrim').hidden, false);
@@ -936,14 +1056,24 @@ test('iOS without element fullscreen falls back to the native video fullscreen',
   h.get('ctlFullscreen').fire('click'); assert.equal(native, 1);
 });
 
-test('host-only party paused: Play still plays locally, honestly marked "Nicht synchron"; Party-Zeit aktualisieren returns', async () => {
+test('host-only paused party blocks Play until explicit solo; returning restores the paused host time', async () => {
   const h = await readyGuest(); h.get('resync').fire('click'); h.player.fire('seeked'); // Party is paused.
+  const control = controllable(h); h.session.room.info.host_only = true;
+  const position = h.player.currentTime;
   h.player.play = function () { this.paused = false; this.fire('play'); return Promise.resolve(); };
   h.get('ctlPlay').fire('click'); await settlePlayback();
+  assert.equal(h.player.paused, true); assert.equal(h.sync(), true);
+  assert.equal(h.player.currentTime, position);
+  assert.equal(control.sends.length, 0); assert.equal(control.rpcs.length, 0);
+  assert.match(h.get('message').textContent, /Host steuert die Wiedergabe.*Allein schauen/);
+  h.get('ctlSolo').fire('click');
+  h.get('ctlPlay').fire('click'); await settlePlayback();
   assert.equal(h.player.paused, false); assert.equal(h.sync(), false);
-  assert.match(h.get('message').textContent, /lokal weiter/); assert.equal(h.get('syncChip').textContent, 'Nicht synchron');
-  h.tick(); assert.equal(h.player.paused, false); // Not silently re-paused.
-  h.get('resync').fire('click'); assert.equal(h.sync(), true); assert.equal(h.player.paused, true);
+  h.tick(); assert.equal(h.player.paused, false);
+  assert.equal(control.sends.length, 0); assert.equal(control.rpcs.length, 0);
+  h.get('ctlSolo').fire('click');
+  assert.equal(h.sync(), true); assert.equal(h.player.paused, true);
+  assert.equal(h.player.currentTime, position);
 });
 
 test('a blocked play() is reported instead of a button that seemingly does nothing', async () => {
@@ -954,9 +1084,41 @@ test('a blocked play() is reported instead of a button that seemingly does nothi
     return Promise.reject({name: 'NotAllowedError', message: privateUrl});
   };
   h.get('ctlPlay').fire('click'); await settlePlayback();
+  assert.equal(playCalls, 0);
+  assert.equal(h.player.paused, true); assert.equal(h.sync(), true);
+  assert.match(h.get('message').textContent, /Host steuert die Wiedergabe.*Allein schauen/);
+  h.get('ctlSolo').fire('click');
+  h.get('ctlPlay').fire('click'); await settlePlayback();
   assert.equal(playCalls, 1);
   assert.match(h.get('message').textContent, /blockiert/);
   assert.ok(!h.get('message').textContent.includes('INTEGRATION_PRIVATE_SENTINEL'));
+});
+
+test('host-only consumes seekbar and media actions before mutation; solo allows media controls', async () => {
+  const h = await playingGuest(), control = controllable(h);
+  h.session.room.info.host_only = true;
+  const position = h.player.currentTime;
+  let prevented = false;
+  h.get('ctlSeek').fire('pointerdown', {preventDefault() { prevented = true; }});
+  assert.equal(prevented, true);
+  h.get('ctlSeek').value = '700';
+  h.get('ctlSeek').fire('input');
+  h.get('ctlSeek').fire('change');
+  h.mediaActions.get('pause')();
+  h.mediaActions.get('seekto')({seekTime: 70});
+  h.mediaActions.get('seekforward')({seekOffset: 10});
+  h.mediaActions.get('seekbackward')({seekOffset: 10});
+  assert.equal(h.player.paused, false);
+  assert.equal(h.player.currentTime, position);
+  assert.equal(h.sync(), true);
+  assert.equal(control.sends.length, 0); assert.equal(control.rpcs.length, 0);
+  h.get('ctlSolo').fire('click');
+  h.mediaActions.get('pause')();
+  h.mediaActions.get('seekto')({seekTime: 70});
+  assert.equal(h.player.paused, true);
+  assert.equal(h.player.currentTime, 70);
+  assert.equal(h.run('soloMode'), true);
+  assert.equal(control.sends.length, 0); assert.equal(control.rpcs.length, 0);
 });
 
 test('Play without a shared stream points to the Browser-HLS switch', async () => {
@@ -1073,12 +1235,49 @@ test('desktop parity: a failed persist keeps the distributed state; a failed bro
 test('desktop parity respects host_only: snapshot true blocks, and a persist reply with host_only=true revokes control', async () => {
   const h = await playingGuest(), c = controllable(h); h.session.room.info.host_only = true;
   h.get('ctlPlay').fire('click'); await settlePlayback();
-  assert.equal(c.sends.length, 0); assert.equal(c.rpcs.length, 0); assert.equal(h.sync(), false);
+  assert.equal(c.sends.length, 0); assert.equal(c.rpcs.length, 0); assert.equal(h.sync(), true);
+  assert.equal(h.player.paused, false);
   const r = await playingGuest(), rc = controllable(r, {hostOnlyAfter: true});
   r.get('ctlPlay').fire('click'); await settlePlayback();
   assert.equal(rc.sends.length, 1); // Like Desktop: already distributed before the reply.
   assert.equal(r.session.room.info.host_only, true); assert.equal(r.session.canControl(), false);
   assert.match(r.get('controlInfo').textContent, /nur der Host/);
+});
+
+test('host-only blocks manual pause seek and keyboard input before changing a synced player', async () => {
+  const h = await playingGuest(), controls = controllable(h);
+  h.session.room.info.host_only = true;
+  const before = h.player.currentTime;
+  h.get('ctlPlay').fire('click');
+  h.run('seekTo(70)');
+  h.get('ctlFwd10').fire('click');
+  h.get('ctlBack10').fire('click');
+  h.get('playerWrap').fire('keydown', {key: ' ', target: {tagName: 'DIV'}});
+  h.player.fire('keydown', {key: 'ArrowRight'});
+  await settlePlayback();
+  assert.equal(h.player.paused, false);
+  assert.equal(h.player.currentTime, before);
+  assert.equal(h.sync(), true);
+  assert.equal(h.run('soloMode'), false);
+  assert.equal(controls.sends.length, 0);
+  assert.equal(controls.rpcs.length, 0);
+  assert.match(h.get('message').textContent, /Der Host steuert die Wiedergabe/);
+});
+
+test('explicit solo permits local control under host-only and returning resumes host synchronization', async () => {
+  const h = await playingGuest(), controls = controllable(h);
+  h.session.room.info.host_only = true;
+  h.run('enterSolo()');
+  h.get('ctlPlay').fire('click');
+  h.run('seekTo(70)');
+  assert.equal(h.player.paused, true);
+  assert.equal(h.player.currentTime, 70);
+  assert.equal(controls.sends.length, 0);
+  assert.equal(controls.rpcs.length, 0);
+  h.get('ctlSolo').fire('click');
+  await settlePlayback();
+  assert.equal(h.run('soloMode'), false);
+  assert.equal(h.sync(), true);
 });
 
 // --- Final cleanup: refresh icon, no footer, one-screen invite ---
@@ -1903,4 +2102,87 @@ test('a TorBox link with token shared directly by the host loads automatically a
   opened.length = 0; instance.config.xhrSetup(xhr, 'https://cdn.example.test/x.ts');
   assert.equal(opened.length, 0);
   assert.ok(!JSON.stringify(h.storageWrites).includes('FAKE_ACCOUNT_TOKEN_FOR_TESTS')); // Memory only.
+});
+
+// --- Browser host: room, shared link, proposals ------------------------------
+const hostRoom = () => ({info: {id: 'party', code: 'UXZ83H', host_member_id: 'host', host_only: true, max_members: 4,
+  media: {type: 'movie', meta_type: 'movie', meta_id: 'tt1', title: 'Film', poster: 'https://img.example.test/p.jpg'}},
+  memberId: 'host', members: [{id: 'host', display_name: 'Host'}, {id: 'guest', display_name: 'Gast'}]});
+async function hostHarness() {
+  const h = await harness(), channel = [];
+  h.session.room = hostRoom();
+  h.session.channel = {send: async message => { channel.push(message); return 'ok'; }};
+  h.session.handlers.room(h.session.room);
+  return {h, channel};
+}
+
+test('the browser host shares a direct link: the room closes, its player loads it, members get the offer and the party time', async () => {
+  const {h, channel} = await hostHarness();
+  assert.equal(h.get('roomOverview').hidden, false); assert.equal(h.get('playerWrap').hidden, true);
+  assert.equal(h.get('tabHost').hidden, false);
+  assert.equal(h.get('roomMemberCount').textContent, '2 / 4 Teilnehmer');
+  assert.equal(h.get('roomTitle').textContent, 'Film');
+  h.get('roomShareUrl').value = 'http://cdn.example.test/film.mp4';
+  h.get('roomShareForm').fire('submit'); await settlePlayback();
+  assert.match(h.get('roomShareStatus').textContent, /HTTPS/);
+  assert.equal(channel.filter(m => m.event === 'stream').length, 0);
+  h.get('roomShareUrl').value = 'https://cdn.example.test/film.mp4';
+  h.get('roomShareForm').fire('submit'); await settlePlayback(); await settlePlayback();
+  const offer = channel.filter(m => m.event === 'stream').at(-1).payload;
+  assert.deepEqual(offer, {member_id: 'host', stream: {media_key: 'movie|tt1||', url: 'https://cdn.example.test/film.mp4', name: 'Video-Link des Hosts',
+    stream_type: 'mp4', headers: {}, response_headers: {}}});
+  const start = channel.filter(m => m.event === 'state').at(-1).payload;
+  assert.equal(start.member_id, 'host'); assert.equal(start.paused, true); assert.equal(start.position_ms, 0);
+  assert.equal(h.get('roomOverview').hidden, true); assert.equal(h.get('playerWrap').hidden, false);
+  assert.equal(h.player.src, 'https://cdn.example.test/film.mp4');
+  h.metadata(); await settlePlayback();
+  assert.equal(h.sync(), true);
+  // The host's own play becomes the party state for everyone.
+  h.get('ctlPlay').fire('click'); h.player.fire('play'); await settlePlayback();
+  const playing = channel.filter(m => m.event === 'state').at(-1).payload;
+  assert.equal(playing.paused, false); assert.equal(playing.member_id, 'host'); assert.ok(playing.seq > start.seq);
+  // Back to the room and stop sharing.
+  h.get('roomShowOverview').fire('click');
+  assert.equal(h.get('roomOverview').hidden, false); assert.equal(h.get('roomBackToPlayer').hidden, false);
+  h.get('roomStopShare').fire('click'); await settlePlayback();
+  assert.deepEqual(channel.filter(m => m.event === 'stream').at(-1).payload, {member_id: 'host', stream: null});
+  assert.equal(h.get('roomBackToPlayer').hidden, true);
+});
+
+test('the host sees members\' proposals, checks them and only an accepted link is shared', async () => {
+  const {h, channel} = await hostHarness();
+  h.session.receive('stream_suggest', {member_id: 'stranger', media_key: 'movie|tt1||', url: 'https://cdn.example.test/a.mp4'});
+  assert.equal(h.get('roomProposals').hidden, true); // Not a member in the server snapshot.
+  h.session.receive('stream_suggest', {member_id: 'guest', media_key: 'movie|tt1||', url: 'https://cdn.example.test/b.webm?token=PROPOSAL_SENTINEL'});
+  assert.equal(h.get('roomProposals').hidden, false);
+  let [item] = h.get('roomProposalList').children;
+  assert.equal(item.children[0].textContent, 'Gast · WEBM · cdn.example.test');
+  assert.ok(!item.children[0].textContent.includes('PROPOSAL_SENTINEL'));
+  assert.equal(channel.filter(m => m.event === 'stream').length, 0); // Nothing shared by itself.
+  item.children[3].fire('click'); // Ablehnen
+  assert.deepEqual(channel.at(-1).payload, {member_id: 'host', target_member_id: 'guest', status: 'declined'});
+  assert.equal(h.get('roomProposals').hidden, true);
+  h.session.receive('stream_suggest', {member_id: 'guest', media_key: 'movie|tt1||', url: 'https://cdn.example.test/c.mp4'});
+  [item] = h.get('roomProposalList').children;
+  item.children[2].fire('click'); await settlePlayback(); await settlePlayback(); // Annehmen
+  assert.equal(channel.filter(m => m.event === 'stream').at(-1).payload.stream.url, 'https://cdn.example.test/c.mp4');
+  assert.deepEqual(channel.filter(m => m.event === 'stream_suggest_result').at(-1).payload, {member_id: 'host', target_member_id: 'guest', status: 'accepted'});
+});
+
+test('members propose only valid direct links and see the host\'s decision; the Host tab stays hidden for them', async () => {
+  const h = await harness(), channel = [];
+  h.session.room.memberId = 'guest';
+  h.session.room.members = [{id: 'host', display_name: 'Host'}, {id: 'guest', display_name: 'Gast'}];
+  h.session.channel = {send: async message => { channel.push(message); return 'ok'; }};
+  h.session.handlers.room(h.session.room);
+  assert.equal(h.get('tabHost').hidden, true); assert.equal(h.get('roomOverview').hidden, true);
+  h.get('proposalUrl').value = 'https://localhost/a.mp4';
+  h.get('proposalForm').fire('submit'); await settlePlayback();
+  assert.equal(channel.filter(m => m.event === 'stream_suggest').length, 0);
+  h.get('proposalUrl').value = 'https://cdn.example.test/a.m3u8';
+  h.get('proposalForm').fire('submit'); await settlePlayback();
+  assert.deepEqual(channel.filter(m => m.event === 'stream_suggest').at(-1).payload, {member_id: 'guest', media_key: 'movie|tt1||', url: 'https://cdn.example.test/a.m3u8'});
+  assert.match(h.get('suggestStatus').textContent, /Host entscheidet/);
+  h.session.receive('stream_suggest_result', {member_id: 'host', target_member_id: 'guest', status: 'declined'});
+  assert.match(h.get('suggestStatus').textContent, /abgelehnt/);
 });

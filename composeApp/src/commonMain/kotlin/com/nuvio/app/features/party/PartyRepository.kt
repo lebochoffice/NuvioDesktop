@@ -82,6 +82,25 @@ object PartyRepository {
     fun dismissHlsSuggestion(suggestion: PartyHlsSuggestion): Boolean =
         _hlsSuggestion.compareAndSet(suggestion, null)
 
+    /**
+     * Member: propose a direct video link to the host (same `stream_suggest`
+     * event as browser members). Nothing is shared by this; the host checks
+     * and decides. The caller has already checked the address.
+     */
+    fun suggestLink(url: String) {
+        scope.launch {
+            val party = _state.value.party ?: return@launch
+            if (party.isHost) return@launch
+            runCatching {
+                channel?.send("stream_suggest", buildJsonObject {
+                    put("member_id", party.memberId)
+                    put("media_key", party.media.key)
+                    put("url", url)
+                })
+            }
+        }
+    }
+
     // Shared start (host announcement in server time); display only for members.
     private val _countdown = MutableStateFlow<PartyCountdown?>(null)
     val countdown: StateFlow<PartyCountdown?> = _countdown.asStateFlow()

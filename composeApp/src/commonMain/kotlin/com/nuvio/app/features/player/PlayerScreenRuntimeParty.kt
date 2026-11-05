@@ -99,11 +99,14 @@ internal val PlayerScreenRuntime.isPartySynced: Boolean
     get() = PartyRepository.state.value.party?.media?.key == partyKey
 
 internal val PlayerScreenRuntime.isPartyControlLocked: Boolean
-    get() = PartyRepository.state.value.party?.let { party -> !party.canControl && party.media.key == partyKey } == true
+    get() = PartyRepository.state.value.party?.blocksManualPlayback(partyKey, partySolo) == true
 
 internal fun PlayerScreenRuntime.partyBlocksControl(): Boolean {
     if (!isPartyControlLocked) return false
-    scope.launch { showPartyMessage(getString(Res.string.party_host_only_note)) }
+    if (partyLockedNoticeAt?.elapsedNow()?.inWholeMilliseconds?.let { it < 3000 } != true) {
+        partyLockedNoticeAt = kotlin.time.TimeSource.Monotonic.markNow()
+        showPartyMessage("Der Host steuert die Wiedergabe. Wenn du selbst pausieren oder spulen möchtest, öffne das Party-Menü und wähle „Allein schauen“.")
+    }
     return true
 }
 
@@ -135,12 +138,14 @@ internal fun PlayerScreenRuntime.watchWithParty() {
 }
 
 internal fun PlayerScreenRuntime.catchUpWithParty() {
+    partySolo = false
     partyBehind = false
     showPartyPanel = false
 }
 
 /** "Mich synchronisieren": leave local mode and re-apply the current party state (own player only). */
 internal fun PlayerScreenRuntime.syncMeWithParty() {
+    partySolo = false
     partyBehind = false
     partyResyncRequest += 1
     showPartyPanel = false
@@ -171,6 +176,7 @@ internal fun PlayerScreenRuntime.endParty() {
 }
 
 internal fun PlayerScreenRuntime.toggleOwnPlayback(revealControls: Boolean = true) {
+    if (partyBlocksControl()) return
     if (revealControls) controlsVisible = true
     when {
         shouldPlay -> {
@@ -187,6 +193,7 @@ internal fun PlayerScreenRuntime.toggleOwnPlayback(revealControls: Boolean = tru
 }
 
 internal fun PlayerScreenRuntime.ownSeekTarget(targetMs: Long): Long? {
+    if (partyBlocksControl()) return null
     val playback = PartyRepository.playback.value ?: return targetMs
     val partyPositionMs = PartySync.expectedPositionMs(playback, PartyRepository.nowMs(), playbackSnapshot.durationMs)
     return when (val seek = PartySync.ownSeek(targetMs, partyPositionMs, partyBehind)) {
@@ -318,7 +325,7 @@ internal fun PlayerScreenRuntime.publishPartyPlayback(
     positionMs: Long = currentPlaybackPositionMs(),
     rate: Float = partyBaseRate(),
 ) {
-    if (!isPartySynced) return
+    if (!isPartySynced || partySolo) return
     PartyRepository.publishPlayback(paused = !shouldPlay, positionMs = positionMs, rate = rate)
 }
 
@@ -584,7 +591,8 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
         if (torboxChoicesFor != key) { torboxChoices = null; torboxChoicesFor = null; torboxChoicesStatus = "" }
     }
 
-    LaunchedEffect(key) {
+    LaunchedEffect(partyId, key) {
+        partySolo = false
         partyBehind = false
         val previous = partyPreviousKey
         partyPreviousKey = key
@@ -703,6 +711,10 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
             }
             publishedInitial = true
             if (!initialLoadCompleted) continue
+            if (partySolo) {
+                clearPartyNudge(playback)
+                continue
+            }
             if (partyBehind && party.canControl) partyBehind = false
             if (partyBehind) {
                 clearPartyNudge(playback)
@@ -804,8 +816,7 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
                         }
                         snapshot.isPlaying -> applyPartyPaused(playback.paused, force = true)
                         else -> {
-                            partyBehind = true
-                            shouldPlay = false
+                            applyPartyPaused(playback.paused, force = true)
                         }
                     }
                 }

@@ -4,6 +4,8 @@ import './style.css';
 import {normalizeCode, validCode, partyCodeFromPath, mediaKey, expectedPositionMs, isNewerPlayback, streamProblem, streamIsHls, browserPartyStream, publicConfigProblem, memberSync, memberSyncLabel, shareWorkerOrigin, withFamilyToken} from './protocol.js';
 import {PartySession, callRpc} from './session.js';
 import {PersonalHlsSource, personalHlsUrlProblem} from './personal-hls.js';
+import {loadRoomTitle, resolveRoomMedia, roomMediaForEpisode, searchRoomMedia} from './room-media.js';
+import {classifyShareLink, hostShareStream, proposalFrom} from './host-share.js';
 import {SYNC, HLS_TUNING, bufferedRanges, bufferAhead, correctionFor, seekTarget, SeekLead, StallTracker, qualityOptions} from './sync-policy.js';
 
 const $ = id => document.getElementById(id);
@@ -76,10 +78,13 @@ const session = client ? new PartySession(client, deviceId, {
     if (personalHls.active && personalHls.mediaKey !== mediaKey(room.info.media)) resetVideo('Filmkennung geändert. Bitte eine eigene Quelle für den neuen Film laden.');
     $('movieTitle').textContent = playerTitle(room.info.media);
     renderMembers(room);
+    renderPartyRoom();
     renderControlInfo();
     showPanel('watch');
   },
   connection: state => {
+    $('roomConnection').textContent = state === 'SUBSCRIBED' ? 'Verbunden'
+      : state === 'CONNECTING' ? 'Verbinde …' : 'Verbindung unterbrochen';
     // CONNECTING is transient (initial join or automatic reconnect), not a loss.
     if (state === 'CONNECTING') {
       realtimeReconnecting = connectionLost;
@@ -107,8 +112,24 @@ const session = client ? new PartySession(client, deviceId, {
     applySync(); renderSyncDebug();
   },
   command: entry => commandSettled(entry),
-  members: () => { if (session?.room) renderMembers(session.room); },
+  // Browser host only (session checks the host role first).
+  proposal: payload => {
+    const room = session.room, proposal = proposalFrom(payload, room, mediaKey(room?.info.media));
+    if (!proposal) return;
+    const existing = proposals.findIndex(item => item.memberId === proposal.memberId);
+    if (existing >= 0) proposals.splice(existing, 1); // One open proposal per member.
+    proposals.unshift({...proposal, id: ++proposalSeq});
+    proposals.length = Math.min(proposals.length, 10);
+    renderPartyRoom();
+    status(`Neuer Videovorschlag von ${proposal.name}. Prüfen und annehmen im Party-Room.`);
+  },
+  proposalResult: result => {
+    $('suggestStatus').textContent = result === 'accepted' ? 'Der Host hat deinen Vorschlag angenommen.' : 'Der Host hat deinen Vorschlag abgelehnt.';
+    status($('suggestStatus').textContent, result !== 'accepted');
+  },
+  members: () => { if (session?.room) { renderMembers(session.room); renderPartyRoom(); } },
   stream: (stream, reason) => {
+    if (session?.isHost?.()) return;
     // A host change is no revocation by the sharing host: an already loaded
     // source continues locally ("Allein"); an explicit revocation (null without
     // reason) still stops it at once.
@@ -252,7 +273,7 @@ function showPanel(name) {
   // the cinema view hides the brand bar.
   $('inviteView').hidden = name === 'watch';
   $('brandbar').hidden = name === 'watch';
-  $('joinButton').textContent = session?.room ? 'Zurück zur Party' : 'Jetzt ansehen';
+  $('joinButton').textContent = session?.room ? 'Zurück zur Party' : 'Party beitreten';
   if (name !== 'watch') closeDrawer();
 }
 function setClass(element, name, on) {
@@ -284,6 +305,173 @@ function renderAvatar(element, member) {
   const color = /^#[0-9a-f]{3,8}$/i.test(member?.avatar_color || '') ? member.avatar_color : '';
   element.style.background = color;
 }
+// --- Browser host: party room, shared video link and proposals ---------------
+// The host shares a direct HLS/MP4/WebM link as an ordinary host `stream`
+// offer for the party title (host-share.js). Its own player then runs the
+// existing sync path: its gestures become party states (broadcast, then the
+// authorized watch_party_update), and with host_only=false it follows the
+// members' states like any member. Memory only: after a reload of the host
+// page the link has to be shared again.
+let hostShared = null, roomOverviewOpen = false;
+const proposals = [];
+let proposalSeq = 0;
+function renderPartyRoom() {
+  const room = session?.room, host = session?.isHost?.() === true;
+  $('tabHost').hidden = !host;
+  if (!host) {
+    if (!$('panelHost').hidden && !$('infoDrawer').hidden) selectDrawerTab('General'); // Host role lost while open.
+    $('roomOverview').hidden = true;
+    if (room) $('playerWrap').hidden = false;
+    hostShared = null; roomOverviewOpen = false; proposals.length = 0;
+    return;
+  }
+  // Room start view until a video is shared (or when the host opens it again).
+  const showRoom = !hostShared || roomOverviewOpen;
+  $('roomOverview').hidden = !showRoom;
+  $('playerWrap').hidden = showRoom;
+  const media = room.info.media || {};
+  $('roomTitle').textContent = media.title || 'Party-Room';
+  $('roomSubtitle').textContent = media.meta_type === 'series' && Number.isInteger(media.season) && Number.isInteger(media.episode)
+    ? `Serie · Staffel ${media.season} · Episode ${media.episode}` : media.meta_type === 'movie' ? 'Film' : '';
+  showImage($('roomPoster'), media.poster);
+  $('roomCode').textContent = 'Party-Code ' + room.info.code;
+  const max = Number(room.info.max_members);
+  $('roomMemberCount').textContent = `${room.members.length}${max > 0 ? ' / ' + max : ''} Teilnehmer`;
+  $('roomBackToPlayer').hidden = !hostShared;
+  $('roomShareButton').textContent = hostShared ? 'Neues Video für alle freigeben' : 'Video für alle freigeben';
+  $('roomStopShare').hidden = !hostShared;
+  $('roomShowOverview').textContent = proposals.length ? `Party-Room öffnen (${proposals.length} Vorschlag${proposals.length === 1 ? '' : 'e'})` : 'Party-Room öffnen';
+  renderProposals();
+  const code = normalizeCode(room.info.code);
+  $('roomInvite').value = validCode(code) ? new URL('/party/' + code, location.origin).href : '';
+  $('roomHostOnly').checked = room.info.host_only === true;
+  $('roomMembers').replaceChildren(...room.members.map(member => {
+    const item = document.createElement('li');
+    item.textContent = (member.display_name || 'Mitglied') + (member.id === room.memberId ? ' · Host · Du' : '');
+    if (member.id !== room.memberId) {
+      const button = document.createElement('button');
+      button.type = 'button'; button.className = 'btn ghost'; button.textContent = 'Entfernen';
+      button.addEventListener('click', async () => {
+        button.disabled = true;
+        try { await session.removeMember(member.id); }
+        catch (e) { status(friendlyError(e), true); }
+        finally { if (session.room === room) renderPartyRoom(); }
+      });
+      item.append(button);
+    }
+    return item;
+  }));
+}
+$('roomCopyInvite').addEventListener('click', async () => {
+  if (!session?.isHost() || !$('roomInvite').value) return;
+  try { await navigator.clipboard.writeText($('roomInvite').value); status('Einladungslink kopiert.'); }
+  catch { $('roomInvite').focus(); $('roomInvite').select?.(); status('Bitte den markierten Einladungslink kopieren.'); }
+});
+$('roomHostOnly').addEventListener('change', async () => {
+  const input = $('roomHostOnly'), value = input.checked;
+  input.disabled = true;
+  try { await session.setHostOnly(value); }
+  catch (e) { status(friendlyError(e), true); }
+  finally { input.disabled = false; renderPartyRoom(); }
+});
+$('roomOpenDrawer').addEventListener('click', () => {
+  openDrawer('settings', $('roomOpenDrawer'));
+  selectDrawerTab('Chat');
+});
+function renderProposals() {
+  $('roomProposals').hidden = !proposals.length;
+  $('roomProposalList').replaceChildren(...proposals.map(proposal => {
+    const item = document.createElement('li'), label = document.createElement('span');
+    label.textContent = `${proposal.name} · ${proposal.kind.toUpperCase()} · ${proposal.host}`;
+    const full = document.createElement('code');
+    full.className = 'room-proposal-url'; full.hidden = true; full.textContent = proposal.url;
+    const button = (text, kind, action) => {
+      const element = document.createElement('button');
+      element.type = 'button'; element.className = `btn small ${kind}`; element.textContent = text;
+      element.addEventListener('click', action);
+      return element;
+    };
+    item.append(label,
+      button('Link prüfen', 'ghost', () => { full.hidden = !full.hidden; }),
+      button('Annehmen', 'primary', async () => {
+        if (!await shareHostVideo(proposal.url)) return;
+        session.answerProposal(proposal.memberId, true);
+        dropProposal(proposal.id);
+      }),
+      button('Ablehnen', 'ghost', () => { session.answerProposal(proposal.memberId, false); dropProposal(proposal.id); }),
+      full);
+    return item;
+  }));
+}
+function dropProposal(id) {
+  const index = proposals.findIndex(proposal => proposal.id === id);
+  if (index >= 0) proposals.splice(index, 1);
+  renderPartyRoom();
+}
+// Host: share a link for everyone. A new link starts paused at the beginning;
+// sharing the same link again keeps the current party time.
+async function shareHostVideo(input) {
+  const room = session?.room;
+  if (!session?.isHost()) { status('Nur der vom Backend bestätigte Host kann Videos freigeben.', true); return false; }
+  const result = hostShareStream(input, mediaKey(room.info.media));
+  if (result.problem) { $('roomShareStatus').textContent = result.problem; status(result.problem, true); return false; }
+  const same = hostShared?.url === result.stream.url && session.playback;
+  const positionMs = same ? expectedPositionMs(session.playback, session.now()) : 0;
+  $('roomShareButton').disabled = true;
+  $('roomShareStatus').textContent = 'Video wird freigegeben …';
+  try {
+    await session.shareHostStream(result.stream);
+    await session.hostPublish({paused: true, positionMs});
+  } catch (e) {
+    if (session.room === room) $('roomShareStatus').textContent = 'Freigabe fehlgeschlagen: ' + friendlyError(e);
+    return false;
+  } finally { $('roomShareButton').disabled = false; }
+  if (session.room !== room || !session.isHost()) return false;
+  resetVideo('Neues Video freigegeben.');
+  hostShared = result.stream; roomOverviewOpen = false;
+  $('roomShareUrl').value = ''; $('roomShareStatus').textContent = '';
+  selectedStream = result.stream;
+  $('streamInfo').textContent = 'Du teilst einen Video-Link mit allen Mitgliedern.';
+  renderPartyRoom();
+  startStream();
+  status('Video für alle freigegeben. Starte mit ▶ – alle folgen deiner Wiedergabe.');
+  return true;
+}
+$('roomShareForm').addEventListener('submit', e => { e.preventDefault(); shareHostVideo($('roomShareUrl').value); });
+$('roomBackToPlayer').addEventListener('click', () => { roomOverviewOpen = false; renderPartyRoom(); });
+$('roomOpenHost').addEventListener('click', () => { openDrawer('settings', $('roomOpenHost')); selectDrawerTab('Host'); });
+$('roomShowOverview').addEventListener('click', () => { roomOverviewOpen = true; closeDrawer(); renderPartyRoom(); });
+$('roomStopShare').addEventListener('click', async () => {
+  if (!session?.isHost() || !hostShared) return;
+  try { await session.stopHostStream(); }
+  catch (e) { status(friendlyError(e), true); return; }
+  hostShared = null; roomOverviewOpen = false;
+  resetVideo('Videofreigabe beendet.');
+  closeDrawer(); renderPartyRoom();
+  status('Videofreigabe beendet. Die Mitglieder sehen kein Video mehr.');
+});
+// Members (browser and Desktop) propose a link; only the host decides.
+$('proposalForm').addEventListener('submit', async e => {
+  e.preventDefault();
+  const room = session?.room;
+  if (!room) { status('Zuerst einer Party beitreten.', true); return; }
+  if (session.isHost()) { $('suggestStatus').textContent = 'Als Host gibst du Videos direkt im Party-Room frei.'; return; }
+  const link = classifyShareLink($('proposalUrl').value);
+  if (link.problem) { $('suggestStatus').textContent = link.problem; return; }
+  $('proposalUrl').value = '';
+  $('suggestStatus').textContent = 'Vorschlag wird gesendet …';
+  try {
+    await session.suggestStream(link.url, mediaKey(room.info.media));
+    if (session.room === room) $('suggestStatus').textContent = 'Vorschlag gesendet. Der Host entscheidet über die Freigabe.';
+  } catch { if (session.room === room) $('suggestStatus').textContent = 'Vorschlag nicht gesendet. Verbindung prüfen.'; }
+});
+$('roomEnd').addEventListener('click', async () => {
+  if (!session?.isHost() || !window.confirm('Party für alle Mitglieder beenden?')) return;
+  $('roomEnd').disabled = true;
+  try { await session.endParty(); }
+  catch (e) { status(friendlyError(e), true); }
+  finally { $('roomEnd').disabled = false; }
+});
 function renderMembers(room) {
   const list = $('memberList');
   list.replaceChildren(...room.members.map(member => {
@@ -720,7 +908,8 @@ $('subtitleFile').addEventListener('change', () => {
   $('subtitleFile').value = '';
   addSubtitleFile(file);
 });
-const guestControl = () => guestControlEnabled && session?.canControl() === true;
+// The server-confirmed browser host always steers (its own player is the party clock).
+const guestControl = () => (guestControlEnabled || session?.isHost?.() === true) && session?.canControl() === true;
 // Fixed labels for local diagnosis of why shared control is unavailable.
 function controlBlockedReason() {
   const room = session?.room;
@@ -797,7 +986,18 @@ function playLocally() {
     status(error?.name === 'NotAllowedError' ? 'Der Browser hat den Start blockiert. Bitte noch einmal auf Play tippen.' : 'Die Wiedergabe konnte nicht starten. Bitte erneut versuchen.', true);
   });
 }
+let hostOnlyNoticeAt = -Infinity;
+function blocksHostOnlyControl() {
+  const room = session?.room;
+  if (!syncEnabled || soloMode || !room || room.memberId === room.info.host_member_id || room.info.host_only !== true) return false;
+  if (performance.now() - hostOnlyNoticeAt >= 3000) {
+    hostOnlyNoticeAt = performance.now();
+    status('Der Host steuert die Wiedergabe. Wenn du selbst pausieren oder spulen möchtest, klicke unten rechts auf „Allein schauen“.');
+  }
+  return true;
+}
 function togglePlay() {
+  if (blocksHostOnlyControl()) return;
   if (!loadedStream) {
     if (selectedStream && !$('loadStream').hidden) startStream();
     else status('Noch kein Browser-Stream freigegeben. Der Host kann „Browser-HLS freigeben“ einschalten.');
@@ -814,6 +1014,7 @@ function togglePlay() {
 // command goes out at once (no waiting for a possibly slow HLS "seeked"), and
 // the resulting native seeking event is recognised as ours, not re-sent.
 function seekTo(seconds) {
+  if (blocksHostOnlyControl()) return;
   // Only a synced, non-solo player steers the party; otherwise seek locally.
   if (guestControl() && syncEnabled && !soloMode) {
     pendingSeek = ownSeek = {seconds, at: performance.now()};
@@ -860,9 +1061,12 @@ function toggleFullscreen() {
   if (wrap.requestFullscreen) Promise.resolve(wrap.requestFullscreen()).catch(() => {});
   else player.webkitEnterFullscreen?.(); // iOS Safari: native fullscreen player.
 }
-const drawerTabs = ['General', 'Stream', 'Party', 'Chat', 'Advanced'];
+const drawerTabs = ['General', 'Stream', 'Party', 'Chat', 'Advanced', 'Host'];
+// "Host" exists only for the server-confirmed host (session.isHost).
+const visibleDrawerTabs = () => drawerTabs.filter(name => name !== 'Host' || session?.isHost?.() === true);
 let drawerOpener = null;
 function selectDrawerTab(selected, focus = false) {
+  if (!visibleDrawerTabs().includes(selected)) selected = 'General';
   for (const name of drawerTabs) {
     const tab = $(`tab${name}`);
     tab.setAttribute?.('aria-selected', String(name === selected));
@@ -915,15 +1119,16 @@ $('ctlBack').addEventListener('click', backToInvite);
 $('ctlSettings').addEventListener('click', () => openDrawer('settings', $('ctlSettings')));
 $('membersButton').addEventListener('click', () => openDrawer('participants', $('membersButton')));
 $('participantSettings').addEventListener('click', () => openDrawer('settings'));
-for (const [index, name] of drawerTabs.entries()) {
+for (const name of drawerTabs) {
   const tab = $(`tab${name}`);
   tab.addEventListener('click', () => selectDrawerTab(name));
   tab.addEventListener('keydown', event => {
-    const target = {ArrowLeft: (index + drawerTabs.length - 1) % drawerTabs.length,
-      ArrowRight: (index + 1) % drawerTabs.length, Home: 0, End: drawerTabs.length - 1}[event.key];
+    const tabs = visibleDrawerTabs(), index = Math.max(0, tabs.indexOf(name));
+    const target = {ArrowLeft: (index + tabs.length - 1) % tabs.length,
+      ArrowRight: (index + 1) % tabs.length, Home: 0, End: tabs.length - 1}[event.key];
     if (target === undefined) return;
     event.preventDefault();
-    selectDrawerTab(drawerTabs[target], true);
+    selectDrawerTab(tabs[target], true);
   });
 }
 $('copyPartyCode').addEventListener('click', async () => {
@@ -938,12 +1143,31 @@ $('drawerScrim').addEventListener('click', closeDrawer);
 $('ctlMute').addEventListener('click', () => { player.muted = !player.muted; if (!player.muted && autoStartPhase === 'muted') autoStartPhase = 'playing'; renderPlayerUi(); });
 $('ctlVolume').addEventListener('input', () => { player.volume = Number($('ctlVolume').value); player.muted = player.volume === 0; renderPlayerUi(); });
 $('ctlSeek').addEventListener('input', () => {
+  if (blocksHostOnlyControl()) { seekDragging = false; renderPlayerUi(); return; }
   seekDragging = true;
   const duration = player.duration, value = Number($('ctlSeek').value);
   $('ctlSeek').style.setProperty?.('--fill', `${value / 10}%`);
   $('ctlRemaining').textContent = formatTime(duration - duration * value / 1000);
 });
+for (const event of ['pointerdown', 'keydown']) $('ctlSeek').addEventListener(event, e => {
+  if (event === 'keydown' && !['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown', ' '].includes(e.key)) return;
+  if (blocksHostOnlyControl()) { e.preventDefault(); e.stopPropagation?.(); }
+});
+// Consume OS/media-key actions before the browser's default player action.
+const mediaSession = globalThis.navigator?.mediaSession;
+if (mediaSession?.setActionHandler) {
+  for (const [action, handler] of Object.entries({
+    play: () => { if (!blocksHostOnlyControl() && player.paused) togglePlay(); },
+    pause: () => { if (!blocksHostOnlyControl() && !player.paused) togglePlay(); },
+    seekbackward: details => { if (!blocksHostOnlyControl()) skip(-(details.seekOffset || 10)); },
+    seekforward: details => { if (!blocksHostOnlyControl()) skip(details.seekOffset || 10); },
+    seekto: details => { if (!blocksHostOnlyControl() && Number.isFinite(details.seekTime)) seekTo(details.seekTime); },
+  })) {
+    try { mediaSession.setActionHandler(action, handler); } catch { /* Optional platform action. */ }
+  }
+}
 $('ctlSeek').addEventListener('change', () => {
+  if (blocksHostOnlyControl()) { seekDragging = false; renderPlayerUi(); return; }
   seekDragging = false;
   const duration = player.duration;
   if (!loadedStream || !Number.isFinite(duration)) return;
@@ -963,8 +1187,8 @@ $('playerWrap').addEventListener('keydown', e => {
   if (['INPUT', 'SELECT', 'BUTTON'].includes(e.target?.tagName)) return;
   revealControls();
   if (e.key === ' ' || e.key === 'k' || e.key === 'K') { e.preventDefault(); togglePlay(); }
-  else if (e.key === 'ArrowLeft') skip(-10);
-  else if (e.key === 'ArrowRight') skip(10);
+  else if (e.key === 'ArrowLeft') { e.preventDefault(); skip(-10); }
+  else if (e.key === 'ArrowRight') { e.preventDefault(); skip(10); }
   else if (e.key === 'f' || e.key === 'F') toggleFullscreen();
   else if (e.key === 'm' || e.key === 'M') { player.muted = !player.muted; renderPlayerUi(); }
 });
@@ -1039,7 +1263,8 @@ function sendControl(paused, seconds, kind = 'toggle') {
   catch { return false; }
   pendingCommand = command;
   applySync();
-  session.commitControl(command, {mode: guestControlMode}).then(() => {
+  // Host: broadcast first, then persisted by the authorized RPC (like Desktop).
+  session.commitControl(command, {mode: session.isHost() ? 'desktop' : guestControlMode}).then(() => {
     if (pendingCommand !== command) return;
     pendingCommand = null;
     status(paused ? 'Pause für alle.' : 'Wiedergabe für alle.');
@@ -1282,13 +1507,114 @@ async function accountDisplayName(user, profileIndex) {
   return 'Nuvio-Mitglied';
 }
 const usableSession = auth => !!auth?.user && !auth.user.is_anonymous;
-// Credentials only without a valid session; otherwise just "Jetzt ansehen".
+// Credentials only without a valid session.
 function renderAuthState(signedIn) {
   $('credentials').hidden = signedIn;
   $('accountLine').hidden = !signedIn;
 }
 let joining = false;
-async function joinParty({auto = false} = {}) {
+let roomSearchTimer, roomSearchRevision = 0, roomTitleDetails = null, chosenRoomMedia = null;
+
+function setChosenRoomMedia(media) {
+  chosenRoomMedia = media;
+  $('createRoomButton').disabled = joining || !media;
+}
+
+function roomOptions(id, placeholder, items) {
+  const select = $(id);
+  const options = [['', placeholder], ...items].map(([value, label]) => {
+    const option = document.createElement('option');
+    option.value = value; option.textContent = label;
+    return option;
+  });
+  select.replaceChildren(...options);
+  select.value = '';
+}
+
+async function chooseRoomTitle(result) {
+  const revision = ++roomSearchRevision;
+  $('roomSearchResults').replaceChildren();
+  $('roomEpisodePicker').hidden = true;
+  roomTitleDetails = null;
+  setChosenRoomMedia(null);
+  $('roomSearchStatus').textContent = 'Titel wird bestätigt …';
+  try {
+    const details = await loadRoomTitle(result.type, result.id);
+    if (revision !== roomSearchRevision) return;
+    if (result.type === 'series' && !details.episodes.length) {
+      $('roomSearchStatus').textContent = 'Für diese Serie sind keine gültigen Episoden verfügbar.';
+      return;
+    }
+    roomTitleDetails = details;
+    $('roomSearchStatus').textContent = details.media.title;
+    if (result.type === 'movie') {
+      setChosenRoomMedia(details.media);
+      return;
+    }
+    const seasons = [...new Set(details.episodes.map(video => video.season))];
+    roomOptions('roomSearchSeason', 'Staffel auswählen', seasons.map(number => [String(number), 'Staffel ' + number]));
+    roomOptions('roomSearchEpisode', 'Zuerst Staffel auswählen', []);
+    $('roomSearchEpisode').disabled = true;
+    $('roomEpisodePicker').hidden = false;
+  } catch {
+    if (revision === roomSearchRevision) $('roomSearchStatus').textContent = 'Der Titel konnte bei Cinemeta nicht bestätigt werden. Suche erneut oder verwende die manuelle Eingabe.';
+  }
+}
+
+$('roomSearchSeason').addEventListener('change', () => {
+  setChosenRoomMedia(null);
+  const season = $('roomSearchSeason').value;
+  const episodes = season === '' ? [] : roomTitleDetails?.episodes.filter(video => video.season === Number(season)) ?? [];
+  roomOptions('roomSearchEpisode', episodes.length ? 'Episode auswählen' : 'Zuerst Staffel auswählen',
+    episodes.map(video => [String(video.episode), 'Episode ' + video.episode + (typeof video.title === 'string' ? ' · ' + video.title : '')]));
+  $('roomSearchEpisode').disabled = !episodes.length;
+});
+
+$('roomSearchEpisode').addEventListener('change', () => {
+  setChosenRoomMedia(null);
+  const season = $('roomSearchSeason').value, episode = $('roomSearchEpisode').value;
+  if (!roomTitleDetails || season === '' || episode === '') return;
+  setChosenRoomMedia(roomMediaForEpisode(roomTitleDetails, Number(season), Number(episode)));
+});
+
+$('roomSearch').addEventListener('input', () => {
+  const revision = ++roomSearchRevision;
+  const query = $('roomSearch').value.trim();
+  clearTimeout(roomSearchTimer);
+  roomTitleDetails = null;
+  setChosenRoomMedia(null);
+  $('roomSearchResults').replaceChildren();
+  $('roomEpisodePicker').hidden = true;
+  $('roomSearchStatus').textContent = query.length >= 2 ? 'Cinemeta wird durchsucht …'
+    : query ? 'Gib mindestens zwei Zeichen ein.' : '';
+  if (query.length < 2) return;
+  roomSearchTimer = setTimeout(async () => {
+    try {
+      const results = await searchRoomMedia(query);
+      if (revision !== roomSearchRevision) return;
+      for (const result of results) {
+        const item = document.createElement('li'), button = document.createElement('button');
+        button.type = 'button'; button.className = 'btn room-result';
+        if (result.poster) {
+          const image = document.createElement('img'); image.alt = ''; image.loading = 'lazy';
+          showImage(image, result.poster); button.append(image);
+        }
+        const label = document.createElement('span');
+        label.textContent = [result.title, result.year, result.type === 'movie' ? 'Film' : 'Serie'].filter(Boolean).join(' · ');
+        button.append(label);
+        button.addEventListener('click', () => {
+          if (revision === roomSearchRevision) chooseRoomTitle(result);
+        });
+        item.append(button); $('roomSearchResults').append(item);
+      }
+      $('roomSearchStatus').textContent = results.length ? 'Wähle einen Titel aus.' : 'Keine passenden Filme oder Serien gefunden.';
+    } catch {
+      if (revision === roomSearchRevision) $('roomSearchStatus').textContent = 'Cinemeta konnte nicht geladen werden. Prüfe deine Verbindung und versuche es erneut.';
+    }
+  }, 300);
+});
+
+async function joinParty({auto = false, create = false} = {}) {
   if (!session) return status(configProblem, true);
   // Already a member (came back via the back arrow): return without re-joining.
   if (session.room) {
@@ -1298,12 +1624,22 @@ async function joinParty({auto = false} = {}) {
   }
   if (joining) return; // No double sign-in or join.
   const code = normalizeCode($('partyCode').value);
-  if (!validCode(code)) return status('Bitte den sechsstelligen Party-Code aus der Einladung eingeben.', true);
+  if (!create && !validCode(code)) return status('Bitte den sechsstelligen Party-Code aus der Einladung eingeben.', true);
+  const selectedMedia = chosenRoomMedia;
+  const manual = create === 'manual';
+  const manualId = manual ? $('roomMediaId').value.trim() : '';
+  if (create && !(manual ? manualId : selectedMedia))
+    return status('Wähle einen gültigen Titel oder gib einen IMDb-Link ein.', true);
+  const manualType = manual ? $('roomMediaType').value : '';
+  const manualSeason = manual && $('roomSeason').value !== '' ? Number($('roomSeason').value) : null;
+  const manualEpisode = manual && $('roomEpisode').value !== '' ? Number($('roomEpisode').value) : null;
   const rawIndex = $('profileIndex').value.trim();
   const profileIndex = rawIndex === '' ? null : Number(rawIndex);
   if (profileIndex != null && (!Number.isInteger(profileIndex) || profileIndex < 0 || profileIndex > 20)) return status('Ungültiger Profilindex.', true);
   joining = true;
   $('joinButton').disabled = true;
+  $('createRoomButton').disabled = true;
+  $('createRoomManual').disabled = true;
   try {
     let {data: {session: auth} = {}} = await client.auth.getSession();
     if (!usableSession(auth)) {
@@ -1320,29 +1656,38 @@ async function joinParty({auto = false} = {}) {
       auth = data.session || {user: data.user};
       renderAuthState(true);
     }
-    $('joinButton').textContent = 'Party wird betreten …';
+    $('joinButton').textContent = create ? 'Titel wird bestätigt und Party erstellt …' : 'Party wird betreten …';
     const name = await accountDisplayName(auth.user, profileIndex);
-    await session.join(code, name, profileIndex);
+    if (create) {
+      const media = manual ? await resolveRoomMedia(manualType, manualId, manualSeason, manualEpisode) : selectedMedia;
+      await session.create(media, name, profileIndex);
+    } else await session.join(code, name, profileIndex);
     if (session.room) {
-      rememberJoinedParty(code);
+      const confirmedCode = normalizeCode(session.room.info.code);
+      if (!validCode(confirmedCode)) throw new Error('Backend-Antwort enthält keinen gültigen Party-Code.');
+      rememberJoinedParty(confirmedCode);
+      $('partyCode').value = confirmedCode;
       // Joined via "/" or a typed code: make the URL /party/<CODE>, so a reload
       // finds the same party (the code is not secret; no source is added).
-      if (partyCodeFromPath(location.pathname) !== code) {
-        try { globalThis.history?.replaceState?.(null, '', `/party/${code}`); } catch { /* URL unchanged. */ }
+      if (partyCodeFromPath(location.pathname) !== confirmedCode) {
+        try { globalThis.history?.replaceState?.(null, '', `/party/${confirmedCode}`); } catch { /* URL unchanged. */ }
       }
     }
-    status(auto ? 'Party nach dem Neuladen wieder betreten. Host-Freigabe und Party-Zeit werden übernommen …' : 'Beigetreten. Warte auf die Streamfreigabe durch den Desktop-Host.');
+    status(session.isHost() ? 'Party-Room geöffnet. Host-Verwaltung vom Backend bestätigt.'
+      : auto ? 'Party nach dem Neuladen wieder betreten. Host-Freigabe und Party-Zeit werden übernommen …' : 'Beigetreten. Warte auf die Streamfreigabe durch den Desktop-Host.');
   } catch (err) {
     showPanel('join');
     // Expired or revoked session: show the sign-in fields again.
     if (err?.code === 'PGRST301' || err?.status === 401 || /jwt|expired|not authenticated/i.test(String(err?.message || ''))) {
       renderAuthState(false); status('Deine Sitzung ist abgelaufen. Bitte erneut mit deinem Nuvio-Konto anmelden.', true);
-    } else status('Beitritt fehlgeschlagen: ' + friendlyError(err), true);
+    } else status((create ? 'Erstellung fehlgeschlagen: ' : 'Beitritt fehlgeschlagen: ') + friendlyError(err), true);
     // A definitive answer ends the automatic rejoin for this tab.
     if (['party_not_found', 'party_full', 'removed', 'not_member', 'party_ended', 'unavailable'].includes(err?.code)) forgetJoinedParty();
   }
-  finally { joining = false; $('joinButton').disabled = false; $('joinButton').textContent = session.room ? 'Zurück zur Party' : 'Jetzt ansehen'; }
+  finally { joining = false; $('joinButton').disabled = false; setChosenRoomMedia(chosenRoomMedia); $('createRoomManual').disabled = false; $('joinButton').textContent = session.room ? 'Zurück zur Party' : 'Party beitreten'; }
 }
+$('createRoomButton').addEventListener('click', () => joinParty({create: true}));
+$('createRoomManual').addEventListener('click', () => joinParty({create: 'manual'}));
 $('joinForm').addEventListener('submit', e => { e.preventDefault(); joinParty(); });
 // Sign out: visible only with a session (inside the account line).
 // Preview password gate (functions/_middleware.js): the logout POST must carry
@@ -1425,6 +1770,8 @@ for (const event of ['pointerup', 'pointercancel']) window.addEventListener(even
 });
 window.addEventListener('blur', () => { mediaPointerDown = false; mediaGestureUntil = -1; });
 player.addEventListener('keydown', e => {
+  if ([' ', 'Spacebar', 'k', 'K', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown'].includes(e.key) &&
+      blocksHostOnlyControl()) { e.preventDefault(); e.stopPropagation?.(); return; }
   if ([' ', 'Spacebar', 'k', 'K', 'ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown'].includes(e.key)) mediaGestureUntil = performance.now() + 1500;
 });
 for (const event of ['pause', 'seeking', 'ratechange']) player.addEventListener(event, () => {
@@ -1575,7 +1922,7 @@ client?.auth.onAuthStateChange((event, authSession) => {
   try {
     const {data: {session: auth} = {}, error} = await client.auth.getSession();
     if (error) throw error;
-    // Valid session: only "Jetzt ansehen". Otherwise e-mail + password inline.
+    // Valid session: no credentials. Otherwise e-mail and password inline.
     renderAuthState(usableSession(auth));
     showPanel('join');
     await preview();
