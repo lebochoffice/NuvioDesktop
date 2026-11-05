@@ -88,7 +88,7 @@
         <div class="room-hero">
           <img id="roomPoster" class="room-poster" alt="" hidden>
           <div class="room-heading">
-            <p class="room-kicker">Dein Party-Room</p>
+            <p id="roomKicker" class="room-kicker">Dein Party-Room</p>
             <h2 id="roomTitle"></h2>
             <p id="roomSubtitle" class="room-subtitle"></p>
             <div class="room-meta">
@@ -98,6 +98,7 @@
             </div>
           </div>
         </div>
+        <p id="roomWaiting" class="room-waiting" role="status"></p>
         <form id="roomShareForm" class="room-share" autocomplete="off" novalidate>
           <label class="field"><span>Direkter Videolink (HLS, MP4 oder WebM über HTTPS)</span>
             <input id="roomShareUrl" type="url" inputmode="url" spellcheck="false" maxlength="4096" placeholder="https://…/video.mp4"></label>
@@ -116,11 +117,13 @@
           <button id="roomOpenDrawer" type="button" class="btn">Teilnehmer &amp; Chat</button>
           <button id="roomOpenHost" type="button" class="btn ghost">Host-Einstellungen</button>
         </div>
+        <div class="room-people-box"><h3>Teilnehmer</h3><ul id="roomPeople" class="room-people"></ul></div>
         <label class="field room-invite"><span>Einladungslink</span><input id="roomInvite" readonly></label>
       </article>
       <div id="playerWrap" class="player-wrap" tabindex="-1">
         <video id="player" controls playsinline preload="metadata" crossorigin="anonymous"></video>
-        <div id="noStream" class="player-state">Warte auf eine freigegebene Streamquelle des Hosts …</div>
+        <div id="noStream" class="player-state">Warte auf Video vom Host …</div>
+        <button id="autoplayStart" class="btn primary large autoplay-start" type="button" hidden>▶ Wiedergabe starten</button>
         <button id="loadStream" type="button" class="play-orb center" aria-label="Abspielen" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l10.5-6.5z"/></svg></button>
 
         <div class="player-top">
@@ -209,13 +212,14 @@
         </div>
         <p id="suggestStatus" class="muted small" role="status"></p>
         <button id="useDesktopStream" type="button" class="btn ghost small" hidden>Zur Host-Quelle zurück</button>
-        <p id="streamInfo" class="muted small">Warte auf eine Host-Quelle.</p>
+        <p id="streamInfo" class="muted small">Warte auf Video vom Host.</p>
         <p id="qualityNote" class="muted small" hidden></p>
       </section>
       <section id="panelParty" class="settings-panel" role="tabpanel" aria-labelledby="tabParty" tabindex="0" hidden>
         <p id="movieInfo" class="muted small"></p>
         <div class="party-code-row"><span>Party-Code</span><strong id="drawerCode">–</strong><button id="copyPartyCode" type="button" class="btn ghost small">Kopieren</button></div>
         <p id="controlInfo" class="sr-only"></p>
+        <button id="partyShowRoom" type="button" class="btn ghost">Party-Room anzeigen</button>
         <button id="drawerResync" type="button" class="btn ghost" disabled>Mich synchronisieren</button>
         <button id="leaveButton" type="button" class="btn ghost leave">Party verlassen</button>
       </section>

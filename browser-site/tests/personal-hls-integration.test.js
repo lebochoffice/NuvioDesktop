@@ -2175,7 +2175,8 @@ test('members propose only valid direct links and see the host\'s decision; the 
   h.session.room.members = [{id: 'host', display_name: 'Host'}, {id: 'guest', display_name: 'Gast'}];
   h.session.channel = {send: async message => { channel.push(message); return 'ok'; }};
   h.session.handlers.room(h.session.room);
-  assert.equal(h.get('tabHost').hidden, true); assert.equal(h.get('roomOverview').hidden, true);
+  assert.equal(h.get('tabHost').hidden, true); // No host controls for members.
+  assert.equal(h.get('roomOverview').hidden, false); assert.equal(h.get('roomShareForm').hidden, true); // Waiting room without a source.
   h.get('proposalUrl').value = 'https://localhost/a.mp4';
   h.get('proposalForm').fire('submit'); await settlePlayback();
   assert.equal(channel.filter(m => m.event === 'stream_suggest').length, 0);
@@ -2203,4 +2204,118 @@ test('locked by default: no browser-host offer, no proposal view, no proposal fo
   // The authorized room functions stay: host tab, invite, host-only, members, end.
   assert.equal(h.get('tabHost').hidden, false);
   assert.equal(h.get('roomInvite').value, 'https://watch.example.test/party/UXZ83H');
+});
+
+// --- Private family beta: waiting room and stable sharing --------------------
+const memberRoom = () => ({...hostRoom(), memberId: 'guest'});
+const sharedMp4 = (url = 'https://cdn.example.test/film.mp4') => ({media_key: 'movie|tt1||', url, name: 'Video-Link des Hosts', stream_type: 'mp4', headers: {}, response_headers: {}});
+
+test('a member joins before any video: waiting room with title, people and invite, no host controls, no error', async () => {
+  const h = await harness({autoHost: true, browserHostShare: true});
+  h.session.room = memberRoom();
+  h.session.handlers.room(h.session.room);
+  assert.equal(h.get('roomOverview').hidden, false); assert.equal(h.get('playerWrap').hidden, true);
+  assert.match(h.get('roomWaiting').textContent, /Warte auf Video vom Host/);
+  assert.equal(h.get('roomShareForm').hidden, true); assert.equal(h.get('roomOpenHost').hidden, true); assert.equal(h.get('tabHost').hidden, true);
+  assert.equal(h.get('roomTitle').textContent, 'Film');
+  assert.deepEqual(h.get('roomPeople').children.map(item => item.textContent), ['Host · Host', 'Gast · Du']);
+  assert.equal(h.get('roomInvite').value, 'https://watch.example.test/party/UXZ83H');
+  assert.notEqual(h.get('message').style.borderColor, '#ff6969'); // No error just because nothing is shared.
+  // The host shares: the member leaves the waiting room and loads the source automatically.
+  h.session.receive('stream', {member_id: 'host', stream: sharedMp4()});
+  assert.equal(h.get('roomOverview').hidden, true); assert.equal(h.get('playerWrap').hidden, false);
+  assert.equal(h.player.src, 'https://cdn.example.test/film.mp4');
+  // A new source replaces the old one; a revocation returns to the waiting room.
+  h.session.receive('stream', {member_id: 'host', stream: sharedMp4('https://cdn.example.test/other.mp4')});
+  assert.equal(h.player.src, 'https://cdn.example.test/other.mp4');
+  h.session.receive('stream', {member_id: 'host', stream: null});
+  assert.equal(h.get('roomOverview').hidden, false); assert.equal(h.get('playerWrap').hidden, true);
+  // The waiting room stays reachable from the player (Party tab).
+  h.session.receive('stream', {member_id: 'host', stream: sharedMp4()});
+  h.get('partyShowRoom').fire('click');
+  assert.equal(h.get('roomOverview').hidden, false); assert.equal(h.get('roomBackToPlayer').hidden, false);
+  h.get('roomBackToPlayer').fire('click');
+  assert.equal(h.get('playerWrap').hidden, false);
+});
+
+test('a failed offer keeps the previous source, is not resent later, and blocks no further sharing', async () => {
+  const {h, channel} = await hostHarness();
+  let failStream = true;
+  h.session.channel = {send: async message => { channel.push(message); return message.event === 'stream' && failStream ? 'error' : 'ok'; }};
+  h.get('roomShareUrl').value = 'https://cdn.example.test/film.mp4';
+  h.get('roomShareForm').fire('submit'); await settlePlayback(); await settlePlayback();
+  assert.match(h.get('roomShareStatus').textContent, /nicht gesendet/);
+  assert.equal(h.session.hostStream, null); assert.equal(h.get('roomOverview').hidden, false);
+  assert.equal(channel.filter(m => m.event === 'state').length, 0); // No start state for an offer nobody got.
+  h.session.receive('state_request', {member_id: 'guest'}); await settlePlayback();
+  assert.equal(channel.filter(m => m.event === 'stream').length, 1); // The failed offer is never resent.
+  failStream = false;
+  h.get('roomShareUrl').value = 'https://cdn.example.test/film.mp4';
+  h.get('roomShareForm').fire('submit'); await settlePlayback(); await settlePlayback();
+  assert.equal(h.session.hostStream.url, 'https://cdn.example.test/film.mp4');
+  assert.equal(h.get('playerWrap').hidden, false);
+});
+
+test('a failed start state announces the previous offer again; the host keeps its previous source', async () => {
+  const {h, channel} = await hostHarness();
+  h.get('roomShareUrl').value = 'https://cdn.example.test/first.mp4';
+  h.get('roomShareForm').fire('submit'); await settlePlayback(); await settlePlayback();
+  assert.equal(h.session.hostStream.url, 'https://cdn.example.test/first.mp4');
+  h.session.channel = {send: async message => { channel.push(message); return message.event === 'state' ? 'error' : 'ok'; }};
+  h.get('roomShowOverview').fire('click');
+  h.get('roomShareUrl').value = 'https://cdn.example.test/second.mp4';
+  h.get('roomShareForm').fire('submit'); await settlePlayback(); await settlePlayback();
+  const offers = channel.filter(m => m.event === 'stream').map(m => m.payload.stream?.url);
+  assert.deepEqual(offers.slice(-2), ['https://cdn.example.test/second.mp4', 'https://cdn.example.test/first.mp4']);
+  assert.equal(h.session.hostStream.url, 'https://cdn.example.test/first.mp4');
+  assert.equal(h.player.src, 'https://cdn.example.test/first.mp4');
+  assert.match(h.get('roomShareStatus').textContent, /vorherige Freigabe wurde wieder angek/);
+});
+
+test('only one share action runs at a time; a failed revocation keeps the source', async () => {
+  const {h, channel} = await hostHarness();
+  h.get('roomShareUrl').value = 'https://cdn.example.test/a.mp4';
+  h.get('roomShareForm').fire('submit');
+  h.get('roomShareUrl').value = 'https://cdn.example.test/b.mp4';
+  h.get('roomShareForm').fire('submit'); // Still busy with a.mp4.
+  await settlePlayback(); await settlePlayback();
+  assert.deepEqual(channel.filter(m => m.event === 'stream').map(m => m.payload.stream.url), ['https://cdn.example.test/a.mp4']);
+  h.session.channel = {send: async message => { channel.push(message); return message.event === 'stream' ? 'error' : 'ok'; }};
+  h.get('roomStopShare').fire('click'); await settlePlayback();
+  assert.equal(h.session.hostStream.url, 'https://cdn.example.test/a.mp4');
+  assert.equal(h.get('playerWrap').hidden, false); // Still sharing: no false "stopped".
+});
+
+test('proposals expire after a kick or a title change and are re-checked before acceptance', async () => {
+  const {h, channel} = await hostHarness();
+  h.session.receive('stream_suggest', {member_id: 'guest', media_key: 'movie|tt1||', url: 'https://cdn.example.test/p.mp4'});
+  assert.equal(h.get('roomProposalList').children.length, 1);
+  const [item] = h.get('roomProposalList').children;
+  h.session.room.members = h.session.room.members.filter(member => member.id !== 'guest'); // Removed, UI not yet refreshed.
+  item.children[2].fire('click'); await settlePlayback(); // Annehmen
+  assert.equal(channel.filter(m => m.event === 'stream').length, 0);
+  assert.equal(h.get('roomProposals').hidden, true);
+  h.session.room.members.push({id: 'guest', display_name: 'Gast'});
+  h.session.receive('stream_suggest', {member_id: 'guest', media_key: 'movie|tt1||', url: 'https://cdn.example.test/p.mp4'});
+  h.session.room.info.media = {...h.session.room.info.media, meta_id: 'tt2'};
+  h.session.handlers.room(h.session.room); // Title changed.
+  assert.equal(h.get('roomProposals').hidden, true);
+});
+
+test('blocked autoplay shows one clear start button; tapping it starts at the party time', async () => {
+  const h = await harness({autoHost: true, browserHostShare: true});
+  h.session.room = memberRoom();
+  h.session.playback = {seq: 2, member_id: 'host', paused: false, position_ms: 5000, rate: 1, at: 1000, media_key: 'movie|tt1||'};
+  h.session.handlers.room(h.session.room);
+  const blocked = () => Promise.reject(Object.assign(new Error('blocked'), {name: 'NotAllowedError'}));
+  const allowed = h.player.play;
+  h.player.play = blocked;
+  h.session.receive('stream', {member_id: 'host', stream: sharedMp4()});
+  h.metadata(); await settlePlayback(); await settlePlayback(); await settlePlayback();
+  assert.equal(h.get('autoplayStart').hidden, false);
+  assert.match(h.get('message').textContent, /Wiedergabe starten/);
+  h.player.play = allowed;
+  h.get('autoplayStart').fire('click'); await settlePlayback();
+  assert.equal(h.get('autoplayStart').hidden, true);
+  assert.equal(h.sync(), true); assert.equal(h.player.paused, false);
 });

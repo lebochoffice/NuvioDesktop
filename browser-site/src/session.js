@@ -75,20 +75,25 @@ export class PartySession {
   // Distributed over the private party channel and answered again on every
   // state_request (late joiners, reconnects). Memory only: after a reload of
   // the host page the link has to be shared again (no URLs are stored).
+  // The local source changes only after the channel accepted the message: a
+  // failed send keeps the previous source, and a failed offer is never resent
+  // later (state_request and reconnect announce only this.hostStream). This is
+  // client-side consistency, not a server-side transaction.
   async shareHostStream(stream) {
     if (!this.isHost()) throw new Error('Host-Rolle nicht vom Backend bestätigt.');
     if (!this.channel) throw new Error('Keine Party-Verbindung.');
+    await this.sendHostStream(stream);
     this.hostStream = stream;
-    await this.sendHostStream();
   }
   async stopHostStream() {
     if (!this.isHost()) return;
+    if (!this.channel) throw new Error('Keine Party-Verbindung.');
+    await this.sendHostStream(null);
     this.hostStream = null;
-    await this.sendHostStream();
   }
-  async sendHostStream() {
+  async sendHostStream(stream = this.hostStream) {
     if (!this.isHost() || !this.channel) return;
-    const sent = await this.channel.send({type: 'broadcast', event: 'stream', payload: {member_id: this.room.memberId, stream: this.hostStream ?? null}});
+    const sent = await this.channel.send({type: 'broadcast', event: 'stream', payload: {member_id: this.room.memberId, stream: stream ?? null}});
     if (sent && sent !== 'ok') throw new Error('Videofreigabe nicht gesendet (' + sent + ').');
   }
   // Host's own play/pause/seek: broadcast first, then persisted by the

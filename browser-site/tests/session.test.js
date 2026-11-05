@@ -826,3 +826,30 @@ test('a host that shares nothing answers state requests without a stream offer o
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(f.messages.slice(before).filter(m => m.event === 'stream').length, 0);
 });
+
+test('host source: a failed send keeps the previous offer and is never resent; a failed revocation keeps it too', async t => {
+  const f = await hostFixture(t);
+  await f.session.shareHostStream(hostLinkStream);
+  const send = f.ch.send;
+  f.ch.send = async p => { f.messages.push(p); return 'error'; };
+  await assert.rejects(f.session.shareHostStream({...hostLinkStream, url: 'https://cdn.example.test/other.mp4'}));
+  assert.equal(f.session.hostStream, hostLinkStream);
+  await assert.rejects(f.session.stopHostStream());
+  assert.equal(f.session.hostStream, hostLinkStream);
+  f.ch.send = send;
+  const before = f.messages.length;
+  f.emit('state_request', {member_id: 'guest'});
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(f.messages.slice(before).filter(m => m.event === 'stream').map(m => m.payload.stream), [hostLinkStream]);
+});
+
+test('reconnect: a sharing host announces its offer and party time again once subscribed', async t => {
+  const f = await hostFixture(t);
+  await f.session.shareHostStream(hostLinkStream);
+  await f.session.hostPublish({paused: false, positionMs: 7000});
+  const before = f.messages.length;
+  await f.connect(); // SUBSCRIBED again after a reconnect.
+  const again = f.messages.slice(before);
+  assert.ok(again.some(m => m.event === 'stream' && m.payload.stream === hostLinkStream));
+  assert.ok(again.some(m => m.event === 'state' && m.payload.position_ms === 7000));
+});

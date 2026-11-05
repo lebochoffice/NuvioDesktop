@@ -62,6 +62,32 @@ Erst wenn 1 und 2 vorhanden sind, darf die Browser-Freigabe öffentlich aktivier
 
 **Hinweis:** Der folgende Abschnitt beschreibt den Funktionsumfang, wenn der interne Schalter gesetzt ist. Öffentlich gilt die Sperre oben.
 
+## Phase 2.1: Private Familien-Beta
+
+**Nur für einen geschlossenen Kreis**, mit dem internen Build-Schalter `VITE_PARTY_BROWSER_HOST_SHARE=1`. Er ist standardmäßig aus, eine öffentliche Preview bleibt gesperrt. Das Risiko oben gilt unverändert und wurde für die Beta bewusst akzeptiert: Jedes Mitglied kann Realtime-Nachrichten „als Host“ senden, und Vorschläge sind für alle Mitglieder lesbar.
+
+- **Warteraum:**
+  - Der Host bleibt im Room bis zur ersten Freigabe, Mitglieder bleiben dort, solange keine Quelle angeboten oder geladen ist. Ein Videolink ist für das Erstellen und Beitreten nicht nötig.
+  - Gezeigt werden Poster, Titel, Party-Code, Einladungslink, Teilnehmer, „Teilnehmer & Chat“ und „Warte auf Video vom Host …“.
+  - Mitglieder sehen keine Host-Steuerelemente. Ohne Quelle erscheint keine Fehlermeldung.
+  - Aus dem Player ist der Room über „Party-Room anzeigen“ (Reiter Party) bzw. „Party-Room öffnen“ (Reiter Host) erreichbar.
+  - Die Texte nennen nicht mehr ausdrücklich einen „Desktop-Host“.
+- **Freigabe (bestmöglich, keine Transaktion):**
+  - Es läuft immer nur eine Freigabe-Aktion.
+  - Die lokale Quelle ändert sich erst nach bestätigtem Versand. Ein gescheitertes Angebot hinterlässt keinen Zustand und wird bei `state_request` oder Reconnect nie nachgesendet.
+  - Scheitert danach der Startstand, kündigt der Host die vorherige Quelle (oder „keine“) wieder an. Der Host-Player behält seine bisherige Quelle, und die Meldung sagt, ob die Wiederherstellung gelang.
+  - Ein Widerruf gilt erst nach bestätigtem Versand; sonst bleibt alles wie es war.
+- **Mitglieder:** Neue Quelle → Wechsel vom Warteraum in den Player und automatisches Laden. Quellenwechsel → nur die neue Quelle. Widerruf → zurück in den Warteraum.
+- **Autoplay:** Blockiert der Browser den Start, auch stumm, erscheint ein einziger Knopf „Wiedergabe starten“; das Tippen startet bei der Party-Zeit.
+- **Vorschläge** (nur mit Schalter):
+  - Sie verfallen, wenn das Mitglied nicht mehr in der Party ist, der Titel wechselt oder die Party endet.
+  - Vor der Annahme werden Mitgliedschaft und Titel erneut gegen den letzten Server-Stand geprüft.
+  - Keine Account-Tokens, API-Keys oder Passwörter in Links teilen.
+- **Desktop:**
+  - Desktop-Gäste können vor der Freigabe beitreten.
+  - Das Angebot des Browser-Hosts erscheint bei ihnen als vom Host geteilte Quelle im Stream-Bildschirm und muss **manuell** gewählt werden. Ein automatischer Wechsel einer laufenden mpv-Wiedergabe ist **nicht** implementiert.
+  - Die Desktop-zu-Desktop-Party ist unverändert.
+
 ## Ablauf
 
 1. Party über die Cinemeta-Suche erstellen (Phase 1, unverändert).
