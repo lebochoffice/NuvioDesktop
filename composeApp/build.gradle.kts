@@ -1310,6 +1310,13 @@ kotlin {
     }
 }
 
+// Resource-label assertions use English in the forked desktop test JVM only
+// (machines with a German system locale otherwise resolve German strings).
+tasks.withType<org.gradle.api.tasks.testing.Test>().matching { it.name == "desktopTest" }.configureEach {
+    systemProperty("user.language", "en")
+    systemProperty("user.country", "US")
+}
+
 tasks.matching {
     it.name == "desktopProcessResources" || it.name == "processDesktopMainResources"
 }.configureEach {
