@@ -360,25 +360,6 @@ internal fun PlayerScreenRuntime.handlePartyControlsEvent(type: String, value: D
         }
         return true
     }
-    if (type.startsWith(SUGGEST_LINK_EVENT)) {
-        // Member proposal of a direct HLS/MP4/WebM link; only the host decides.
-        val url = runCatching {
-            Base64.UrlSafe.withPadding(Base64.PaddingOption.ABSENT_OPTIONAL)
-                .decode(type.removePrefix(SUGGEST_LINK_EVENT))
-                .decodeToString()
-                .trim()
-        }.getOrNull()
-        val party = PartyRepository.state.value.party
-        if (url != null && party != null && !party.isHost) {
-            val keys = com.nuvio.app.features.debrid.DebridSettingsRepository.snapshot().providerApiKeys.values.filter { it.isNotBlank() }
-            val path = runCatching { io.ktor.http.Url(url).encodedPath.lowercase() }.getOrDefault("")
-            val problem = com.nuvio.app.features.party.partyHostHlsProblem(url, keys)
-                ?: if (listOf(".m3u8", ".mp4", ".webm").none { path.endsWith(it) }) "Nur direkte HLS-, MP4- oder WebM-Links." else null
-            if (problem != null) showPartyMessage(problem)
-            else { PartyRepository.suggestLink(url); showPartyMessage("Vorschlag gesendet. Der Host entscheidet.") }
-        }
-        return true
-    }
     if (type.startsWith(HOST_HLS_EVENT)) {
         val url = runCatching {
             Base64.UrlSafe.withPadding(Base64.PaddingOption.ABSENT_OPTIONAL)
@@ -538,7 +519,6 @@ private const val BROWSER_INVITE_EVENT = "partyBrowserInvite:"
 private const val REMOVE_MEMBER_EVENT = "partyRemoveMember:"
 private const val CHAT_SEND_EVENT = "partyChatSend:"
 private const val HOST_HLS_EVENT = "partyHostHls:"
-private const val SUGGEST_LINK_EVENT = "partySuggestLink:"
 private const val SYNC_ALL_STATUS_MS = 60_000L
 
 /**

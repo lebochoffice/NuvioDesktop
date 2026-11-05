@@ -818,3 +818,11 @@ test('proposals reach only the host; decisions reach only the proposing member',
   g.emit('stream_suggest_result', {member_id: 'host', target_member_id: 'guest', status: 'accepted'});
   assert.deepEqual(results, ['accepted']);
 });
+
+test('a host that shares nothing answers state requests without a stream offer or revocation', async t => {
+  const f = await hostFixture(t);
+  const before = f.messages.length;
+  f.emit('state_request', {member_id: 'guest'});
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.messages.slice(before).filter(m => m.event === 'stream').length, 0);
+});

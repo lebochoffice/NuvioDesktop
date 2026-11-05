@@ -350,6 +350,8 @@ input[type=range]:disabled { cursor: default; opacity: .5; }
 .room-share-status { margin: 0; color: #ff8a80; font-size: 14px; overflow-wrap: anywhere; }
 .room-share-status:empty { display: none; }
 .room-share-note { margin: 0; color: var(--text-3); font-size: 12px; }
+.room-share-locked { margin: 0; padding: 10px 12px; border-radius: 12px; background: rgba(255, 77, 67, .1); color: var(--text-2); font-size: 13px; }
+.room-share-locked[hidden] { display: none; }
 .room-proposals h3 { margin: 0 0 8px; font-size: 15px; }
 .room-proposals ul, .room-member-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
 .room-proposals li, .room-member-list li { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px 12px; border-radius: 12px; background: rgba(255, 255, 255, .04); }

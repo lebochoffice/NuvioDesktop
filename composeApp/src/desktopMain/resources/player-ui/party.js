@@ -796,38 +796,6 @@ const closeAndSendParty = type => {
   send(type, 0);
 };
 
-// Member: propose a direct video link to the host (browser or Desktop host).
-// Nothing plays before the host accepts; the Desktop checks the address first.
-let partyProposalDraft = "", partyProposalOpen = false;
-const buildPartyLinkProposal = () => {
-  const details = partyElement("details", "party-disclosure");
-  details.open = partyProposalOpen;
-  details.addEventListener("toggle", () => { partyProposalOpen = details.open; });
-  const summary = partyElement("summary", "party-row-label", "Video vorschlagen");
-  summary.addEventListener("click", event => event.stopPropagation());
-  details.appendChild(summary);
-  const box = partyElement("div", "party-host-hls");
-  const input = partyInputElement("party-proposal-url", "Videolink", "proposalUrl");
-  input.setAttribute("type", "url");
-  input.setAttribute("inputmode", "url");
-  input.placeholder = "https://…/video.mp4";
-  input.value = partyProposalDraft;
-  box.appendChild(input);
-  box.appendChild(partyElement("p", "party-detail", "Direkte HLS-, MP4- oder WebM-Links über HTTPS. Erst wenn der Host annimmt, wird das Video für alle geladen."));
-  const sendButton = partyCompactButton("Dem Host vorschlagen", "proposalSend", () => {
-    const url = input.value.trim();
-    if (!url) return;
-    partyProposalDraft = ""; input.value = "";
-    send(`partySuggestLink:${partyEncodeText(url)}`, 0);
-  }, "primary");
-  const update = () => { sendButton.disabled = !input.value.trim(); };
-  input.addEventListener("input", () => { partyProposalDraft = input.value; update(); });
-  update();
-  box.appendChild(sendButton);
-  details.appendChild(box);
-  return details;
-};
-
 const buildPartyContent = party => {
   if (partyView === "smart") return buildPartySmart(party);
   const content = partyElement("div", "party-content");
@@ -877,7 +845,6 @@ const buildPartyContent = party => {
     content.appendChild(note);
   }
   if (party.isHost) content.appendChild(buildPartyBrowserShare(party));
-  if (!party.isHost && party.connected) content.appendChild(buildPartyLinkProposal());
 
   const actions = partyElement("div", "party-actions");
   const leave = partyButtonElement(partyLabel("leave"), "party-leave-row", "leave", () => closeAndSendParty("partyLeave"));

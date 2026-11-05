@@ -369,7 +369,7 @@ export class PartySession {
       this.reconnectAttempts = 0;
       if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
       // A browser host re-announces its shared link and party time after (re)connecting.
-      if (this.isHost()) { this.sendHostStream().catch(() => {}); if (this.playback) this.channel.send({type: 'broadcast', event: 'state', payload: this.playback}).catch(() => {}); }
+      if (this.isHost() && this.hostStream) { this.sendHostStream().catch(() => {}); if (this.playback) this.channel.send({type: 'broadcast', event: 'state', payload: this.playback}).catch(() => {}); }
       try { await Promise.all([this.sendPresence(), this.requestState(), this.refresh()]); }
       catch (e) { this.emit('error', e); }
     });
@@ -443,13 +443,16 @@ export class PartySession {
     if (event === 'chat') this.loadMessages();
     if (event === 'state_request' && payload.member_id !== this.room.memberId) {
       this.sendPresence().catch(e => this.emit('error', e));
-      // Browser host: late joiners and reconnects get the shared link and the party time.
-      if (this.isHost()) {
+      // Browser host: late joiners and reconnects get the shared link and the
+      // party time, only while it actually shares one (no unsolicited revocation).
+      if (this.isHost() && this.hostStream) {
         this.sendHostStream().catch(() => {});
         if (this.playback) this.channel?.send({type: 'broadcast', event: 'state', payload: this.playback}).catch(() => {});
       }
     }
-    // Proposals reach only the server-confirmed host; main checks them (host-share.js).
+    // Proposals arrive on the shared party channel: every member can read them,
+    // and the sender ID is claimed, not authenticated. Only the host's view uses
+    // them, and main.js ignores them while browser-host sharing is locked.
     if (event === 'stream_suggest' && this.isHost()) this.emit('proposal', payload);
     // The host's decision about this member's own proposal (display only).
     if (event === 'stream_suggest_result' && payload.member_id === this.room.info.host_member_id &&

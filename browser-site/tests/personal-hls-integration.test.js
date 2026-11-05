@@ -43,7 +43,7 @@ class FakeHls {
 // existing tests keep the manual flow, so the default here is a stored 'off'.
 // joined: party code remembered in this tab (reload rejoin); fakeJoin records
 // joins instead of calling the backend and leaves the room empty until then.
-async function harness({debug = false, guestControl = false, guestJoin = false, rpc = null, path = '/', autoHost = false, joined = null, fakeJoin = false, share = null, catalog = null, searchCatalog = null} = {}) {
+async function harness({debug = false, guestControl = false, guestJoin = false, rpc = null, path = '/', autoHost = false, joined = null, fakeJoin = false, share = null, catalog = null, searchCatalog = null, browserHostShare = false} = {}) {
   const elements = new Map(), storageWrites = [], sent = [], timers = [], historyCalls = [], mediaActions = new Map();
   const location = {pathname: path, origin: 'https://watch.example.test'};
   let clock = 0, tick = () => {};
@@ -88,7 +88,7 @@ async function harness({debug = false, guestControl = false, guestJoin = false, 
       const reply = await share.handle(String(url).split('/v1/')[1], JSON.parse(init.body), init.headers || {});
       return {status: reply.status, headers: {get: name => reply.headers?.[name] ?? null}, json: async () => reply.body};
     },
-    env: {VITE_SUPABASE_URL: 'https://backend.example.test', VITE_SUPABASE_ANON_KEY: 'sb_publishable_TEST', ...(guestControl === true ? {VITE_PARTY_GUEST_CONTROL: '1'} : typeof guestControl === 'string' ? {VITE_PARTY_GUEST_CONTROL: guestControl} : {}), ...(guestJoin ? {VITE_PARTY_GUEST_JOIN: '1'} : {}), ...(share ? {VITE_PARTY_SHARE_WORKER: 'https://share.example.test'} : {})},
+    env: {VITE_SUPABASE_URL: 'https://backend.example.test', VITE_SUPABASE_ANON_KEY: 'sb_publishable_TEST', ...(guestControl === true ? {VITE_PARTY_GUEST_CONTROL: '1'} : typeof guestControl === 'string' ? {VITE_PARTY_GUEST_CONTROL: guestControl} : {}), ...(guestJoin ? {VITE_PARTY_GUEST_JOIN: '1'} : {}), ...(share ? {VITE_PARTY_SHARE_WORKER: 'https://share.example.test'} : {}), ...(browserHostShare ? {VITE_PARTY_BROWSER_HOST_SHARE: '1'} : {})},
     document: {getElementById: get, createElement: () => new Element()}, location, history: {replaceState: (_state, _title, url) => { historyCalls.push(url); location.pathname = url; }},
     window: {addEventListener: (event, callback) => windowEvents.set(event, callback)},
     navigator: {mediaSession: {setActionHandler: (action, handler) => mediaActions.set(action, handler)}},
@@ -2108,8 +2108,8 @@ test('a TorBox link with token shared directly by the host loads automatically a
 const hostRoom = () => ({info: {id: 'party', code: 'UXZ83H', host_member_id: 'host', host_only: true, max_members: 4,
   media: {type: 'movie', meta_type: 'movie', meta_id: 'tt1', title: 'Film', poster: 'https://img.example.test/p.jpg'}},
   memberId: 'host', members: [{id: 'host', display_name: 'Host'}, {id: 'guest', display_name: 'Gast'}]});
-async function hostHarness() {
-  const h = await harness(), channel = [];
+async function hostHarness({browserHostShare = true} = {}) {
+  const h = await harness({browserHostShare}), channel = [];
   h.session.room = hostRoom();
   h.session.channel = {send: async message => { channel.push(message); return 'ok'; }};
   h.session.handlers.room(h.session.room);
@@ -2170,7 +2170,7 @@ test('the host sees members\' proposals, checks them and only an accepted link i
 });
 
 test('members propose only valid direct links and see the host\'s decision; the Host tab stays hidden for them', async () => {
-  const h = await harness(), channel = [];
+  const h = await harness({browserHostShare: true}), channel = [];
   h.session.room.memberId = 'guest';
   h.session.room.members = [{id: 'host', display_name: 'Host'}, {id: 'guest', display_name: 'Gast'}];
   h.session.channel = {send: async message => { channel.push(message); return 'ok'; }};
@@ -2185,4 +2185,22 @@ test('members propose only valid direct links and see the host\'s decision; the 
   assert.match(h.get('suggestStatus').textContent, /Host entscheidet/);
   h.session.receive('stream_suggest_result', {member_id: 'host', target_member_id: 'guest', status: 'declined'});
   assert.match(h.get('suggestStatus').textContent, /abgelehnt/);
+});
+
+test('locked by default: no browser-host offer, no proposal view, no proposal form; the room explains why', async () => {
+  const {h, channel} = await hostHarness({browserHostShare: false});
+  assert.equal(h.get('roomShareLocked').hidden, false);
+  assert.equal(h.get('roomShareButton').disabled, true); assert.equal(h.get('roomShareUrl').disabled, true);
+  h.get('roomShareUrl').value = 'https://cdn.example.test/film.mp4';
+  h.get('roomShareForm').fire('submit'); await settlePlayback();
+  assert.equal(channel.filter(m => m.event === 'stream' || m.event === 'state').length, 0);
+  assert.equal(h.get('roomOverview').hidden, false);
+  h.session.receive('stream_suggest', {member_id: 'guest', media_key: 'movie|tt1||', url: 'https://cdn.example.test/a.mp4'});
+  assert.equal(h.get('roomProposals').hidden, true); // Unauthenticated, readable by all: not shown.
+  h.session.receive('state_request', {member_id: 'guest'}); await settlePlayback();
+  assert.equal(channel.filter(m => m.event === 'stream').length, 0); // No unsolicited revocation either.
+  assert.equal(h.get('proposalSection').hidden, true);
+  // The authorized room functions stay: host tab, invite, host-only, members, end.
+  assert.equal(h.get('tabHost').hidden, false);
+  assert.equal(h.get('roomInvite').value, 'https://watch.example.test/party/UXZ83H');
 });

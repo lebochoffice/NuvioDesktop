@@ -1,6 +1,66 @@
 # Browser-Party-Room Phase 2: Videofreigabe durch den Browser-Host
 
-Branch `restore/watchparty-0.1.49`, aufbauend auf den uncommitteten Phase-1-Änderungen. **Nicht getestet, nicht gebaut, nicht committet.**
+Branch `restore/watchparty-0.1.49`. Die Implementierung ist in `f595fa818` enthalten; die Härtung unten ist **nicht getestet und nicht committet**.
+
+## Sicherheitsstatus (Härtung nach dem Review): GESPERRT, durch das Backend blockiert
+
+**Ergebnis der Prüfung:** Mit dem vorhandenen Backend kann kein Client erkennen, ob eine Realtime-Nachricht wirklich vom Host stammt.
+
+- **Realtime-Absender:** `member_id` in `stream`, `state`, `stream_suggest`, `stream_suggest_result` und der Presence-Schlüssel setzt der sendende Client selbst. Der private Kanal prüft nur, ob jemand dem Thema beitreten darf, nicht wer eine Nachricht verfasst hat. Jedes Mitglied kann also „als Host“ senden.
+- **Quellen:** Für Streamangebote gibt es keine serverseitige Speicherung, Revision oder Bestätigung.
+  - `PartyMedia.source` (`PartySource`) kennt nur Addon- und Torrent-Merkmale, keine URL. Ihn umzuwidmen wäre eine Vertragsverletzung und würde Tokens in die Datenbank schreiben.
+  - Ob das Backend `p_media`-Änderungen auf den Host beschränkt, ist nicht einsehbar.
+- **Party-Zeit:** `watch_party_update` speichert serverseitig. Ob das Backend `member_id` aus der Anmeldung setzt oder den Client-Wert übernimmt, ist nicht einsehbar. Bei `host_only = false` dürfen ohnehin auch Gäste schreiben. Ein gespeicherter Stand ist damit kein Herkunftsnachweis für Realtime-Stände.
+- **Vorschläge:** Es gibt keinen privaten Weg zum Host. Jeder Vorschlag ist für alle Mitglieder des Kanals lesbar, Tokens in Links also auch.
+- **Atomarer Quellenwechsel:** Streamangebot (Realtime) und Startstand (Realtime + RPC) sind zwei ungekoppelte Vorgänge. Eine echte Atomarität ist ohne serverseitige Quellenrevision nicht erreichbar.
+
+**Konsequenz (fail-closed):**
+- **Videofreigabe durch den Browser-Host:** gesperrt. Die Videofreigabe im Room ist deaktiviert und zeigt den Grund. Der Host sendet kein Streamangebot und beantwortet `state_request` nur, wenn er tatsächlich eine Quelle teilt; das kommt bei gesperrter Freigabe nicht vor.
+- **Vorschläge:** Die Vorschlagsliste des Browser-Hosts und das neue Vorschlagsformular für Browser-Mitglieder sind gesperrt. Das neue „Video vorschlagen“ im Desktop-Party-Menü ist entfernt (Desktop hat keinen Build-Schalter).
+- **Interner Schalter:** Nur für geschlossene, interne Tests lässt sich die Sperre per Build-Variable `VITE_PARTY_BROWSER_HOST_SHARE=1` aufheben. Sie ist **nicht für eine öffentliche Preview** gedacht.
+- **Weiter aktiv**, weil serverseitig autorisiert:
+  - Room-Redesign, Einladungslink, Teilnehmerzahl, Chat
+  - Host-Reiter (Nur Host darf steuern, Mitglieder entfernen, Party beenden)
+  - Erstellen über die Cinemeta-Suche
+- **Unverändert:**
+  - Desktop-Host-Freigaben („Share my stream“, Browser-HLS)
+  - das bisherige HLS-„Video laden & vorschlagen“ an einen Desktop-Host
+  - Host-only, Solo-Modus und Countdown
+  - Diese bestehenden Wege haben dieselbe ungeprüfte Absenderidentität. Das ist bekannt und hier nicht verschlimmert.
+
+### Fehlender Backend-Vertrag (Vorschlag, keine Migration ohne Freigabe)
+
+1. **Serverbestätigte Quelle:**
+   - RPC `watch_party_set_source(p_party_id, p_device_id, p_source jsonb, p_expected_rev int)`, nur für den Host.
+   - Sie speichert `{kind, url}` mit einer vom Server vergebenen `source_rev` und lehnt eine veraltete `p_expected_rev` ab.
+   - `null` bedeutet Widerruf und erhöht die Revision ebenfalls.
+   - Join, Heartbeat und Preview geben `source` und `source_rev` zurück.
+2. **Server als Absender:**
+   - Eine Quellenänderung wird vom Server selbst verteilt, per `realtime.send` aus der RPC oder `postgres_changes` auf die Party-Zeile.
+   - Clients akzeptieren Quellen nur aus diesem serverseitigen Kanal bzw. aus dem Snapshot und vergleichen `source_rev`. Damit sind Widerruf, Late Join und Reconnect gedeckt.
+3. **Party-Zeit mit Quellenbezug:** `watch_party_update` setzt `member_id` aus der Anmeldung, nimmt `source_rev` entgegen und weist Stände für eine ältere Revision zurück.
+4. **Private Vorschläge:**
+   - RPC `watch_party_propose(p_party_id, p_device_id, p_url)`: Der Absender ergibt sich aus der Anmeldung, nur aktuelle Mitglieder dürfen vorschlagen.
+   - Lesen darf nur der Host (`watch_party_list_proposals`). Die Entscheidung läuft über `watch_party_decide_proposal` und prüft vor der Annahme Mitgliedschaft und Medienidentität.
+   - Kein Vorschlag geht über den gemeinsamen Kanal.
+
+Erst wenn 1 und 2 vorhanden sind, darf die Browser-Freigabe öffentlich aktiviert werden. Für Vorschläge mit Tokens ist zusätzlich 4 nötig.
+
+### Einordnung der Review-Befunde
+
+| Befund | Status |
+|---|---|
+| Host-Imitation bei Streamangebot, Widerruf und Party-Zeit des Browser-Hosts | **DURCH BACKEND BLOCKIERT**; die Funktion ist fail-closed gesperrt. |
+| Host-Imitation bei Vorschlagsentscheidungen | **DURCH BACKEND BLOCKIERT**; die Vorschläge sind gesperrt. |
+| Token-Leaks über Freigabe und Vorschläge (Realtime, für alle lesbar) | **ABGESICHERT, ABER EINGESCHRÄNKT**: Die neuen Wege sind gesperrt. Das bestehende HLS-Vorschlagen an Desktop-Hosts warnt weiterhin, dass Mitglieder den Link samt Tokens sehen. Eine URL-Prüfung kann unbekannte Secrets nicht erkennen. |
+| Atomarer Quellenwechsel, verspätete Angebote nach Widerruf | **DURCH BACKEND BLOCKIERT**: Ohne serverseitige Revision ist keine Garantie möglich. Durch die Sperre entstehen keine widersprüchlichen Browser-Host-Quellen. |
+| Vorschläge nach Kick oder Medienwechsel | **ABGESICHERT, ABER EINGESCHRÄNKT**: Mit der Sperre wird nichts angenommen. Für den internen Schalter prüft die Annahme den Snapshot nur beim Eingang. |
+| Desktop-Gäste erhalten ein neues Angebot, mpv wechselt nicht automatisch | **ABGESICHERT, ABER EINGESCHRÄNKT**: Mit der Sperre kommt kein Browser-Host-Angebot an. Für Desktop-Host-Angebote bleibt die bestehende manuelle Quellenauswahl. Automatische Desktop-Wiedergabe ist nicht implementiert. |
+| Desktop-Vorschlag gilt als „gesendet“ ohne bestätigten Versand | **BEHOBEN** durch Entfernen der neuen Desktop-Vorschlagsfunktion. |
+| HLS-Untermanifeste, Segmente, Schlüssel, Redirects | **ABGESICHERT, ABER EINGESCHRÄNKT**: Geprüft wird nur die eingegebene Adresse. Untermanifeste, Segmente, Schlüssel und Redirects lädt der Browser bzw. hls.js selbst; ohne Proxy gibt es dafür keine vollständige Zielprüfung und **keine SSRF-Schutzgarantie**. Mit der Sperre entfällt der neue Weg. |
+| Alle Punkte | **NOCH UNGETESTET** gegen das Live-Backend. |
+
+**Hinweis:** Der folgende Abschnitt beschreibt den Funktionsumfang, wenn der interne Schalter gesetzt ist. Öffentlich gilt die Sperre oben.
 
 ## Ablauf
 

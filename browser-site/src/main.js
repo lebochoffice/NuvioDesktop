@@ -20,6 +20,13 @@ const key = import.meta.env.VITE_SUPABASE_ANON_KEY?.trim();
 const guestControlSetting = String(import.meta.env.VITE_PARTY_GUEST_CONTROL ?? '').trim().toLowerCase();
 const guestControlMode = guestControlSetting === 'off' ? 'off' : ['1', 'confirmed'].includes(guestControlSetting) ? 'confirmed' : 'desktop';
 const guestControlEnabled = guestControlMode !== 'off';
+// Browser-host video sharing and link proposals (Phase 2) are LOCKED by default:
+// the backend cannot authenticate who sent a realtime stream offer, state or
+// proposal (member_id is claimed by the client), proposals are readable by every
+// member, and a shared source has no server-confirmed revision. See
+// PARTY_ROOM_PHASE2.md, "Sicherheitsstatus". Only for closed internal tests:
+// VITE_PARTY_BROWSER_HOST_SHARE=1.
+const browserHostShareEnabled = String(import.meta.env.VITE_PARTY_BROWSER_HOST_SHARE ?? '').trim() === '1';
 // Optional family share Worker: hands the host's TorBox address (with account
 // token) only to members the host admitted. Memory only, never stored/logged.
 const SHARE_WORKER = shareWorkerOrigin(import.meta.env.VITE_PARTY_SHARE_WORKER);
@@ -114,6 +121,7 @@ const session = client ? new PartySession(client, deviceId, {
   command: entry => commandSettled(entry),
   // Browser host only (session checks the host role first).
   proposal: payload => {
+    if (!browserHostShareEnabled) return; // Locked: unauthenticated sender, readable by all members.
     const room = session.room, proposal = proposalFrom(payload, room, mediaKey(room?.info.media));
     if (!proposal) return;
     const existing = proposals.findIndex(item => item.memberId === proposal.memberId);
@@ -341,6 +349,10 @@ function renderPartyRoom() {
   $('roomShareButton').textContent = hostShared ? 'Neues Video für alle freigeben' : 'Video für alle freigeben';
   $('roomStopShare').hidden = !hostShared;
   $('roomShowOverview').textContent = proposals.length ? `Party-Room öffnen (${proposals.length} Vorschlag${proposals.length === 1 ? '' : 'e'})` : 'Party-Room öffnen';
+  // Locked sharing: the field stays visible with the reason, never a dead button.
+  $('roomShareUrl').disabled = !browserHostShareEnabled;
+  $('roomShareButton').disabled = !browserHostShareEnabled;
+  $('roomShareLocked').hidden = browserHostShareEnabled;
   renderProposals();
   const code = normalizeCode(room.info.code);
   $('roomInvite').value = validCode(code) ? new URL('/party/' + code, location.origin).href : '';
@@ -412,6 +424,7 @@ function dropProposal(id) {
 // sharing the same link again keeps the current party time.
 async function shareHostVideo(input) {
   const room = session?.room;
+  if (!browserHostShareEnabled) { status('Die Videofreigabe im Browser ist gesperrt, bis das Backend den Host bestätigen kann.', true); return false; }
   if (!session?.isHost()) { status('Nur der vom Backend bestätigte Host kann Videos freigeben.', true); return false; }
   const result = hostShareStream(input, mediaKey(room.info.media));
   if (result.problem) { $('roomShareStatus').textContent = result.problem; status(result.problem, true); return false; }
@@ -450,9 +463,12 @@ $('roomStopShare').addEventListener('click', async () => {
   closeDrawer(); renderPartyRoom();
   status('Videofreigabe beendet. Die Mitglieder sehen kein Video mehr.');
 });
-// Members (browser and Desktop) propose a link; only the host decides.
+// Members propose a link; only the host decides. Locked by default: the
+// proposal travels over the shared party channel (every member can read it).
+$('proposalSection').hidden = !browserHostShareEnabled;
 $('proposalForm').addEventListener('submit', async e => {
   e.preventDefault();
+  if (!browserHostShareEnabled) return;
   const room = session?.room;
   if (!room) { status('Zuerst einer Party beitreten.', true); return; }
   if (session.isHost()) { $('suggestStatus').textContent = 'Als Host gibst du Videos direkt im Party-Room frei.'; return; }

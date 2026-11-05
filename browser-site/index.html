@@ -103,6 +103,7 @@
             <input id="roomShareUrl" type="url" inputmode="url" spellcheck="false" maxlength="4096" placeholder="https://…/video.mp4"></label>
           <button id="roomShareButton" class="btn primary large" type="submit">Video für alle freigeben</button>
           <p id="roomShareStatus" class="room-share-status" role="status"></p>
+          <p id="roomShareLocked" class="room-share-locked">Die Videofreigabe im Browser ist noch gesperrt: Das Backend kann bisher nicht bestätigen, dass ein Streamangebot wirklich vom Host stammt. Eine Desktop-Party mit „Share my stream“ funktioniert wie gewohnt.</p>
           <p class="room-share-note">Alle laden das Video direkt beim Anbieter, der dabei ihre IP-Adresse sieht. Enthaltene Tokens sind für Party-Mitglieder sichtbar.</p>
         </form>
         <div id="roomProposals" class="room-proposals" role="region" aria-labelledby="roomProposalsTitle" hidden>
@@ -197,13 +198,15 @@
         </form>
         <p id="videoLinkFormats" class="sr-only">Öffentliche HTTPS-HLS-Playlist derselben Filmfassung. Nur VOD.</p>
         <p id="personalHlsStatus" class="muted small" role="status"></p>
-        <h4>Video vorschlagen</h4>
-        <form id="proposalForm" class="stack compact" autocomplete="off" novalidate>
-          <label class="sr-only" for="proposalUrl">Direkter Videolink für die Party</label>
-          <input id="proposalUrl" type="url" inputmode="url" autocomplete="off" spellcheck="false" maxlength="4096" placeholder="https://…/video.mp4">
-          <div class="button-row"><button id="proposalSend" class="btn ghost small" type="submit">Dem Host vorschlagen</button></div>
-          <p class="muted small">Direkte HLS-, MP4- oder WebM-Links über HTTPS. Erst wenn der Host annimmt, wird das Video für alle geladen.</p>
-        </form>
+        <div id="proposalSection" hidden>
+          <h4>Video vorschlagen</h4>
+          <form id="proposalForm" class="stack compact" autocomplete="off" novalidate>
+            <label class="sr-only" for="proposalUrl">Direkter Videolink für die Party</label>
+            <input id="proposalUrl" type="url" inputmode="url" autocomplete="off" spellcheck="false" maxlength="4096" placeholder="https://…/video.mp4">
+            <div class="button-row"><button id="proposalSend" class="btn ghost small" type="submit">Dem Host vorschlagen</button></div>
+            <p class="muted small">Direkte HLS-, MP4- oder WebM-Links über HTTPS. Der Vorschlag ist für alle Party-Mitglieder lesbar, also nur Links ohne geheime Zugangsdaten. Erst wenn der Host annimmt, wird das Video für alle geladen.</p>
+          </form>
+        </div>
         <p id="suggestStatus" class="muted small" role="status"></p>
         <button id="useDesktopStream" type="button" class="btn ghost small" hidden>Zur Host-Quelle zurück</button>
         <p id="streamInfo" class="muted small">Warte auf eine Host-Quelle.</p>
