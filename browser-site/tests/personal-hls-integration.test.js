@@ -45,7 +45,7 @@ class FakeHls {
 // joined: party code remembered in this tab (reload rejoin); fakeJoin records
 // joins instead of calling the backend and leaves the room empty until then.
 async function harness({debug = false, guestControl = false, guestJoin = false, rpc = null, path = '/', autoHost = false, joined = null, fakeJoin = false, share = null, catalog = null, searchCatalog = null, browserHostShare = false} = {}) {
-  const elements = new Map(), storageWrites = [], sent = [], timers = [], historyCalls = [], mediaActions = new Map();
+  const elements = new Map(), storageWrites = [], sent = [], timers = [], historyCalls = [], mediaActions = new Map(), copiedLinks = [];
   const location = {pathname: path, origin: 'https://watch.example.test'};
   let clock = 0, tick = () => {};
   const get = id => { if (!elements.has(id)) elements.set(id, new Element()); return elements.get(id); };
@@ -93,7 +93,8 @@ async function harness({debug = false, guestControl = false, guestJoin = false, 
     env: {VITE_SUPABASE_URL: 'https://backend.example.test', VITE_SUPABASE_ANON_KEY: 'sb_publishable_TEST', ...(guestControl === true ? {VITE_PARTY_GUEST_CONTROL: '1'} : typeof guestControl === 'string' ? {VITE_PARTY_GUEST_CONTROL: guestControl} : {}), ...(guestJoin ? {VITE_PARTY_GUEST_JOIN: '1'} : {}), ...(share ? {VITE_PARTY_SHARE_WORKER: 'https://share.example.test'} : {}), ...(browserHostShare ? {VITE_PARTY_BROWSER_HOST_SHARE: '1'} : {})},
     document: {getElementById: get, createElement: () => new Element(), createTextNode: data => ({data, textContent: data})}, location, history: {replaceState: (_state, _title, url) => { historyCalls.push(url); location.pathname = url; }},
     window: {confirm: () => true, addEventListener: (event, callback) => windowEvents.set(event, callback)},
-    navigator: {mediaSession: {setActionHandler: (action, handler) => mediaActions.set(action, handler)}},
+    navigator: {clipboard: {writeText: async link => { copiedLinks.push(link); }},
+      mediaSession: {setActionHandler: (action, handler) => mediaActions.set(action, handler)}},
     resolveRoomMedia: (type, id, season, episode) => resolveRoomMedia(type, id, season, episode,
       async () => ({ok: true, json: async () => ({meta: catalog})})),
     searchRoomMedia: searchCatalog,
@@ -117,7 +118,7 @@ async function harness({debug = false, guestControl = false, guestJoin = false, 
   const source = () => vm.runInContext('personalHls', context);
   const enter = (submitter, url = privateUrl) => { get('personalHlsUrl').value = url; get('personalHlsForm').fire('submit', {submitter}); };
   const metadata = () => { player.readyState = 1; player.duration = 120; player.currentSrc = 'blob:local-test'; player.fire('loadedmetadata'); };
-  return {get, player, session, source, enter, metadata, sent, storageWrites, windowEvents, anonymousSignIns, logins, joins, historyCalls, mediaActions,
+  return {get, player, session, source, enter, metadata, sent, storageWrites, windowEvents, anonymousSignIns, logins, joins, historyCalls, mediaActions, copiedLinks,
     runTimers: () => { const due = timers.splice(0); due.forEach(callback => callback?.()); },
     tick: () => tick(),
     advance: ms => { clock += ms; }, sync: () => vm.runInContext('syncEnabled', context),
@@ -151,7 +152,10 @@ test('the premium creation action uses verified media and opens the confirmed ho
   assert.equal(h.get('roomOverview').hidden, false);
   assert.equal(h.get('playerWrap').hidden, false);
   assert.equal(h.get('infoDrawer').hidden, false);
-  assert.equal(h.get('roomInvite').value, 'https://watch.example.test/party/UXZ83H');
+  assert.equal(h.get('tabParty').getAttribute('aria-selected'), 'true');
+  assert.equal(h.get('panelHost').hidden, true);
+  h.get('roomCopyInvite').fire('click'); await settlePlayback();
+  assert.deepEqual(h.copiedLinks, ['https://watch.example.test/party/UXZ83H']);
   assert.equal(h.historyCalls.at(-1), '/party/UXZ83H');
   await h.session.close();
 });
@@ -948,7 +952,7 @@ test('participant list renders names as text with host and own badges', async ()
   h.session.handlers.room(h.session.room);
   const items = h.get('memberList').children;
   assert.equal(items.length, 2);
-  assert.deepEqual(items.map(item => item.children.map(child => child.textContent)), [['A', 'Alan', 'Host', 'Kein Status'], ['<', '<img src=x onerror=alert(1)>', 'Du', 'Kein Status']]);
+  assert.deepEqual(items.map(item => item.children.map(child => child.textContent)), [['Alan', 'Host', 'Kein Status'], ['<img src=x onerror=alert(1)>', 'Du', 'Kein Status']]);
   assert.equal(h.get('watchSection').hidden, false); assert.equal(h.get('inviteView').hidden, true);
 });
 
@@ -1782,13 +1786,16 @@ test('reload rejoin: a party that is full or gone ends the automatic rejoin with
 test('compact drawer: Party, Teilnehmer, Erweitert (+Host); no Stream/General/Chat tabs; suggestions in the Party tab', () => {
   const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
   for (const id of ['tabParty', 'tabPeople', 'tabAdvanced', 'tabHost']) assert.match(html, new RegExp(`id="${id}"`));
-  for (const id of ['tabStream', 'tabGeneral', 'tabChat', 'participantsView', 'roomBackToPlayer', 'roomOpenDrawer', 'roomMemberCount'])
+  for (const id of ['tabStream', 'tabGeneral', 'tabChat', 'participantsView', 'roomBackToPlayer', 'roomOpenDrawer', 'roomMemberCount', 'roomOpenHost', 'roomPeople', 'roomInvite'])
     assert.doesNotMatch(html, new RegExp(`id="${id}"`));
   assert.doesNotMatch(html, /Eigene HLS-Quelle/);
   const party = html.slice(html.indexOf('<section id="panelParty"'), html.indexOf('<section id="panelPeople"'));
   assert.match(party, /id="proposalSection" class="room-propose" hidden/);
   assert.match(party, /Für alle Mitglieder lesbar/);
   assert.match(party, /id="roomCopyInvite"/);
+  assert.match(party, /id="drawerResync"[^>]*>Mich synchronisieren<\/button>\s*<button id="hostSyncAll"[^>]*\bhidden\b[^>]*>Alle synchronisieren/);
+  const host = html.slice(html.indexOf('<section id="panelHost"'), html.indexOf('</section>', html.indexOf('<section id="panelHost"')));
+  assert.doesNotMatch(host, /id="hostSyncAll"/);
   const advanced = html.slice(html.indexOf('<section id="panelAdvanced"'), html.indexOf('<section id="panelHost"'));
   assert.match(advanced, /id="autoHostStream"/); assert.match(advanced, /id="chatLog"/);
   assert.match(advanced, /<details class="debug-box">[\s\S]*id="diagnosticsPanel"/);
@@ -2110,14 +2117,46 @@ async function hostHarness({browserHostShare = true} = {}) {
   return {h, channel};
 }
 
+test('only the host can republish the player position and schedule a shared start', async () => {
+  const {h, channel} = await hostHarness();
+  assert.equal(h.get('hostSyncAll').hidden, false);
+  h.get('roomShareUrl').value = 'https://cdn.example.test/film.mp4';
+  h.get('roomShareForm').fire('submit'); await settlePlayback();
+  h.metadata(); await settlePlayback();
+  h.player.currentTime = 12;
+  h.get('hostSyncAll').fire('click'); await settlePlayback();
+  const state = () => channel.filter(message => message.event === 'state').at(-1).payload;
+  assert.equal(state().position_ms, 12000);
+  assert.equal(state().paused, true);
+  h.get('hostCountdown').fire('click'); await settlePlayback();
+  const countdown = channel.find(message => message.event === 'countdown').payload;
+  assert.equal(countdown.seconds, 3);
+  assert.equal(countdown.start_at, 4000);
+  assert.equal(state().paused, true);
+  h.session.now = () => 4000;
+  h.runTimers(); await settlePlayback();
+  assert.equal(state().paused, false);
+  assert.equal(state().position_ms, 12000);
+  const sent = channel.length;
+  h.session.room.info.host_member_id = 'guest';
+  h.session.handlers.room(h.session.room);
+  assert.equal(h.get('hostSyncAll').hidden, true);
+  assert.equal(h.get('drawerResync').hidden, false);
+  h.get('hostSyncAll').fire('click');
+  h.get('hostCountdown').fire('click');
+  await settlePlayback();
+  assert.equal(channel.length, sent);
+});
+
 test('the browser host shares a direct link from the drawer without hiding the player', async () => {
   const {h, channel} = await hostHarness();
   assert.equal(h.get('roomOverview').hidden, false); assert.equal(h.get('playerWrap').hidden, false);
   assert.equal(h.get('infoDrawer').hidden, false);
-  assert.equal(h.get('panelHost').hidden, false);
+  assert.equal(h.get('panelParty').hidden, false);
+  assert.equal(h.get('panelHost').hidden, true);
   assert.equal(h.get('watchSection').hidden, false);
   assert.equal(h.get('tabHost').hidden, false);
-  assert.equal(h.get('roomPeople').children.length, 2);
+  assert.equal(h.get('memberList').children.length, 2);
   assert.equal(h.get('roomTitle').textContent, 'Film');
   h.get('roomShareUrl').value = 'http://cdn.example.test/film.mp4';
   h.get('roomShareForm').fire('submit'); await settlePlayback();
@@ -2217,7 +2256,8 @@ test('locked by default: no browser-host offer, no proposal view, no proposal fo
   assert.equal(h.get('proposalSection').hidden, true);
   // The authorized room functions stay: host tab, invite, host-only, members, end.
   assert.equal(h.get('tabHost').hidden, false);
-  assert.equal(h.get('roomInvite').value, 'https://watch.example.test/party/UXZ83H');
+  h.get('roomCopyInvite').fire('click'); await settlePlayback();
+  assert.deepEqual(h.copiedLinks, ['https://watch.example.test/party/UXZ83H']);
 });
 
 // --- Private family beta: waiting room and stable sharing --------------------
@@ -2348,10 +2388,10 @@ test('a member joins directly into the player and new sources load independently
   h.session.handlers.room(h.session.room);
   assert.equal(h.get('roomOverview').hidden, false); assert.equal(h.get('playerWrap').hidden, false);
   assert.match(h.get('roomWaiting').textContent, /Warte auf Video vom Host/);
-  assert.equal(h.get('roomShareForm').hidden, true); assert.equal(h.get('roomOpenHost').hidden, true); assert.equal(h.get('tabHost').hidden, true);
+  assert.equal(h.get('roomShareForm').hidden, true); assert.equal(h.get('tabHost').hidden, true);
   assert.equal(h.get('roomTitle').textContent, 'Film');
-  assert.deepEqual(h.get('roomPeople').children.map(item => item.textContent), ['Host · Host', 'Gast · Du']);
-  assert.equal(h.get('roomInvite').value, 'https://watch.example.test/party/UXZ83H');
+  assert.deepEqual(h.get('memberList').children.map(item => item.children.slice(0, 2).map(child => child.textContent)),
+    [['Host', 'Host'], ['Gast', 'Du']]);
   assert.notEqual(h.get('message').style.borderColor, '#ff6969'); // No error just because nothing is shared.
   // The host shares: the member leaves the waiting room and loads the source automatically.
   h.session.receive('stream', {member_id: 'host', stream: sharedMp4()});

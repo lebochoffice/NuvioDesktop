@@ -264,6 +264,13 @@ export class PartySession {
       playback.seq = Math.max(playback.seq, previousSeq + 1);
     return this.publishLikeDesktop(room, gen, playback, check);
   }
+  async sendHostCountdown(startAt, seconds) {
+    if (!this.isHost() || !this.canControl()) throw new Error('Host-Verbindung nicht bestätigt.');
+    const result = await this.channel.send({type: 'broadcast', event: 'countdown', payload: {
+      member_id: this.room.memberId, media_key: mediaKey(this.room.info.media), start_at: startAt, seconds,
+    }});
+    if (result && result !== 'ok') throw new Error('Countdown nicht gesendet.');
+  }
   // Host decision about a member's proposal (display only for that member).
   answerProposal(memberId, accepted) {
     if (!this.isHost() || !this.channel) return Promise.resolve();

@@ -32,6 +32,8 @@ const browserHostShareEnabled = String(import.meta.env.VITE_PARTY_BROWSER_HOST_S
 const SHARE_WORKER = shareWorkerOrigin(import.meta.env.VITE_PARTY_SHARE_WORKER);
 let familyGrant = null, familyRequest = 0, familyStream = null;
 let countdownRun = 0;
+let hostCountdownBusy = false;
+let hostSyncBusy = false;
 const configProblem = publicConfigProblem(url, key);
 const client = configProblem ? null : createClient(url, key, {
   auth: {autoRefreshToken: true, persistSession: true, detectSessionInUrl: false},
@@ -91,7 +93,7 @@ const session = client ? new PartySession(client, deviceId, {
     if (session.isHost() && hostMenuRoom !== room) {
       hostMenuRoom = room;
       openDrawer('settings', $('membersButton'));
-      selectDrawerTab('Host');
+      selectDrawerTab('Party');
     } else if (!session.isHost()) hostMenuRoom = null;
   },
   connection: state => {
@@ -284,18 +286,11 @@ const session = client ? new PartySession(client, deviceId, {
   // Shared start: count down to the host's server-time start; playback itself
   // still follows the host's authoritative state (no local start here).
   countdown: payload => {
-    const run = ++countdownRun;
-    if (payload?.cancel === true) { status('Gemeinsamer Start abgebrochen.'); return; }
+    if (payload?.cancel === true) { countdownRun++; status('Gemeinsamer Start abgebrochen.'); return; }
     const startAt = Number(payload?.start_at), seconds = Number(payload?.seconds);
-    if (!Number.isFinite(startAt) || !(seconds >= 1 && seconds <= 10) || payload?.media_key !== mediaKey(session.room?.info.media)) return;
-    const tick = () => {
-      if (run !== countdownRun || !session?.room) return;
-      const left = startAt - session.now();
-      if (left <= 0) { status('Los geht’s!'); return; }
-      status(`Gemeinsamer Start in ${Math.ceil(left / 1000)} …`);
-      setTimeout(tick, Math.min(1000, Math.max(20, ((left - 1) % 1000) + 1)));
-    };
-    tick();
+    if (!Number.isFinite(startAt) || !(seconds >= 1 && seconds <= 10) ||
+        Math.abs(startAt - session.now()) > 12000 || payload?.media_key !== mediaKey(session.room?.info.media)) return;
+    showCountdown(startAt);
   },
   chat: (message, history = false) => {
     const line = document.createElement('div'), author = document.createElement('b');
@@ -443,6 +438,7 @@ function renderPartyRoom() {
   const room = session?.room, host = session?.isHost?.() === true;
   renderProposalForm();
   $('tabHost').hidden = !host;
+  $('hostSyncAll').hidden = !host;
   if (!room) {
     $('roomOverview').hidden = true;
     hostShared = null; hostMenuRoom = null; awaitingHandoff = false; proposals.length = 0;
@@ -465,19 +461,13 @@ function renderPartyRoom() {
   const newVideo = !host && selectedStream && !loadedStream && !streamProblem(selectedStream);
   $('roomWaiting').textContent = newVideo ? 'Neues Video verfügbar' : hasSource || host ? '' : 'Warte auf Video vom Host …';
   $('roomShareForm').hidden = !host;
-  $('roomOpenHost').hidden = !host;
-  $('roomPeople').replaceChildren(...room.members.map(member => {
-    const item = document.createElement('li');
-    item.textContent = (member.display_name || 'Mitglied') + (member.id === room.info.host_member_id ? ' · Host' : '') + (member.id === room.memberId ? ' · Du' : '');
-    return item;
-  }));
   const media = room.info.media || {};
   $('roomTitle').textContent = media.title || 'Party-Room';
   $('roomSubtitle').textContent = media.meta_type === 'series' && Number.isInteger(media.season) && Number.isInteger(media.episode)
     ? `Serie · Staffel ${media.season} · Episode ${media.episode}` : media.meta_type === 'movie' ? 'Film' : '';
   showImage($('roomPoster'), media.poster);
   const code = normalizeCode(room.info.code);
-  $('roomInvite').value = validCode(code) ? new URL('/party/' + code, location.origin).href : '';
+  $('roomCopyInvite').disabled = !validCode(code);
   if (!host) { $('roomProposals').hidden = true; return; }
   $('roomShareButton').textContent = hostShared ? 'Neues Video für alle freigeben' : 'Video für alle freigeben';
   $('roomStopShare').hidden = !hostShared;
@@ -506,9 +496,57 @@ function renderPartyRoom() {
   }));
 }
 $('roomCopyInvite').addEventListener('click', async () => {
-  if (!session?.room || !$('roomInvite').value) return; // The invite link is not secret.
-  try { await navigator.clipboard.writeText($('roomInvite').value); status('Einladungslink kopiert.'); }
-  catch { $('roomInvite').focus(); $('roomInvite').select?.(); status('Bitte den markierten Einladungslink kopieren.'); }
+  const code = normalizeCode(session?.room?.info.code);
+  if (!validCode(code)) return;
+  const link = new URL('/party/' + code, location.origin).href;
+  try { await navigator.clipboard.writeText(link); status('Einladungslink kopiert.'); }
+  catch { window.prompt('Einladungslink kopieren', link); }
+});
+
+function showCountdown(startAt, onEnd) {
+  const room = session.room, key = mediaKey(room?.info.media), host = room?.info.host_member_id;
+  const run = ++countdownRun;
+  const tick = () => {
+    if (run !== countdownRun || session.room !== room || !room ||
+        mediaKey(room.info.media) !== key || room.info.host_member_id !== host) { onEnd?.(false); return; }
+    const left = startAt - session.now();
+    if (left <= 0) { status('Los geht’s!'); onEnd?.(true); return; }
+    status(`Gemeinsamer Start in ${Math.ceil(left / 1000)} …`);
+    setTimeout(tick, Math.min(1000, Math.max(20, ((left - 1) % 1000) + 1)));
+  };
+  tick();
+}
+
+function hostPlayerReady() {
+  return session?.isHost() && session.canControl() && !connectionLost && !soloMode &&
+    !!hostShared && !!loadedStream && player.readyState >= 1;
+}
+async function publishHostPlayer(paused) {
+  try { await session.hostPublish({paused, positionMs: player.currentTime * 1000}); return true; }
+  catch { status('Party-Zeit konnte nicht gesendet werden.', true); return false; }
+}
+$('hostSyncAll').addEventListener('click', async () => {
+  if (!hostPlayerReady() || hostCountdownBusy || hostSyncBusy) return;
+  hostSyncBusy = true; renderPlayerUi();
+  try { if (await publishHostPlayer(player.paused)) status('Aktuelle Party-Zeit gesendet.'); }
+  finally { hostSyncBusy = false; renderPlayerUi(); }
+});
+$('hostCountdown').addEventListener('click', async () => {
+  if (!hostPlayerReady() || !syncEnabled || !player.paused || hostCountdownBusy || hostSyncBusy) return;
+  const room = session.room, channel = session.channel, source = loadedStream, key = mediaKey(room.info.media), playback = session.playback;
+  const current = () => hostPlayerReady() && syncEnabled && session.room === room && session.channel === channel &&
+    loadedStream === source && mediaKey(room.info.media) === key && player.paused && session.playback === playback;
+  hostCountdownBusy = true;
+  renderPlayerUi();
+  const done = () => { hostCountdownBusy = false; renderPlayerUi(); };
+  const startAt = session.now() + 3000;
+  try { await session.sendHostCountdown(startAt, 3); }
+  catch { status('Countdown konnte nicht gesendet werden.', true); done(); return; }
+  if (!current()) { done(); return; }
+  showCountdown(startAt, async elapsed => {
+    if (elapsed && current()) await publishHostPlayer(false);
+    done();
+  });
 });
 $('roomHostOnly').addEventListener('change', async () => {
   const input = $('roomHostOnly'), value = input.checked;
@@ -619,7 +657,6 @@ function closeDrawerToPlayer() {
   if (soloMode) { if (soloResume) loadStream(); }
   else startStream();
 }
-$('roomOpenHost').addEventListener('click', () => { openDrawer('settings', $('roomOpenHost')); selectDrawerTab('Host'); });
 $('roomShowOverview').addEventListener('click', () => selectDrawerTab('Party'));
 $('roomStopShare').addEventListener('click', async () => {
   if (!session?.isHost() || !hostShared || shareBusy) return;
@@ -667,16 +704,9 @@ $('roomEnd').addEventListener('click', async () => {
 function renderMembers(room) {
   const list = $('memberList');
   list.replaceChildren(...room.members.map(member => {
-    const item = document.createElement('li'), avatar = document.createElement('span'), name = document.createElement('span');
-    avatar.className = 'avatar'; renderAvatar(avatar, member);
-    const imageUrl = safeImageUrl(member.avatar_url);
-    if (imageUrl) {
-      const image = document.createElement('img');
-      image.alt = ''; image.referrerPolicy = 'no-referrer'; image.loading = 'lazy';
-      showImage(image, imageUrl); avatar.append(image);
-    }
+    const item = document.createElement('li'), name = document.createElement('span');
     name.className = 'name'; name.textContent = member.display_name || 'Gast';
-    item.append(avatar, name);
+    item.append(name);
     if (member.id === room.info.host_member_id) { const badge = document.createElement('span'); badge.className = 'badge'; badge.textContent = 'Host'; item.append(badge); }
     if (member.id === room.memberId) { const badge = document.createElement('span'); badge.className = 'badge'; badge.textContent = 'Du'; item.append(badge); }
     // Estimated distance to the party time (display only, never a command).
@@ -1152,6 +1182,9 @@ function formatTime(value) {
 }
 function markGesture() { mediaGestureUntil = performance.now() + 1500; }
 function renderPlayerUi() {
+  const ready = hostPlayerReady();
+  $('hostCountdown').disabled = !ready || !syncEnabled || !player.paused || hostCountdownBusy || hostSyncBusy;
+  $('hostSyncAll').disabled = !ready || hostCountdownBusy || hostSyncBusy;
   const wrap = $('playerWrap'), playing = !player.paused, duration = player.duration;
   setClass(wrap, 'is-playing', playing); setClass(wrap, 'is-paused', !playing); setClass(wrap, 'is-muted', player.muted === true);
   $('ctlPlay').setAttribute?.('aria-label', playing ? 'Pause' : 'Abspielen');

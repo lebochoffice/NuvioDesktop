@@ -159,10 +159,8 @@
             </div>
           </div>
           <div class="room-quick">
-            <button id="roomCopyInvite" type="button" class="btn small">Einladungslink kopieren</button>
-            <button id="roomOpenHost" type="button" class="btn small ghost">Host-Einstellungen</button>
+            <button id="roomCopyInvite" type="button" class="btn small invite-copy">Einladungslink kopieren</button>
           </div>
-          <ul id="roomPeople" class="room-people" aria-label="Teilnehmer"></ul>
           <p id="roomWaiting" class="room-waiting" role="status"></p>
           <form id="roomShareForm" class="room-share" autocomplete="off" novalidate>
             <label class="sr-only" for="roomShareUrl">Direkter Videolink (HLS, MP4 oder WebM über HTTPS)</label>
@@ -189,10 +187,12 @@
             </form>
           </div>
           <p id="suggestStatus" class="room-share-note" role="status"></p>
-          <label class="room-invite"><span class="sr-only">Einladungslink</span><input id="roomInvite" readonly aria-label="Einladungslink"></label>
         </article>
         <div class="party-footer">
-          <button id="drawerResync" type="button" class="btn small ghost" disabled>Mich synchronisieren</button>
+          <div class="party-sync-actions">
+            <button id="drawerResync" type="button" class="btn small ghost" disabled>Mich synchronisieren</button>
+            <button id="hostSyncAll" type="button" class="btn small ghost" hidden disabled>Alle synchronisieren</button>
+          </div>
           <button id="leaveButton" type="button" class="btn small ghost leave">Party verlassen</button>
         </div>
       </section>
@@ -220,6 +220,9 @@
         <div class="setting-row">
           <label class="setting-text" for="roomHostOnly"><span class="setting-title">Nur Host darf steuern</span><span class="setting-desc">Mitglieder folgen; eigenes Pausieren nur über „Allein schauen“</span></label>
           <span class="switch"><input id="roomHostOnly" type="checkbox" role="switch"><span class="switch-track" aria-hidden="true"></span></span>
+        </div>
+        <div class="room-actions">
+          <button id="hostCountdown" type="button" class="btn small primary" disabled>3-Sekunden-Countdown</button>
         </div>
         <h4>Mitglieder verwalten</h4>
         <ul id="roomMembers" class="room-member-list"></ul>
