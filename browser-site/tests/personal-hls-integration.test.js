@@ -2375,11 +2375,13 @@ test('a remaining guest keeps its family HLS instance and resumes sync only afte
   assert.equal(h.sync(), false);
   assert.equal(h.player.currentTime, 50);
   h.session.receive('state', {...playback, member_id: 'successor', seq: 0, position_ms: 50000});
+  assert.equal(h.sync(), false); // Playback is not proof that the offered source was committed.
+  h.session.receive('stream', {member_id: 'successor', media_key: playback.media_key, source_revision: 2, stream, handoff_ready: true});
   assert.equal(h.sync(), true);
   assert.equal(h.desktopHls(), instance);
   assert.equal(h.player.loadCount, loads);
   assert.equal(h.player.currentTime, 50);
-  assert.match(h.get('message').textContent, /Gemeinsam verbunden/);
+  assert.equal(h.run('awaitingHandoff'), false);
 });
 
 test('a member joins directly into the player and new sources load independently of the Party drawer', async () => {
@@ -2526,4 +2528,51 @@ test('chat toasts: new messages of others appear on the player, at most five, go
   assert.equal(h.get('chatLog').children.length, 9); // The full chat log under "Erweitert" keeps everything.
   h.runTimers();
   assert.equal(h.get('chatOverlay').children.length, 0);
+});
+
+test('a stalled handoff times out without restarting video and can be retried explicitly', async () => {
+  const h = await harness({autoHost: true, browserHostShare: true});
+  const room = memberRoom(), stream = sharedMp4();
+  h.session.room = room;
+  h.session.playback = {...playback, paused: false};
+  h.session.handlers.room(room);
+  h.session.handlers.stream(stream);
+  h.metadata(); await settlePlayback();
+  assert.equal(h.sync(), true);
+  const loads = h.player.loadCount;
+
+  room.info.host_member_id = 'successor';
+  h.session.playback = null;
+  h.session.handlers.stream(null, 'host_changed');
+  for (let i = 0; i < 5; i++) h.runTimers();
+  assert.match(h.get('message').textContent, /Synchronisierung nicht wiederhergestellt/);
+  assert.equal(h.sync(), false);
+  assert.equal(h.player.paused, false);
+  assert.equal(h.player.loadCount, loads);
+
+  h.session.receive('stream', {member_id: 'successor', media_key: playback.media_key, source_revision: 1, stream, handoff_ready: true});
+  h.session.receive('state', {...playback, seq: 0, member_id: 'successor'});
+  assert.equal(h.sync(), false);
+  h.get('resync').fire('click');
+  assert.equal(h.sync(), true);
+  assert.equal(h.player.loadCount, loads);
+});
+
+test('a promoted browser does not re-offer a previously committed source after media failure', async () => {
+  const h = await harness({autoHost: true, browserHostShare: true}), sent = [];
+  const room = memberRoom(), stream = sharedMp4();
+  h.session.room = room;
+  h.session.channel = {send: async message => { sent.push(message); return 'ok'; }};
+  h.session.handlers.room(room);
+  h.session.handlers.stream(stream);
+  h.metadata(); await settlePlayback();
+  h.player.error = {code: 4};
+  h.player.fire('error');
+  room.info.host_member_id = room.memberId;
+  h.session.playback = null;
+  h.session.handlers.stream(null, 'host_changed');
+  h.session.handlers.promoted({stream, playback});
+  await settlePlayback();
+  assert.ok(!sent.some(message => message.event === 'stream'));
+  assert.match(h.get('message').textContent, /gültigen Videolink/);
 });

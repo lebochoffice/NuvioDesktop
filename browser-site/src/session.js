@@ -48,6 +48,7 @@ export class PartySession {
     this.client = client; this.deviceId = deviceId; this.handlers = handlers;
     this.room = null; this.channel = null; this.playback = null; this.generation = 0;
     this.chatCursor = null; this.chatBusy = null; this.refreshBusy = null;
+    this.refreshQueued = false; this.subscriptionEpoch = 0; this.roleRetryEpoch = null;
     this.seenMessages = new Set(); this.timers = []; this.clockOffset = 0;
     this.presence = {status: 'browsing'};
     this.closing = null;
@@ -59,7 +60,9 @@ export class PartySession {
     this.hostOfferRevision = 0;
     this.receivedOfferRevision = 0;
     this.receivedBrowserOffer = null;
-    this.previousHostId = null;
+    this.offerConfirmationTimer = null;
+    this.hostPresenceTimer = null;
+    this.previousHosts = new Set();
     this.waitingForHostState = false;
     this.hostOfferDeferred = false;
     this.hostShareAction = null;
@@ -99,7 +102,7 @@ export class PartySession {
   }
   async changeHostStream(stream, startState, canShare = () => true) {
     if (!this.isHost()) throw new Error('Host-Rolle nicht vom Backend bestätigt.');
-    const room = this.room, channel = this.channel, key = mediaKey(room.info.media);
+    const room = this.room, channel = this.channel, key = mediaKey(room.info.media), epoch = this.subscriptionEpoch;
     if (!channel || this.hostOfferDeferred) throw new Error('Party-Verbindung noch nicht bestätigt.');
     if (this.hostShareAction) throw new Error('Eine Freigabe läuft bereits.');
     this.cancelSourceRecovery();
@@ -107,7 +110,7 @@ export class PartySession {
     this.hostShareAction = action;
     const current = () => this.hostShareAction === action && this.room === room && this.isHost() && mediaKey(room.info.media) === key;
     const check = () => {
-      if (!current() || this.channel !== channel || this.hostOfferDeferred)
+      if (!current() || this.channel !== channel || this.subscriptionEpoch !== epoch || this.hostOfferDeferred)
         throw Object.assign(new Error('Party-Kontext geändert.'), {code: 'closed'});
     };
     const checkShare = () => {
@@ -141,7 +144,7 @@ export class PartySession {
       catch { throw Object.assign(new Error('Die vorherige Freigabe konnte nicht erneut gesendet werden.'), {code: 'share_restore_failed'}); }
       throw Object.assign(new Error('Die vorherige Freigabe wurde wieder angekündigt.'), {code: 'share_restored'});
     } finally {
-      const replay = current() && (this.channel !== channel || action.replayRequested);
+      const replay = current() && (this.channel !== channel || this.subscriptionEpoch !== epoch || action.replayRequested);
       if (this.hostShareAction === action) this.hostShareAction = null;
       if (replay) this.announceHostOffer();
     }
@@ -316,11 +319,11 @@ export class PartySession {
   }
   async publishLikeDesktop(room, gen, playback, check = () => {}) {
     const d = this.diagnostics;
-    const channel = this.channel, key = mediaKey(room.info.media), hostId = room.info.host_member_id;
+    const channel = this.channel, key = mediaKey(room.info.media), hostId = room.info.host_member_id, epoch = this.subscriptionEpoch;
     const sent = await channel?.send({type: 'broadcast', event: 'state', payload: playback});
     check();
     if (!this.channel || (sent && sent !== 'ok')) throw Object.assign(new Error('broadcast_failed'), {code: 'broadcast_failed'});
-    if (gen !== this.generation || room !== this.room || this.channel !== channel ||
+    if (gen !== this.generation || room !== this.room || this.channel !== channel || this.subscriptionEpoch !== epoch ||
         mediaKey(room.info.media) !== key || room.info.host_member_id !== hostId)
       throw Object.assign(new Error('closed'), {code: 'closed'});
     this.acceptPlayback(playback, 'command');
@@ -328,7 +331,7 @@ export class PartySession {
     // Persist in the background like Desktop's schedulePersist: the command is
     // already distributed, so the next gesture must not wait for this RPC.
     this.persistControl(room, gen, playback, () => {
-      if (this.channel !== channel || mediaKey(room.info.media) !== key || room.info.host_member_id !== hostId)
+      if (this.channel !== channel || this.subscriptionEpoch !== epoch || mediaKey(room.info.media) !== key || room.info.host_member_id !== hostId)
         throw new Error('Party-Kontext geändert.');
     });
     return playback;
@@ -547,19 +550,38 @@ export class PartySession {
         if (gen === this.generation && this.room === room && this.channel === ch) this.receive(event, payload);
       });
     }
+    ch.on('presence', {event: 'leave'}, ({key, currentPresences}) => {
+      if (gen !== this.generation || this.room !== room || this.channel !== ch || key !== room.info.host_member_id ||
+          key === room.memberId || currentPresences?.length || this.hostPresenceTimer) return;
+      // Desktop closes its channel before calling leave. Give the backend time
+      // to record the departure. Presence itself never changes the host role.
+      this.hostPresenceTimer = setTimeout(() => {
+        this.hostPresenceTimer = null;
+        if (gen === this.generation && this.room === room && this.channel === ch && key === room.info.host_member_id)
+          this.refresh(true);
+      }, 1500);
+      this.hostPresenceTimer?.unref?.();
+    });
     ch.subscribe(async (state, error) => {
       // Callbacks of a replaced or removed channel are stale.
       if (gen !== this.generation || this.channel !== ch) return;
+      if (state === this.diagnostics.connection) return;
+      this.subscriptionEpoch++;
       this.hostOfferDeferred = true;
       this.noteConnection(state, error);
-      this.emit('connection', state);
+      if (state !== 'SUBSCRIBED') this.emit('connection', state);
       if (error) this.emit('error', new Error('Privater Realtime-Kanal nicht verbunden. Anmeldung und Netzwerk prüfen.'));
-      if (state !== 'SUBSCRIBED') { this.cancelSourceRecovery(true); this.scheduleReconnect(gen, state); return; }
+      if (state !== 'SUBSCRIBED') {
+        if (state === 'CLOSED' && this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
+        this.invalidateOfferContinuity();
+        this.cancelSourceRecovery(true);
+        this.scheduleReconnect(gen, state);
+        return;
+      }
       this.reconnectAttempts = 0;
       if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
       // The heartbeat revalidates the role before a (re)connected host replays an offer.
-      try { await Promise.all([this.sendPresence(), this.requestState(), this.refresh()]); }
-      catch (e) { this.emit('error', e); }
+      await this.refresh(true);
     });
   }
   // Status changes with fixed reason categories and timestamps; never the
@@ -593,9 +615,11 @@ export class PartySession {
     this.diagnostics.reconnects++;
     this.reconnectAttempts++;
     this.hostOfferDeferred = true;
+    this.invalidateOfferContinuity();
     this.cancelSourceRecovery(true);
     this.channel = null; // Silences the old channel's callbacks before removal.
-    this.reconnecting = (async () => {
+    let retryState = null;
+    this.reconnecting = Promise.resolve().then(async () => {
       try {
         if (old) await this.client.removeChannel(old).catch(() => {});
         const {data: {session} = {}, error} = await this.client.auth.getSession();
@@ -610,9 +634,19 @@ export class PartySession {
         if (gen !== this.generation || room !== this.room) return;
         this.attachRealtime(gen);
       } catch (e) {
-        if (gen === this.generation && room === this.room) { this.emit('error', e); this.scheduleReconnect(gen, 'CLOSED'); }
-      } finally { this.reconnecting = null; }
-    })();
+        if (gen === this.generation && room === this.room) {
+          this.noteConnection('CLOSED', e);
+          this.emit('connection', 'CLOSED');
+          this.emit('error', new Error('Realtime-Verbindung konnte nicht aufgebaut werden.'));
+          retryState = 'CLOSED';
+        }
+      } finally {
+        this.reconnecting = null;
+        const state = retryState || (this.channel && this.diagnostics.connection);
+        if (gen === this.generation && room === this.room && ['CLOSED', 'CHANNEL_ERROR', 'TIMED_OUT'].includes(state))
+          this.scheduleReconnect(gen, state);
+      }
+    });
     return this.reconnecting;
   }
   receive(event, payload) {
@@ -642,22 +676,32 @@ export class PartySession {
         if (!Number.isSafeInteger(payload.source_revision) || payload.source_revision < this.receivedOfferRevision ||
             payload.media_key !== key || (payload.stream && payload.stream.media_key !== key)) return;
         if (payload.source_revision === this.receivedOfferRevision) {
-          if (payload.handoff_ready === true && this.receivedBrowserOffer) this.receivedBrowserOffer.ready = true;
+          if (payload.handoff_ready === true && this.receivedBrowserOffer &&
+              JSON.stringify(payload.stream) === JSON.stringify(this.receivedBrowserOffer.stream)) this.confirmBrowserOffer();
           return;
         }
+        clearTimeout(this.offerConfirmationTimer);
         this.receivedOfferRevision = payload.source_revision;
         this.receivedBrowserOffer = payload.stream
           ? {stream: payload.stream, hostId: payload.member_id, ready: payload.handoff_ready === true} : null;
+        const offer = this.receivedBrowserOffer;
+        if (offer && !offer.ready) {
+          this.offerConfirmationTimer = setTimeout(() => {
+            if (this.receivedBrowserOffer === offer && !offer.ready && !this.hostOfferDeferred)
+              this.requestState().catch(() => {});
+          }, 1500);
+          this.offerConfirmationTimer?.unref?.();
+        }
       } else if (this.receivedOfferRevision) return;
       this.emit('stream', payload.stream ?? null);
     }
     if (event === 'stream_commit' && payload.member_id === this.room.info.host_member_id &&
         payload.media_key === mediaKey(this.room.info.media) && payload.source_revision === this.receivedOfferRevision &&
-        this.receivedBrowserOffer) this.receivedBrowserOffer.ready = true;
+        this.receivedBrowserOffer && !this.receivedBrowserOffer.needsReplay) this.confirmBrowserOffer();
     // Shared start announced by the host (server time); display only.
     if (event === 'countdown' && payload.member_id === this.room.info.host_member_id) this.emit('countdown', payload);
     // Database snapshots are authoritative for media, membership and host-only changes.
-    if (['media', 'control', 'member_joined'].includes(event)) this.refresh();
+    if (['media', 'control', 'member_joined'].includes(event)) this.refresh(true);
     if (event === 'chat') this.loadMessages();
     if (event === 'state_request' && payload.member_id !== this.room.memberId) {
       this.sendPresence().catch(e => this.emit('error', e));
@@ -673,7 +717,21 @@ export class PartySession {
     // The host's decision about this member's own proposal (display only).
     if (event === 'stream_suggest_result' && payload.member_id === this.room.info.host_member_id &&
         payload.target_member_id === this.room.memberId && ['accepted', 'declined'].includes(payload.status)) this.emit('proposalResult', payload.status);
-    if (event === 'ended' || event === 'member_left') this.refresh();
+    if (event === 'ended' || event === 'member_left') this.refresh(true);
+  }
+  invalidateOfferContinuity() {
+    if (!this.receivedBrowserOffer) return;
+    // A revocation could have been sent while we were disconnected.
+    this.receivedBrowserOffer.ready = false;
+    this.receivedBrowserOffer.needsReplay = true;
+  }
+  confirmBrowserOffer() {
+    const offer = this.receivedBrowserOffer;
+    if (!offer || offer.ready) return;
+    offer.ready = true;
+    offer.needsReplay = false;
+    clearTimeout(this.offerConfirmationTimer);
+    this.emit('streamConfirmed', offer.stream);
   }
   acceptPlayback(next, source = 'snapshot') {
     source = ['realtime', 'command'].includes(source) ? source : 'snapshot';
@@ -692,7 +750,7 @@ export class PartySession {
     d.lastDecision = !info ? 'no_room' : !validPlayback(next) ? 'invalid_playback'
       : next.media_key && next.media_key !== mediaKey(info.media) ? 'wrong_media'
       : this.waitingForHostState && (!info.host_member_id || next.member_id !== info.host_member_id) ? 'not_host'
-      : this.previousHostId && next.member_id === this.previousHostId && next.member_id !== info.host_member_id &&
+      : this.previousHosts.has(next.member_id) && next.member_id !== info.host_member_id &&
         (source === 'snapshot' || !this.room.members.some(member => member.id === next.member_id)) ? 'not_host'
       : info.host_only && next.member_id !== info.host_member_id ? 'not_host'
       : !isNewerPlayback(next, this.playback) ? 'not_newer' : 'accepted';
@@ -709,23 +767,45 @@ export class PartySession {
     }
     this.emit('playback', next);
   }
-  async refresh() {
+  async refresh(queue = false) {
     const room = this.room;
-    if (!room || this.refreshBusy === room) return;
-    this.refreshBusy = room;
-    const channel = this.channel;
+    if (!room) return;
+    if (this.refreshBusy) {
+      this.refreshQueued ||= queue;
+      return this.refreshBusy;
+    }
+    const pending = this.refreshBusy = (async () => {
+      try {
+        do {
+          this.refreshQueued = false;
+          if (room !== this.room) return;
+          await this.refreshOnce(room);
+        } while (this.refreshQueued);
+      } finally {
+        if (this.refreshBusy === pending) this.refreshBusy = null;
+      }
+    })();
+    return pending;
+  }
+  async refreshOnce(room) {
+    const channel = this.channel, epoch = this.subscriptionEpoch;
     try {
       const result = await this.rpc('watch_party_heartbeat', {p_party_id: room.info.id, p_device_id: this.deviceId});
-      if (room !== this.room) return;
+      if (room !== this.room || channel !== this.channel || epoch !== this.subscriptionEpoch) return;
       if (!result?.party) return await this.finish('Die Party wurde beendet.', 'ended');
+      // Promotion must be based on a snapshot taken in the active subscription.
+      if (this.hostOfferDeferred && this.diagnostics.connection !== 'SUBSCRIBED') return;
       const changed = mediaKey(room.info.media) !== mediaKey(result.party.media);
       const hostChanged = room.info.host_member_id !== result.party.host_member_id;
       const previousHostId = room.info.host_member_id;
-      const nextPlayback = result.party.playback;
-      const confirmedPlayback = validPlayback(nextPlayback) && nextPlayback.member_id === result.party.host_member_id &&
-        nextPlayback.media_key === mediaKey(result.party.media) ? nextPlayback : this.playback;
-      const inherited = hostChanged && !changed && this.receivedBrowserOffer?.ready
-        ? {stream: this.receivedBrowserOffer.stream, playback: confirmedPlayback} : null;
+      const nextPlayback = result.party.playback, key = mediaKey(result.party.media);
+      const snapshotMatches = validPlayback(nextPlayback) && nextPlayback.media_key === key;
+      const confirmedPlayback = snapshotMatches && (nextPlayback.member_id === result.party.host_member_id ||
+        (nextPlayback.member_id === previousHostId && isNewerPlayback(nextPlayback, this.playback))) ? nextPlayback : this.playback;
+      const offer = this.receivedBrowserOffer;
+      const inherited = hostChanged && !changed && offer?.ready && offer.hostId === previousHostId &&
+        offer.stream.media_key === key && validPlayback(confirmedPlayback) && confirmedPlayback.media_key === key
+        ? {stream: offer.stream, playback: confirmedPlayback} : null;
       room.info = result.party; room.members = result.members || [];
       if (this.sourceRecoveryScope && !this.sourceRecoveryMatches(this.sourceRecoveryScope)) this.cancelSourceRecovery();
       // Sequence numbers belong to a coordinator. A new host may start at 0;
@@ -734,7 +814,8 @@ export class PartySession {
       // New epoch: commands for the previous host or film never become valid.
       if (hostChanged) {
         this.hostCommands = false;
-        this.previousHostId = previousHostId || this.previousHostId;
+        if (previousHostId) this.previousHosts.add(previousHostId);
+        this.previousHosts.delete(room.info.host_member_id);
         this.waitingForHostState = true;
       }
       // A shared link belongs to its host and film; it is never carried over.
@@ -748,17 +829,35 @@ export class PartySession {
       const revalidated = this.hostOfferDeferred && channel === this.channel && this.diagnostics.connection === 'SUBSCRIBED';
       if (revalidated) this.hostOfferDeferred = false;
       this.emit('room', room); this.acceptPlayback(result.party.playback, 'snapshot');
+      if (revalidated) this.emit('connection', 'SUBSCRIBED');
       if (hostChanged && this.isHost()) this.emit('promoted', inherited);
-      if (revalidated && room === this.room && channel === this.channel) this.announceHostOffer();
+      if (revalidated) this.announceHostOffer();
       if (this.sourceRecovery && !this.sourceRecoveryCurrent(this.sourceRecovery) && !this.hostOfferDeferred) this.failSourceRecovery();
       this.requestSourceRecovery();
-      if (changed || hostChanged) { await this.sendPresence(); await this.requestState(); }
+      if (changed || hostChanged || revalidated) {
+        const report = error => {
+          if (room === this.room && channel === this.channel && epoch === this.subscriptionEpoch) this.emit('error', error);
+        };
+        // Neither optional send holds the heartbeat lock or blocks the other.
+        this.sendPresence().catch(report);
+        this.requestState().catch(report);
+      }
     } catch (e) {
-      if (room !== this.room) return;
+      if (room !== this.room || channel !== this.channel || epoch !== this.subscriptionEpoch) return;
       if (['not_member', 'removed'].includes(e.code)) await this.finish('Deine Mitgliedschaft in der Party wurde entfernt.', 'removed');
       else if (['party_ended', 'party_not_found', 'unavailable'].includes(e.code)) await this.finish('Die Party ist beendet.', 'ended');
-      else this.emit('error', e);
-    } finally { if (this.refreshBusy === room) this.refreshBusy = null; }
+      else {
+        this.emit('error', e);
+        if (this.hostOfferDeferred && this.diagnostics.connection === 'SUBSCRIBED' && this.roleRetryEpoch !== epoch) {
+          this.roleRetryEpoch = epoch;
+          const retry = setTimeout(() => {
+            if (room === this.room && channel === this.channel && epoch === this.subscriptionEpoch && this.hostOfferDeferred)
+              this.refresh(true);
+          }, 1500);
+          retry?.unref?.();
+        }
+      }
+    }
   }
   async syncClock() {
     const room = this.room, sent = Date.now();
@@ -864,15 +963,18 @@ export class PartySession {
     this.hostStream = this.hostOffer = this.hostShareAction = null;
     this.receivedOfferRevision = 0;
     this.receivedBrowserOffer = null;
+    clearTimeout(this.offerConfirmationTimer);
     this.hostSourceRevision++;
   }
   close(callLeave = true) {
     this.generation++; // Also cancel joins still awaiting authentication/RPC.
     if (this.closing) return this.closing;
     const old = this.room, ch = this.channel;
+    const notifyHostLeft = callLeave && ch && this.isHost() && this.diagnostics.connection === 'SUBSCRIBED';
+    clearTimeout(this.hostPresenceTimer); this.hostPresenceTimer = null;
     this.cancelSourceRecovery();
     this.room = null; this.channel = null; this.playback = null;
-    this.previousHostId = null;
+    this.previousHosts.clear();
     this.waitingForHostState = false;
     this.hostOfferDeferred = false;
     this.browserHostLinks = false;
@@ -884,11 +986,20 @@ export class PartySession {
     this.timers.forEach(clearInterval); this.timers = [];
     this.chatCursor = null; this.seenMessages.clear(); this.presence = {status: 'browsing'};
     this.chatBusy = this.refreshBusy = null;
+    this.refreshQueued = false;
     // Share cleanup so a concurrent close/join cannot run past channel removal.
     // Install the promise before notifying handlers, which may close again.
     this.closing = Promise.resolve().then(async () => {
+      const leave = async () => {
+        try { await this.rpc('watch_party_leave', {p_party_id: old.info.id, p_device_id: this.deviceId}); return true; }
+        catch { this.emit('error', new Error('Austritt nicht bestätigt; die Mitgliedschaft läuft serverseitig aus.')); return false; }
+      };
+      if (notifyHostLeft && await leave()) {
+        // Best effort only. Recipients verify the successor via heartbeat.
+        await ch.send({type: 'broadcast', event: 'member_left', payload: {member_id: old.memberId}}).catch(() => {});
+      }
       if (ch) await this.client.removeChannel(ch).catch(() => {});
-      if (old && callLeave) await this.rpc('watch_party_leave', {p_party_id: old.info.id, p_device_id: this.deviceId}).catch(() => this.emit('error', new Error('Austritt nicht bestätigt; die Mitgliedschaft läuft serverseitig aus.')));
+      if (old && callLeave && !notifyHostLeft) await leave();
     }).finally(() => { this.closing = null; });
     if (old || ch) this.emit('closed', this.finishReason ?? null);
     return this.closing;
