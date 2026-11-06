@@ -68,13 +68,13 @@ try {
     if (-not $partyClass) { throw 'PartyRepositoryKt missing from packaged application' }
     $reader = New-Object IO.StreamReader($partyClass.Open(), [Text.Encoding]::UTF8)
     try { $partyText = $reader.ReadToEnd() } finally { $reader.Dispose() }
-    if (-not $partyText.Contains('https://nuvio-watch-friends.pages.dev')) { throw 'Browser watch party invite origin missing from packaged application' }
+    if (-not $partyText.Contains('https://family-beta.nuvio-watch-friends.pages.dev')) { throw 'Browser watch party invite origin missing from packaged application' }
     # The origin actually used for invitations (generated PartyBrowserConfig).
     $originEntry = $zip.GetEntry('com/nuvio/app/features/party/PartyBrowserConfig.class')
     if (-not $originEntry) { throw 'PartyBrowserConfig missing from packaged application' }
     $reader = New-Object IO.StreamReader($originEntry.Open(), [Text.Encoding]::UTF8)
     try { $originText = $reader.ReadToEnd() } finally { $reader.Dispose() }
-    $previewOrigin = 'https://feature-party-premium-ui.nuvio-watch-friends.pages.dev'
+    $previewOrigin = 'https://family-beta.nuvio-watch-friends.pages.dev'
     $inviteOrigin = if ($originText.Contains($previewOrigin)) { $previewOrigin } elseif ($originText.Contains('https://nuvio-watch-friends.pages.dev')) { 'https://nuvio-watch-friends.pages.dev' } else { throw 'Unknown browser invite origin in PartyBrowserConfig' }
     if ($inviteOrigin -eq $previewOrigin -and -not $AllowPreviewOrigin) { throw 'Packaged invite origin is the feature preview; only test builds may use it (-AllowPreviewOrigin).' }
     # 0.1.39: the host sequences browser commands (command ID + ack).

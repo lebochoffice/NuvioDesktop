@@ -5,6 +5,7 @@ import {strict as assert} from 'node:assert';
 import {gate, gateConfig, createSession, safeNext, isProductionHost, COOKIE_NAME, LOGIN_PATH, LOGOUT_PATH, FAIL_LIMIT, SESSION_S} from '../functions/_middleware.js';
 
 const PREVIEW = 'https://feature-party-premium-ui.nuvio-watch-friends.pages.dev';
+const FAMILY = 'https://family-beta.nuvio-watch-friends.pages.dev';
 const HASH = 'https://3f2a9c1b.nuvio-watch-friends.pages.dev';
 const PRODUCTION = 'https://nuvio-watch-friends.pages.dev';
 const env = {PREVIEW_PASSWORD: 'test-only-password-123456', PREVIEW_COOKIE_SECRET: 'test-only-cookie-secret-0123456789abcdef'};
@@ -41,15 +42,19 @@ test('production is never gated, not even with missing or broken configuration',
 
 test('preview without (or with too short) secrets stays closed with 503', async () => {
   for (const environment of [{}, {PREVIEW_PASSWORD: env.PREVIEW_PASSWORD}, {PREVIEW_PASSWORD: 'short', PREVIEW_COOKIE_SECRET: env.PREVIEW_COOKIE_SECRET}, {PREVIEW_PASSWORD: env.PREVIEW_PASSWORD, PREVIEW_COOKIE_SECRET: 'short'}]) {
-    const {response, assetCalls} = await call(`${PREVIEW}/`, {environment});
-    assert.equal(response.status, 503); assert.equal(assetCalls(), 0);
-    assert.equal(response.headers.get('Cache-Control'), 'private, no-store');
+    for (const base of [PREVIEW, FAMILY, HASH]) {
+      for (const path of ['/', '/party/ABC234', '/assets/index-abc123.css']) {
+        const {response, assetCalls} = await call(base + path, {environment});
+        assert.equal(response.status, 503); assert.equal(assetCalls(), 0);
+        assert.equal(response.headers.get('Cache-Control'), 'private, no-store');
+      }
+    }
   }
 });
 
 test('unauthenticated visitors get the login page for HTML, assets and routes; nothing is served', async () => {
-  for (const path of ['/', '/party/ABC234', '/assets/index-abc123.js', '/index.html', '/.env']) {
-    for (const base of [PREVIEW, HASH]) {
+  for (const path of ['/', '/party/ABC234', '/assets/index-abc123.js', '/assets/index-abc123.css', '/favicon.ico', '/index.html', '/.env']) {
+    for (const base of [PREVIEW, FAMILY, HASH]) {
       const {response, assetCalls} = await call(`${base}${path}`);
       assert.equal(response.status, 401, `${base}${path}`); assert.equal(assetCalls(), 0);
       assert.equal(response.headers.get('Cache-Control'), 'private, no-store');

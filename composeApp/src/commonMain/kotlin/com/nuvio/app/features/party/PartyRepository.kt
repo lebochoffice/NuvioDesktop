@@ -978,14 +978,14 @@ fun formatPartyCode(code: String): String =
     normalizePartyCode(code).let { if (it.length == PARTY_CODE_LENGTH) "${it.take(3)} ${it.drop(3)}" else it }
 
 /** Browser watch party of this fork (Cloudflare Pages). Opens /party/<CODE>. */
-const val WATCH_PARTY_BROWSER_ORIGIN = "https://nuvio-watch-friends.pages.dev"
+const val WATCH_PARTY_BROWSER_ORIGIN = "https://family-beta.nuvio-watch-friends.pages.dev"
 
-/** The feature preview; only selectable at build time (see build.gradle.kts). */
-const val WATCH_PARTY_BROWSER_PREVIEW_ORIGIN = "https://feature-party-premium-ui.nuvio-watch-friends.pages.dev"
+/** Production remains available through the explicit Gradle override. */
+private const val WATCH_PARTY_BROWSER_PRODUCTION_ORIGIN = "https://nuvio-watch-friends.pages.dev"
 
-/** Origin of this build: production unless a test build chose the preview. */
+/** Origin of this build: family preview unless production was selected. */
 val watchPartyBrowserOrigin: String
-    get() = PartyBrowserConfig.ORIGIN.takeIf { it == WATCH_PARTY_BROWSER_PREVIEW_ORIGIN } ?: WATCH_PARTY_BROWSER_ORIGIN
+    get() = PartyBrowserConfig.ORIGIN.takeIf { it == WATCH_PARTY_BROWSER_PRODUCTION_ORIGIN } ?: WATCH_PARTY_BROWSER_ORIGIN
 
 // "Watch in Nuvio": the original upstream invite (opens the Nuvio app).
 // "Watch in Browser" builds its own link from watchPartyBrowserOrigin.

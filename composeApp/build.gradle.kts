@@ -165,7 +165,7 @@ abstract class GenerateRuntimeConfigsTask : DefaultTask() {
         }
 
         // Browser watch party origin for invitation links; validated at
-        // configuration time (production by default, the preview only on request).
+        // configuration time (family preview by default for this fork).
         outDir.resolve("com/nuvio/app/features/party").apply {
             mkdirs()
             resolve("PartyBrowserConfig.kt").writeText(
@@ -578,14 +578,13 @@ fun runtimeConfigBoolean(key: String, default: Boolean): Boolean =
     }
 
 // Invitation links of the browser watch party. Only these two exact origins
-// are accepted: production (default) and the feature preview for test builds
-// (-Pnuvio.party.browserOrigin=preview or the full preview URL). Anything else
-// fails the build; official releases never pass the property.
+// are accepted: the family preview (default) and explicit production.
+// Both accept their alias or their full URL. Anything else fails the build.
 val partyBrowserProductionOrigin = "https://nuvio-watch-friends.pages.dev"
-val partyBrowserPreviewOrigin = "https://feature-party-premium-ui.nuvio-watch-friends.pages.dev"
+val partyBrowserPreviewOrigin = "https://family-beta.nuvio-watch-friends.pages.dev"
 val partyBrowserOriginValue: String = when (val requested = providers.gradleProperty("nuvio.party.browserOrigin").orNull?.trim()?.trimEnd('/')) {
-    null, "", "production", partyBrowserProductionOrigin -> partyBrowserProductionOrigin
-    "preview", partyBrowserPreviewOrigin -> partyBrowserPreviewOrigin
+    "production", partyBrowserProductionOrigin -> partyBrowserProductionOrigin
+    null, "", "preview", partyBrowserPreviewOrigin -> partyBrowserPreviewOrigin
     else -> throw GradleException("nuvio.party.browserOrigin must be 'production', 'preview', $partyBrowserProductionOrigin or $partyBrowserPreviewOrigin (got '$requested').")
 }
 

@@ -501,12 +501,11 @@ const buildPartySwitch = (key, title, description, checked, eventType) => {
 // NUVIO_BROWSER_PARTY_BRIDGE_V1: Link to the independently hosted browser guest.
 // v2 key: values stored by older builds (e.g. preview URLs) are ignored.
 const partyBrowserProductionHost = "https://nuvio-watch-friends.pages.dev";
-const partyBrowserAllowedPreviewHost = "https://feature-party-premium-ui.nuvio-watch-friends.pages.dev";
-// The build decides the default (production, or the preview in a test build);
-// any other value from the app is ignored.
-let partyBrowserDefaultHost = partyBrowserProductionHost;
+const partyBrowserAllowedPreviewHost = "https://family-beta.nuvio-watch-friends.pages.dev";
+// The family preview is the default; production requires explicit configuration.
+let partyBrowserDefaultHost = partyBrowserAllowedPreviewHost;
 const setPartyBrowserDefaultHost = origin => {
-  partyBrowserDefaultHost = origin === partyBrowserAllowedPreviewHost ? partyBrowserAllowedPreviewHost : partyBrowserProductionHost;
+  partyBrowserDefaultHost = origin === partyBrowserProductionHost ? partyBrowserProductionHost : partyBrowserAllowedPreviewHost;
 };
 const partyBrowserHostStorage = "nuvio-browser-party-host-v2";
 // Cloudflare preview deployments (<hash>.<project>.pages.dev) are never
@@ -550,7 +549,7 @@ const buildPartyBrowserShare = party => {
     try { window.localStorage.setItem(partyBrowserHostStorage, address.value.trim()); } catch { /* session only */ }
   });
   const inviteUrl = () => {
-    const raw = address.value.trim();
+    const raw = address.hidden ? partyBrowserDefaultHost : address.value.trim();
     let parsed;
     try {
       parsed = new URL(raw);
@@ -565,7 +564,7 @@ const buildPartyBrowserShare = party => {
       return;
     }
     const invite = `${parsed.origin}/party/${encodeURIComponent(code)}`;
-    try { window.localStorage.setItem(partyBrowserHostStorage, parsed.origin); } catch { /* session only */ }
+    try { if (!address.hidden) window.localStorage.setItem(partyBrowserHostStorage, parsed.origin); } catch { /* session only */ }
     return invite;
   };
   const onClick = () => {

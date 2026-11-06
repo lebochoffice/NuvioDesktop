@@ -10,8 +10,8 @@ class PartyInviteLinkTest {
     }
 
     @Test
-    fun theBrowserOriginIsProductionByDefault() {
-        assertEquals(WATCH_PARTY_BROWSER_ORIGIN, watchPartyBrowserOrigin) // Tests are built without the preview property.
+    fun theBrowserOriginIsFamilyBetaByDefault() {
+        assertEquals("https://family-beta.nuvio-watch-friends.pages.dev", watchPartyBrowserOrigin) // Run without an origin override.
     }
 
     @Test

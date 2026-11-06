@@ -47,7 +47,7 @@ test('host approval carries the exact proposal ID and the card uses the source h
   assert.deepEqual(f.events, [{type: 'partyHlsSuggestionAccept', value: 42}, {type: 'partyHlsSuggestionReject', value: 42}]);
 });
 test('host browser invite copies exactly the current code without granting stream consent', {skip: !source && 'Separate browser repository: desktop source unavailable'}, () => {
-  const f = setup({code:'UXZ83H', sharing:false});
+  const f = setup({code:'UXZ83H', sharing:false, browserOrigin: 'https://nuvio-watch-friends.pages.dev'});
   f.input.value = 'https://MEINE-SEITE.pages.dev/'; f.button.click();
   assert.equal(f.events.length, 1); assert.equal(f.confirmations.length, 0);
   assert.equal(f.events[0].value, 0);
@@ -57,8 +57,9 @@ test('host browser invite copies exactly the current code without granting strea
 
 test('the existing sharing switch requires confirmation, while copying the default invite does not grant it', {skip: !source && 'Separate browser repository: desktop source unavailable'}, () => {
   const f = setup({code: 'UXZ83H', sharing: false});
-  assert.equal(f.input.value, 'https://nuvio-watch-friends.pages.dev');
+  assert.equal(f.input.value, 'https://family-beta.nuvio-watch-friends.pages.dev');
   f.button.click(); assert.equal(f.events[0].value, 0);
+  assert.equal(decode(f), 'https://family-beta.nuvio-watch-friends.pages.dev/party/UXZ83H');
   const toggle = f.sharingSwitch(); toggle.click();
   assert.equal(f.events.length, 1); assert.equal(f.confirmations.length, 1);
   assert.equal(toggle.getAttribute('aria-checked'), 'false');
@@ -105,23 +106,23 @@ test('invalid codes cannot copy an invite and the native handler has no invite-t
   assert.ok(!inviteBranch.includes('setSharing('));
 });
 test('existing sharing copies without toggling it, invalid addresses never prompt or enable sharing', {skip: !source && 'Separate browser repository: desktop source unavailable'}, () => {
-  const f = setup({code:'UXZ83H', sharing:true});
+  const f = setup({code:'UXZ83H', sharing:true, browserOrigin: 'https://nuvio-watch-friends.pages.dev'});
   f.input.value = 'https://my-site.pages.dev'; f.button.click();
   assert.equal(f.events[0].value, 0); assert.equal(f.confirmations.length, 0);
   for (const address of ['http://my-site.pages.dev', 'https://user:secret@site.example', 'https://@site.example', 'https://site.example/path', 'https://site.example/?key=secret', 'https://site.example/#token', 'https://site.example/?', 'https://site.example/#', 'https://site.example/a/../', 'https://site.example/\\evil', 'https://site.example/\n']) {
-    const bad = setup({code:'UXZ83H', sharing:false}); bad.input.value = address; bad.button.click();
+    const bad = setup({code:'UXZ83H', sharing:false, browserOrigin: 'https://nuvio-watch-friends.pages.dev'}); bad.input.value = address; bad.button.click();
     assert.equal(bad.events.length, 0, address); assert.equal(bad.confirmations.length, 0, address);
   }
 });
 
 test('0.1.37: old stored hosts and Cloudflare preview URLs never become invitation targets', {skip: !source && 'Separate browser repository: desktop source unavailable'}, () => {
-  const old = setup({code: 'UXZ83H', sharing: false}, {'nuvio-browser-party-host': 'https://abc123.old-preview.pages.dev'});
+  const old = setup({code: 'UXZ83H', sharing: false, browserOrigin: 'https://nuvio-watch-friends.pages.dev'}, {'nuvio-browser-party-host': 'https://abc123.old-preview.pages.dev'});
   assert.equal(old.input.value, 'https://nuvio-watch-friends.pages.dev'); // v1 key ignored.
-  const preview = setup({code: 'UXZ83H', sharing: false}, {'nuvio-browser-party-host-v2': 'https://f00d.nuvio-watch-friends.pages.dev'});
+  const preview = setup({code: 'UXZ83H', sharing: false, browserOrigin: 'https://nuvio-watch-friends.pages.dev'}, {'nuvio-browser-party-host-v2': 'https://f00d.nuvio-watch-friends.pages.dev'});
   assert.equal(preview.input.value, 'https://nuvio-watch-friends.pages.dev');
   preview.button.click();
   assert.equal(Buffer.from(preview.events[0].type.split(':')[1], 'base64url').toString(), 'https://nuvio-watch-friends.pages.dev/party/UXZ83H');
-  const typed = setup({code: 'UXZ83H', sharing: false});
+  const typed = setup({code: 'UXZ83H', sharing: false, browserOrigin: 'https://nuvio-watch-friends.pages.dev'});
   typed.input.value = 'https://f00d.nuvio-watch-friends.pages.dev'; typed.button.click();
   assert.equal(typed.events.length, 0); // Preview hosts are rejected.
 });
@@ -133,20 +134,22 @@ test('production build: "Watch in Browser" defaults to production and rejects th
   const f = setup({code: 'UXZ83H', sharing: false, browserOrigin: 'https://nuvio-watch-friends.pages.dev'});
   assert.equal(f.input.value, 'https://nuvio-watch-friends.pages.dev');
   f.button.click(); assert.equal(decode(f), 'https://nuvio-watch-friends.pages.dev/party/UXZ83H');
-  f.input.value = 'https://feature-party-premium-ui.nuvio-watch-friends.pages.dev'; f.button.click();
+  f.input.value = 'https://family-beta.nuvio-watch-friends.pages.dev'; f.button.click();
   assert.equal(f.events.length, 1); // Preview host refused in a production build.
 });
 test('preview test build: the invite uses exactly the configured preview, even over a stored production host', {skip: !source && 'Separate browser repository: desktop source unavailable'}, () => {
-  const f = setup({code: 'UXZ83H', sharing: false, browserOrigin: 'https://feature-party-premium-ui.nuvio-watch-friends.pages.dev'},
-    {'nuvio-browser-party-host-v2': 'https://nuvio-watch-friends.pages.dev'});
-  assert.equal(f.input.value, 'https://feature-party-premium-ui.nuvio-watch-friends.pages.dev');
-  f.button.click(); assert.equal(decode(f), 'https://feature-party-premium-ui.nuvio-watch-friends.pages.dev/party/UXZ83H');
+  const party = {code: 'UXZ83H', sharing: false, browserOrigin: 'https://family-beta.nuvio-watch-friends.pages.dev'};
+  const f = setup(party, {'nuvio-browser-party-host-v2': 'https://nuvio-watch-friends.pages.dev'});
+  assert.equal(f.input.value, 'https://family-beta.nuvio-watch-friends.pages.dev');
+  f.button.click(); assert.equal(decode(f), 'https://family-beta.nuvio-watch-friends.pages.dev/party/UXZ83H');
+  party.code = 'ABC234';
   f.input.value = 'https://abc123.nuvio-watch-friends.pages.dev'; f.button.click();
-  assert.equal(f.events.length, 1); // Other preview hosts stay refused.
+  assert.equal(f.events.length, 2);
+  assert.equal(decode(f), 'https://family-beta.nuvio-watch-friends.pages.dev/party/ABC234'); // A hidden address cannot override the alias.
 });
-test('an unexpected origin from the app falls back to production', {skip: !source && 'Separate browser repository: desktop source unavailable'}, () => {
+test('an unexpected origin from the app falls back to the family beta', {skip: !source && 'Separate browser repository: desktop source unavailable'}, () => {
   const f = setup({code: 'UXZ83H', sharing: false, browserOrigin: 'https://evil.example'});
-  assert.equal(f.input.value, 'https://nuvio-watch-friends.pages.dev');
+  assert.equal(f.input.value, 'https://family-beta.nuvio-watch-friends.pages.dev');
 });
 
 test('"Watch in Nuvio" copies the original Nuvio invite; "Watch in Browser" stays the last button', {skip: !source && 'Separate browser repository: desktop source unavailable'}, () => {
