@@ -791,7 +791,10 @@ test('a guest can neither publish as host nor share a link; only the host answer
   await assert.rejects(g.session.shareHostStream(hostLinkStream), /Host-Rolle/);
   const f = await hostFixture(t);
   await f.session.shareHostStream(hostLinkStream);
-  assert.deepEqual(f.messages.filter(m => m.event === 'stream').at(-1).payload, {member_id: 'host', stream: hostLinkStream});
+  const first = f.messages.filter(m => m.event === 'stream').at(-1).payload;
+  assert.equal(first.member_id, 'host');
+  assert.equal(first.media_key, hostLinkStream.media_key);
+  assert.equal(first.stream, hostLinkStream);
   await f.session.hostPublish({paused: false, positionMs: 5000});
   const before = f.messages.length;
   f.emit('state_request', {member_id: 'guest'}); // Late joiner or reconnect.
@@ -800,18 +803,23 @@ test('a guest can neither publish as host nor share a link; only the host answer
   assert.ok(answers.some(m => m.event === 'stream' && m.payload.stream === hostLinkStream));
   assert.ok(answers.some(m => m.event === 'state' && m.payload.position_ms === 5000));
   await f.session.stopHostStream();
-  assert.deepEqual(f.messages.filter(m => m.event === 'stream').at(-1).payload, {member_id: 'host', stream: null});
+  const revoked = f.messages.filter(m => m.event === 'stream').at(-1).payload;
+  assert.equal(revoked.member_id, first.member_id);
+  assert.equal(revoked.media_key, first.media_key);
+  assert.ok(revoked.source_revision > first.source_revision);
+  assert.equal(revoked.stream, null);
 });
 
 test('proposals reach only the host; decisions reach only the proposing member', async t => {
   const proposals = [], f = await hostFixture(t, {proposal: p => proposals.push(p)});
-  f.emit('stream_suggest', {member_id: 'guest', media_key: 'movie|tt1||', url: 'https://cdn.example.test/a.mp4'});
+  f.session.browserHostLinksEnabled = true;
+  f.emit('browser_stream_suggest', {member_id: 'guest', target_member_id: 'host', media_key: 'movie|tt1||', url: 'https://cdn.example.test/a.mp4'});
   assert.equal(proposals.length, 1);
   await f.session.answerProposal('guest', false);
   assert.deepEqual(f.messages.at(-1).payload, {member_id: 'host', target_member_id: 'guest', status: 'declined'});
   const results = [], g = fixture({proposal: p => proposals.push(p), proposalResult: r => results.push(r)}); t.after(() => g.session.close());
   await g.session.join('UXZ83H', 'Guest'); await g.connect();
-  g.emit('stream_suggest', {member_id: 'guest', media_key: 'movie|tt1||', url: 'https://cdn.example.test/a.mp4'});
+  g.emit('browser_stream_suggest', {member_id: 'guest', target_member_id: 'host', media_key: 'movie|tt1||', url: 'https://cdn.example.test/a.mp4'});
   assert.equal(proposals.length, 1); // A guest never receives proposals.
   g.emit('stream_suggest_result', {member_id: 'intruder', target_member_id: 'guest', status: 'accepted'}); // Not the host.
   g.emit('stream_suggest_result', {member_id: 'host', target_member_id: 'other', status: 'accepted'});
@@ -852,4 +860,196 @@ test('reconnect: a sharing host announces its offer and party time again once su
   const again = f.messages.slice(before);
   assert.ok(again.some(m => m.event === 'stream' && m.payload.stream === hostLinkStream));
   assert.ok(again.some(m => m.event === 'state' && m.payload.position_ms === 7000));
+});
+
+test('late completion after leaving cannot restore a pending offer, and revoke is serialized', async t => {
+  const f = await hostFixture(t);
+  let complete;
+  f.ch.send = () => new Promise(resolve => { complete = resolve; });
+  const sharing = f.session.shareHostStream(hostLinkStream);
+  const rejected = assert.rejects(sharing, {code: 'closed'});
+  await assert.rejects(f.session.stopHostStream(), /läuft bereits/);
+  await f.session.close();
+  complete('ok');
+  await rejected;
+  assert.equal(f.session.hostStream, null);
+  assert.equal(f.session.hostOffer, null);
+});
+
+test('a missed revocation is replayed and a delayed older offer cannot restore the source', async t => {
+  const f = await hostFixture(t);
+  const received = [], g = fixture({stream: value => received.push(value)});
+  t.after(() => g.session.close());
+  await g.session.join('UXZ83H', 'Guest'); await g.connect();
+  await f.session.shareHostStream(hostLinkStream);
+  const old = f.messages.filter(message => message.event === 'stream').at(-1).payload;
+  g.emit('stream', old);
+  await f.session.stopHostStream(); // Guest misses the initial tombstone.
+  f.emit('state_request', {member_id: 'guest'});
+  const replay = f.messages.filter(message => message.event === 'stream').at(-1).payload;
+  assert.equal(replay.stream, null);
+  assert.ok(replay.source_revision > old.source_revision);
+  g.emit('stream', replay);
+  g.emit('stream', old);
+  assert.deepEqual(received, [hostLinkStream, null]);
+});
+
+test('a failed start and failed rollback never replay the uncommitted source', async t => {
+  const f = await hostFixture(t);
+  await f.session.shareHostStream(hostLinkStream);
+  const candidate = {...hostLinkStream, url: 'https://cdn.example.test/other.mp4'};
+  const send = f.ch.send;
+  f.ch.send = async message => message.event === 'stream' && message.payload.stream === candidate ? send(message) : 'error';
+  await assert.rejects(f.session.shareHostStream(candidate, {paused: true, positionMs: 0}), {code: 'share_restore_failed'});
+  assert.equal(f.session.hostStream, hostLinkStream);
+  f.ch.send = send;
+  f.emit('state_request', {member_id: 'guest'});
+  assert.equal(f.messages.filter(message => message.event === 'stream').at(-1).payload.stream, hostLinkStream);
+});
+
+test('a heartbeat can promote a browser in the same room and hand it a confirmed source and last playback', async t => {
+  const promoted = [], f = fixture({promoted: value => promoted.push(value)});
+  t.after(() => f.session.close());
+  await f.session.join('UXZ83H', 'Guest'); await f.connect();
+  const room = f.session.room;
+  f.emit('stream', {member_id: 'host', media_key: hostLinkStream.media_key, source_revision: 1, stream: hostLinkStream});
+  f.emit('stream_commit', {member_id: 'host', media_key: hostLinkStream.media_key, source_revision: 1});
+  assert.equal(f.session.isHost(), false);
+  const next = snapshot();
+  next.party.host_member_id = 'guest'; next.party.playback = null;
+  next.members = next.members.filter(member => member.id === 'guest');
+  f.client.rpc = async () => ({data: next});
+  await f.session.refresh();
+  assert.equal(f.session.room, room);
+  assert.equal(room.info.code, 'UXZ83H');
+  assert.equal(f.session.isHost(), true);
+  assert.deepEqual(promoted, [{stream: hostLinkStream, playback}]);
+  f.emit('state', {...playback, seq: 999});
+  assert.equal(f.session.playback, null);
+});
+
+test('an uncommitted or revoked offer cannot be inherited on promotion', async t => {
+  for (const revoked of [false, true]) {
+    const promoted = [], f = fixture({promoted: value => promoted.push(value)});
+    t.after(() => f.session.close());
+    await f.session.join('UXZ83H', 'Guest'); await f.connect();
+    f.emit('stream', {member_id: 'host', media_key: hostLinkStream.media_key, source_revision: 1, stream: hostLinkStream});
+    if (revoked) {
+      f.emit('stream_commit', {member_id: 'host', media_key: hostLinkStream.media_key, source_revision: 1});
+      f.emit('stream', {member_id: 'host', media_key: hostLinkStream.media_key, source_revision: 2, stream: null});
+    }
+    const next = snapshot();
+    next.party.host_member_id = 'guest';
+    f.client.rpc = async () => ({data: next});
+    await f.session.refresh();
+    assert.deepEqual(promoted, [null]);
+  }
+});
+
+test('a host change rejects the old heartbeat playback even when guest control is allowed', async t => {
+  const f = fixture(); t.after(() => f.session.close());
+  await f.session.join('UXZ83H', 'Guest'); await f.connect();
+  const replacement = snapshot();
+  replacement.party.host_member_id = 'new-host';
+  replacement.party.host_only = false;
+  replacement.members = [{id: 'new-host'}, {id: 'guest'}];
+  f.client.rpc = async () => ({data: replacement});
+  await f.session.refresh();
+  assert.equal(f.session.playback, null);
+  assert.equal(f.session.canControl(), false);
+  f.emit('state', {...playback, seq: 500});
+  assert.equal(f.session.playback, null);
+  f.emit('state', {...playback, member_id: 'new-host', seq: 0, position_ms: 5020000});
+  assert.equal(f.session.playback.position_ms, 5020000);
+  assert.equal(f.session.canControl(), true);
+  await f.session.refresh();
+  assert.equal(f.session.playback.member_id, 'new-host');
+});
+
+test('a reconnected former host checks the heartbeat before reannouncing its source', async t => {
+  const f = await hostFixture(t);
+  await f.session.shareHostStream(hostLinkStream);
+  let resolveHeartbeat;
+  f.client.rpc = name => name === 'watch_party_heartbeat' ? new Promise(resolve => { resolveHeartbeat = resolve; }) : Promise.resolve({data: {}});
+  const before = f.messages.length, reconnecting = f.connect();
+  f.emit('state_request', {member_id: 'guest'});
+  assert.equal(f.messages.slice(before).some(message => message.event === 'stream'), false);
+  const replacement = snapshot();
+  replacement.party.host_member_id = 'guest';
+  replacement.member_id = 'host';
+  resolveHeartbeat({data: replacement});
+  await reconnecting;
+  assert.equal(f.session.isHost(), false);
+  assert.equal(f.messages.slice(before).some(message => message.event === 'stream'), false);
+});
+
+test('host recovery uses the committed guest copy and reannounces its original revision without writing playback', async t => {
+  const candidates = [], f = await hostFixture(t, {sourceRecoveryCandidate: value => candidates.push(value)});
+  const g = fixture(); t.after(() => g.session.close(false));
+  f.session.browserHostLinksEnabled = g.session.browserHostLinksEnabled = true;
+  await g.session.join('UXZ83H', 'Guest'); await g.connect();
+  const revision = 500;
+  g.emit('stream', {member_id: 'host', media_key: hostLinkStream.media_key, source_revision: revision, stream: hostLinkStream, handoff_ready: true});
+  const state = f.session.playback;
+  f.session.armSourceRecovery();
+  const request = f.messages.find(message => message.event === 'browser_source_request').payload;
+  g.emit('browser_source_request', request);
+  const reply = g.messages.find(message => message.event === 'browser_source_reply').payload;
+  f.emit('browser_source_reply', reply);
+  assert.equal(candidates.length, 1);
+  assert.equal(f.session.hostStream, null);
+  assert.equal(f.session.completeSourceRecovery(candidates[0]), true);
+  assert.equal(f.session.playback, state);
+  assert.equal(f.session.hostOffer.source_revision, revision);
+  assert.ok(!f.calls.some(([name]) => name === 'watch_party_update'));
+  f.emit('browser_source_reply', reply);
+  assert.equal(candidates.length, 1);
+});
+
+test('recovery fails closed on a conflicting or revoked revision regardless of response order', async t => {
+  for (const reversed of [false, true]) {
+    const candidates = [], failures = [];
+    const f = await hostFixture(t, {sourceRecoveryCandidate: value => candidates.push(value), sourceRecoveryUnavailable: () => failures.push(true)});
+    f.session.browserHostLinksEnabled = true;
+    f.session.room.members.push({id: 'other'});
+    f.session.armSourceRecovery();
+    const request = f.messages.find(message => message.event === 'browser_source_request').payload;
+    const reports = [{member_id: 'guest', source_revision: 1, stream: hostLinkStream},
+      {member_id: 'other', source_revision: 2, stream: null}];
+    for (const report of reversed ? reports.reverse() : reports) f.emit('browser_source_reply', {...request, ...report});
+    assert.deepEqual(candidates, []);
+    assert.equal(failures.length, 1);
+    assert.equal(f.session.hostStream, null);
+  }
+});
+
+test('only the current host can request recovery and replies from a replaced connection are ignored', async t => {
+  const candidates = [], f = await hostFixture(t, {sourceRecoveryCandidate: value => candidates.push(value)});
+  f.session.browserHostLinksEnabled = true;
+  f.session.armSourceRecovery();
+  const first = f.messages.find(message => message.event === 'browser_source_request').payload;
+  await f.session.reconnect();
+  await f.connect();
+  const last = f.messages.filter(message => message.event === 'browser_source_request').at(-1).payload;
+  assert.notEqual(first.request_id, last.request_id);
+  f.emit('browser_source_reply', {...first, member_id: 'guest', source_revision: 1, stream: hostLinkStream});
+  assert.deepEqual(candidates, []);
+  f.session.room.info.host_member_id = 'guest';
+  f.emit('browser_source_reply', {...last, member_id: 'guest', source_revision: 1, stream: hostLinkStream});
+  assert.deepEqual(candidates, []);
+});
+
+test('a host alone asks for manual sharing, and a rejoined guest never sends a recovery request', async t => {
+  let failures = 0;
+  const f = await hostFixture(t, {sourceRecoveryUnavailable: () => { failures++; }});
+  f.session.browserHostLinksEnabled = true;
+  f.session.room.members = [{id: 'host'}];
+  f.session.armSourceRecovery();
+  assert.equal(failures, 1);
+  assert.ok(!f.messages.some(message => message.event === 'browser_source_request'));
+  const g = fixture(); t.after(() => g.session.close(false));
+  g.session.browserHostLinksEnabled = true;
+  await g.session.join('UXZ83H', 'Guest'); await g.connect();
+  g.session.armSourceRecovery();
+  assert.ok(!g.messages.some(message => message.event === 'browser_source_request'));
 });

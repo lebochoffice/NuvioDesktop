@@ -1065,10 +1065,11 @@ internal fun MainAppContent(
         }
 
         fun openPartyMedia(media: PartyMedia) {
-            if (navController.currentRoute is PlayerRoute) navController.popBackStack()
             val resumePositionMs = PartyRepository.playback.value
-                ?.takeIf { it.mediaKey == null || it.mediaKey == media.key }
+                ?.takeIf { PartyRepository.state.value.party?.media?.key == media.key &&
+                    (it.mediaKey == null || it.mediaKey == media.key) }
                 ?.let { PartySync.expectedPositionMs(it, PartyRepository.nowMs()) }
+            if (navController.currentRoute is PlayerRoute) navController.popBackStack()
             launchPlaybackWithDownloadPreference(
                 type = media.type,
                 videoId = media.videoId ?: media.metaId,

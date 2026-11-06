@@ -30,6 +30,7 @@ class Element {
   replaceChildren(...children) { this.children = children; }
 }
 class FakeHls {
+  static DefaultConfig = {loader: class XhrLoader {}};
   static Events = {LEVEL_LOADED: 'level', ERROR: 'error', MANIFEST_PARSED: 'manifest', FRAG_LOADED: 'frag', LEVEL_SWITCHED: 'switched', SUBTITLE_TRACKS_UPDATED: 'subtitles'};
   static isSupported() { return true; }
   constructor(config) { this.config = config; this.listeners = new Map(); }
@@ -49,6 +50,7 @@ async function harness({debug = false, guestControl = false, guestJoin = false, 
   let clock = 0, tick = () => {};
   const get = id => { if (!elements.has(id)) elements.set(id, new Element()); return elements.get(id); };
   const player = get('player');
+  get('preview').textContent = ''; // The HTML starts with an empty preview paragraph.
   get('resync').disabled = true; // Mirrors the initial HTML attribute.
   get('subtitleMenu').hidden = true; get('infoDrawer').hidden = true; // Initially hidden in the HTML.
   Object.assign(player, {paused: true, currentTime: 0, readyState: 0, duration: NaN, currentSrc: '', loadCount: 0,
@@ -69,7 +71,7 @@ async function harness({debug = false, guestControl = false, guestJoin = false, 
   }
   const anonymousSignIns = [], logins = [];
   let authSession = rpc?.session ?? null;
-  const client = {auth: {onAuthStateChange() {}, getSession: async () => ({data: {session: authSession}}),
+  const client = {removeChannel: async () => {}, auth: {onAuthStateChange() {}, getSession: async () => ({data: {session: authSession}}),
     signInWithPassword: async ({email, password}) => {
       logins.push({email, hasPassword: !!password});
       if (rpc?.loginError) return {data: {user: null, session: null}, error: {message: 'Invalid login credentials'}};
@@ -90,7 +92,7 @@ async function harness({debug = false, guestControl = false, guestJoin = false, 
     },
     env: {VITE_SUPABASE_URL: 'https://backend.example.test', VITE_SUPABASE_ANON_KEY: 'sb_publishable_TEST', ...(guestControl === true ? {VITE_PARTY_GUEST_CONTROL: '1'} : typeof guestControl === 'string' ? {VITE_PARTY_GUEST_CONTROL: guestControl} : {}), ...(guestJoin ? {VITE_PARTY_GUEST_JOIN: '1'} : {}), ...(share ? {VITE_PARTY_SHARE_WORKER: 'https://share.example.test'} : {}), ...(browserHostShare ? {VITE_PARTY_BROWSER_HOST_SHARE: '1'} : {})},
     document: {getElementById: get, createElement: () => new Element()}, location, history: {replaceState: (_state, _title, url) => { historyCalls.push(url); location.pathname = url; }},
-    window: {addEventListener: (event, callback) => windowEvents.set(event, callback)},
+    window: {confirm: () => true, addEventListener: (event, callback) => windowEvents.set(event, callback)},
     navigator: {mediaSession: {setActionHandler: (action, handler) => mediaActions.set(action, handler)}},
     resolveRoomMedia: (type, id, season, episode) => resolveRoomMedia(type, id, season, episode,
       async () => ({ok: true, json: async () => ({meta: catalog})})),
@@ -147,7 +149,8 @@ test('the premium creation action uses verified media and opens the confirmed ho
   assert.equal(requests[0].media.meta_id, 'tt1234567');
   assert.equal(requests[0].name, 'Host');
   assert.equal(h.get('roomOverview').hidden, false);
-  assert.equal(h.get('playerWrap').hidden, true);
+  assert.equal(h.get('playerWrap').hidden, false);
+  assert.equal(h.get('infoDrawer').hidden, false);
   assert.equal(h.get('roomInvite').value, 'https://watch.example.test/party/UXZ83H');
   assert.equal(h.historyCalls.at(-1), '/party/UXZ83H');
   await h.session.close();
@@ -991,12 +994,12 @@ test('page markup: no banner headline, no hint bar, no permanent side column; co
 });
 
 test('the party code is read from the link; without one the plain join form appears without an error', async () => {
-  const linked = await harness({path: '/party/uxz-83h'});
+  const linked = await harness({path: '/party/uxz-83h', fakeJoin: true});
   assert.equal(linked.get('partyCode').value, 'UXZ83H'); assert.equal(linked.get('codeFallback').hidden, true);
-  const bare = await harness(); await settlePlayback();
+  const bare = await harness({fakeJoin: true}); await settlePlayback();
   assert.equal(bare.get('codeFallback').hidden, false);
   assert.equal(bare.get('preview').textContent, ''); // Home page: no red notice.
-  const broken = await harness({path: '/party/abc'}); await settlePlayback();
+  const broken = await harness({path: '/party/abc', fakeJoin: true}); await settlePlayback();
   assert.match(broken.get('preview').textContent, /keinen gültigen Party-Code/); // Only a broken invitation link.
   bare.session.room = null; bare.session.join = async () => assert.fail('no join without a valid code');
   bare.get('joinForm').fire('submit'); await settlePlayback();
@@ -1720,7 +1723,7 @@ test('host change keeps a loaded host source locally; an explicit revocation sti
   h.session.handlers.stream({media_key: 'movie|tt1||', url: 'https://stream.example.test/a.m3u8', stream_type: 'hls'}); h.metadata(); await settlePlayback();
   const instance = h.desktopHls();
   h.session.handlers.stream(null, 'host_changed');
-  assert.equal(h.desktopHls(), instance); assert.equal(h.player.paused, false); assert.equal(h.get('syncChip').textContent, 'Allein');
+  assert.equal(h.desktopHls(), instance); assert.equal(h.player.paused, false); assert.equal(h.get('syncChip').textContent, 'Nicht synchron');
   h.session.handlers.stream(null);
   assert.equal(instance.destroyed, true); assert.equal(h.player.paused, true);
 });
@@ -1786,10 +1789,11 @@ test('the Stream tab has distinct local and suggestion actions and a short priva
   const block = html.slice(start, html.indexOf('</section>', start));
   assert.match(block, /<h4>Eigene HLS-Quelle<\/h4>/);
   assert.match(block, /id="personalHlsUrl"/); assert.match(block, />Nur lokal laden</);
-  assert.match(block, />Video laden &amp; vorschlagen</); assert.match(block, />Zur Host-Quelle zurück</);
+  assert.match(block, /id="proposalSection" hidden/); assert.match(block, />Dem Host vorschlagen</);
+  assert.match(block, />Zur Host-Quelle zurück</);
   assert.match(block, /id="personalHlsStatus"/); assert.match(block, /Nur VOD/);
-  assert.match(block, /Party-Mitglieder den Link samt Tokens sehen/);
-  assert.ok(!html.includes('id="suggestToHost"'));
+  assert.match(block, /Vorschlag ist für alle Party-Mitglieder lesbar/);
+  assert.doesNotMatch(block, /id="loadAndSuggest"|Video laden &amp; vorschlagen/);
 });
 
 // --- Double click, URL after join, rejoin + host source. Written, not executed here. ---
@@ -1886,27 +1890,17 @@ test('revoking the shared link stops it; invalid links never load; non-host send
   assert.equal(instance.destroyed, true); assert.equal(h.player.paused, true); assert.equal(h.get('resync').disabled, true);
 });
 
-test('only the explicit suggestion action broadcasts a valid guest link and never applies it for others', async () => {
+test('personal HLS stays local even in a party with a Desktop host', async () => {
   const h = await harness(), channel = [];
   h.session.room.memberId = 'guest';
   h.session.channel = {send: async message => { channel.push(message); return 'ok'; }};
   h.enter(h.get('loadPersonalHls'));
-  h.enter(h.get('loadAndSuggest'), 'https://localhost./secret');
   await settlePlayback();
   assert.equal(channel.filter(m => m.event === 'stream_suggest').length, 0);
-  h.enter(h.get('loadAndSuggest')); await settlePlayback();
-  const suggestions = channel.filter(m => m.event === 'stream_suggest');
-  assert.equal(suggestions.length, 1);
-  assert.deepEqual(suggestions[0].payload, {member_id: h.session.room.memberId, media_key: 'movie|tt1||', url: privateUrl});
-  assert.match(h.get('suggestStatus').textContent, /Vorschlag gesendet/);
-  assert.equal(h.desktopHls(), null); // The sender keeps its private source; nothing is shared by itself.
+  assert.equal(channel.filter(m => m.event === 'browser_stream_suggest').length, 0);
+  assert.equal(h.get('proposalSection').hidden, true);
+  assert.ok(h.source().active);
   assert.ok(!JSON.stringify(h.storageWrites).includes('INTEGRATION_PRIVATE_SENTINEL'));
-  assert.ok(!h.get('suggestStatus').textContent.includes('INTEGRATION_PRIVATE_SENTINEL'));
-  h.session.room.memberId = 'host';
-  h.session.handlers.room(h.session.room);
-  assert.equal(h.get('loadAndSuggest').hidden, true);
-  h.enter(h.get('loadAndSuggest')); await settlePlayback();
-  assert.equal(channel.filter(m => m.event === 'stream_suggest').length, 1);
 });
 
 test('a personal VOD follows the party time by itself once it is seekable, with bounded retries', async () => {
@@ -2110,15 +2104,19 @@ const hostRoom = () => ({info: {id: 'party', code: 'UXZ83H', host_member_id: 'ho
   memberId: 'host', members: [{id: 'host', display_name: 'Host'}, {id: 'guest', display_name: 'Gast'}]});
 async function hostHarness({browserHostShare = true} = {}) {
   const h = await harness({browserHostShare}), channel = [];
+  await settlePlayback(); // Let the invitation bootstrap finish before entering the room.
   h.session.room = hostRoom();
   h.session.channel = {send: async message => { channel.push(message); return 'ok'; }};
   h.session.handlers.room(h.session.room);
   return {h, channel};
 }
 
-test('the browser host shares a direct link: the room closes, its player loads it, members get the offer and the party time', async () => {
+test('the browser host shares a direct link from the drawer without hiding the player', async () => {
   const {h, channel} = await hostHarness();
-  assert.equal(h.get('roomOverview').hidden, false); assert.equal(h.get('playerWrap').hidden, true);
+  assert.equal(h.get('roomOverview').hidden, false); assert.equal(h.get('playerWrap').hidden, false);
+  assert.equal(h.get('infoDrawer').hidden, false);
+  assert.equal(h.get('panelHost').hidden, false);
+  assert.equal(h.get('watchSection').hidden, false);
   assert.equal(h.get('tabHost').hidden, false);
   assert.equal(h.get('roomMemberCount').textContent, '2 / 4 Teilnehmer');
   assert.equal(h.get('roomTitle').textContent, 'Film');
@@ -2129,14 +2127,20 @@ test('the browser host shares a direct link: the room closes, its player loads i
   h.get('roomShareUrl').value = 'https://cdn.example.test/film.mp4';
   h.get('roomShareForm').fire('submit'); await settlePlayback(); await settlePlayback();
   const offer = channel.filter(m => m.event === 'stream').at(-1).payload;
-  assert.deepEqual(offer, {member_id: 'host', stream: {media_key: 'movie|tt1||', url: 'https://cdn.example.test/film.mp4', name: 'Video-Link des Hosts',
-    stream_type: 'mp4', headers: {}, response_headers: {}}});
+  assert.equal(offer.member_id, 'host');
+  assert.equal(offer.media_key, 'movie|tt1||');
+  assert.ok(Number.isSafeInteger(offer.source_revision));
+  assert.deepEqual(offer.stream, {media_key: 'movie|tt1||', url: 'https://cdn.example.test/film.mp4', name: 'Video-Link des Hosts',
+    stream_type: 'mp4', headers: {}, response_headers: {}});
   const start = channel.filter(m => m.event === 'state').at(-1).payload;
   assert.equal(start.member_id, 'host'); assert.equal(start.paused, true); assert.equal(start.position_ms, 0);
-  assert.equal(h.get('roomOverview').hidden, true); assert.equal(h.get('playerWrap').hidden, false);
+  assert.equal(h.get('roomOverview').hidden, false); assert.equal(h.get('playerWrap').hidden, false);
   assert.equal(h.player.src, 'https://cdn.example.test/film.mp4');
   h.metadata(); await settlePlayback();
   assert.equal(h.sync(), true);
+  h.get('drawerScrim').fire('click');
+  assert.equal(h.get('infoDrawer').hidden, true);
+  assert.equal(h.get('playerWrap').hidden, false);
   // The host's own play becomes the party state for everyone.
   h.get('ctlPlay').fire('click'); h.player.fire('play'); await settlePlayback();
   const playing = channel.filter(m => m.event === 'state').at(-1).payload;
@@ -2145,15 +2149,19 @@ test('the browser host shares a direct link: the room closes, its player loads i
   h.get('roomShowOverview').fire('click');
   assert.equal(h.get('roomOverview').hidden, false); assert.equal(h.get('roomBackToPlayer').hidden, false);
   h.get('roomStopShare').fire('click'); await settlePlayback();
-  assert.deepEqual(channel.filter(m => m.event === 'stream').at(-1).payload, {member_id: 'host', stream: null});
-  assert.equal(h.get('roomBackToPlayer').hidden, true);
+  const revoked = channel.filter(m => m.event === 'stream').at(-1).payload;
+  assert.equal(revoked.member_id, 'host'); assert.equal(revoked.stream, null);
+  assert.ok(revoked.source_revision > offer.source_revision);
+  assert.equal(h.get('playerWrap').hidden, false);
 });
 
 test('the host sees members\' proposals, checks them and only an accepted link is shared', async () => {
   const {h, channel} = await hostHarness();
-  h.session.receive('stream_suggest', {member_id: 'stranger', media_key: 'movie|tt1||', url: 'https://cdn.example.test/a.mp4'});
+  h.session.receive('browser_stream_suggest', {member_id: 'stranger', target_member_id: 'host', media_key: 'movie|tt1||', url: 'https://cdn.example.test/a.mp4'});
   assert.equal(h.get('roomProposals').hidden, true); // Not a member in the server snapshot.
-  h.session.receive('stream_suggest', {member_id: 'guest', media_key: 'movie|tt1||', url: 'https://cdn.example.test/b.webm?token=PROPOSAL_SENTINEL'});
+  h.session.receive('browser_stream_suggest', {member_id: 'guest', target_member_id: 'host', media_key: 'movie|tt1||', url: 'https://cdn.example.test/b.webm?token=PROPOSAL_SENTINEL'});
+  assert.equal(h.get('roomProposals').hidden, true);
+  h.session.receive('browser_stream_suggest', {member_id: 'guest', target_member_id: 'host', media_key: 'movie|tt1||', url: 'https://cdn.example.test/b.webm?sig=PROPOSAL_SENTINEL'});
   assert.equal(h.get('roomProposals').hidden, false);
   let [item] = h.get('roomProposalList').children;
   assert.equal(item.children[0].textContent, 'Gast · WEBM · cdn.example.test');
@@ -2162,7 +2170,7 @@ test('the host sees members\' proposals, checks them and only an accepted link i
   item.children[3].fire('click'); // Ablehnen
   assert.deepEqual(channel.at(-1).payload, {member_id: 'host', target_member_id: 'guest', status: 'declined'});
   assert.equal(h.get('roomProposals').hidden, true);
-  h.session.receive('stream_suggest', {member_id: 'guest', media_key: 'movie|tt1||', url: 'https://cdn.example.test/c.mp4'});
+  h.session.receive('browser_stream_suggest', {member_id: 'guest', target_member_id: 'host', media_key: 'movie|tt1||', url: 'https://cdn.example.test/c.mp4'});
   [item] = h.get('roomProposalList').children;
   item.children[2].fire('click'); await settlePlayback(); await settlePlayback(); // Annehmen
   assert.equal(channel.filter(m => m.event === 'stream').at(-1).payload.stream.url, 'https://cdn.example.test/c.mp4');
@@ -2177,12 +2185,19 @@ test('members propose only valid direct links and see the host\'s decision; the 
   h.session.handlers.room(h.session.room);
   assert.equal(h.get('tabHost').hidden, true); // No host controls for members.
   assert.equal(h.get('roomOverview').hidden, false); assert.equal(h.get('roomShareForm').hidden, true); // Waiting room without a source.
-  h.get('proposalUrl').value = 'https://localhost/a.mp4';
-  h.get('proposalForm').fire('submit'); await settlePlayback();
-  assert.equal(channel.filter(m => m.event === 'stream_suggest').length, 0);
   h.get('proposalUrl').value = 'https://cdn.example.test/a.m3u8';
   h.get('proposalForm').fire('submit'); await settlePlayback();
-  assert.deepEqual(channel.filter(m => m.event === 'stream_suggest').at(-1).payload, {member_id: 'guest', media_key: 'movie|tt1||', url: 'https://cdn.example.test/a.m3u8'});
+  assert.equal(h.get('proposalSection').hidden, true);
+  assert.equal(channel.some(m => m.event === 'stream_suggest' || m.event === 'browser_stream_suggest'), false);
+  h.session.receive('status', {member_id: 'host', media_key: 'movie|tt1||', browser_host_links: 1});
+  assert.equal(h.get('proposalSection').hidden, false);
+  h.get('proposalUrl').value = 'https://localhost/a.mp4';
+  h.get('proposalForm').fire('submit'); await settlePlayback();
+  assert.equal(channel.filter(m => m.event === 'browser_stream_suggest').length, 0);
+  h.get('proposalUrl').value = 'https://cdn.example.test/a.m3u8';
+  h.get('proposalForm').fire('submit'); await settlePlayback();
+  assert.deepEqual(channel.filter(m => m.event === 'browser_stream_suggest').at(-1).payload,
+    {member_id: 'guest', target_member_id: 'host', media_key: 'movie|tt1||', url: 'https://cdn.example.test/a.m3u8'});
   assert.match(h.get('suggestStatus').textContent, /Host entscheidet/);
   h.session.receive('stream_suggest_result', {member_id: 'host', target_member_id: 'guest', status: 'declined'});
   assert.match(h.get('suggestStatus').textContent, /abgelehnt/);
@@ -2196,7 +2211,7 @@ test('locked by default: no browser-host offer, no proposal view, no proposal fo
   h.get('roomShareForm').fire('submit'); await settlePlayback();
   assert.equal(channel.filter(m => m.event === 'stream' || m.event === 'state').length, 0);
   assert.equal(h.get('roomOverview').hidden, false);
-  h.session.receive('stream_suggest', {member_id: 'guest', media_key: 'movie|tt1||', url: 'https://cdn.example.test/a.mp4'});
+  h.session.receive('browser_stream_suggest', {member_id: 'guest', target_member_id: 'host', media_key: 'movie|tt1||', url: 'https://cdn.example.test/a.mp4'});
   assert.equal(h.get('roomProposals').hidden, true); // Unauthenticated, readable by all: not shown.
   h.session.receive('state_request', {member_id: 'guest'}); await settlePlayback();
   assert.equal(channel.filter(m => m.event === 'stream').length, 0); // No unsolicited revocation either.
@@ -2210,11 +2225,129 @@ test('locked by default: no browser-host offer, no proposal view, no proposal fo
 const memberRoom = () => ({...hostRoom(), memberId: 'guest'});
 const sharedMp4 = (url = 'https://cdn.example.test/film.mp4') => ({media_key: 'movie|tt1||', url, name: 'Video-Link des Hosts', stream_type: 'mp4', headers: {}, response_headers: {}});
 
-test('a member joins before any video: waiting room with title, people and invite, no host controls, no error', async () => {
+for (const paused of [true, false]) test(`host reload recovers a TorBox offer once and keeps the existing ${paused ? 'paused' : 'playing'} party time`, async () => {
+  const {h, channel} = await hostHarness();
+  const state = {...playback, paused, position_ms: 42000};
+  const url = 'https://media.tb-cdn.io/v/master.m3u8?token=SYNTHETIC_MEDIA_TOKEN';
+  const {stream} = hostShareModule.hostShareStream(url, playback.media_key, true);
+  h.session.playback = state;
+  h.session.diagnostics.connection = 'SUBSCRIBED';
+  h.session.room.members.push({id: 'other'});
+  h.session.armSourceRecovery();
+  const request = channel.find(message => message.event === 'browser_source_request').payload;
+  const reply = {...request, member_id: 'guest', source_revision: 123, stream};
+  h.session.receive('browser_source_reply', reply);
+  assert.equal(h.desktopHls(), null); // One member has yet to confirm the same revision.
+  h.session.receive('browser_source_reply', {...reply, member_id: 'other'});
+  assert.equal(h.desktopHls().source, url);
+  assert.equal(h.session.hostStream, null);
+  h.metadata(); h.player.readyState = 3; h.player.fire('canplay');
+  await settlePlayback();
+  assert.equal(h.sync(), true);
+  assert.equal(h.player.currentTime, 42);
+  assert.equal(h.player.paused, paused);
+  assert.equal(h.session.playback, state);
+  assert.equal(h.session.hostOffer.source_revision, 123);
+  assert.match(h.get('message').textContent, /Video wiederhergestellt/);
+  const loads = h.player.loadCount;
+  h.session.receive('browser_source_reply', reply);
+  assert.equal(h.player.loadCount, loads);
+  assert.ok(!JSON.stringify(h.storageWrites).includes('SYNTHETIC_MEDIA_TOKEN'));
+});
+
+test('the beta shares TorBox HLS only in the browser field and discards local references on exit, kick or end', async () => {
+  const url = 'https://media.tb-cdn.io/v/master.m3u8?token=SYNTHETIC_MEDIA_TOKEN';
+  const {h: host, channel} = await hostHarness();
+  host.get('roomShareUrl').value = url;
+  host.get('roomShareForm').fire('submit');
+  await settlePlayback();
+  const offer = channel.find(message => message.event === 'stream').payload;
+  assert.equal(offer.stream.url, '');
+  assert.equal(offer.stream.browser_hls.url, undefined);
+  assert.equal(offer.stream.browser_hls.family_beta_url, url);
+  for (const reason of [null, 'removed', 'ended']) {
+    const h = await harness({autoHost: true, browserHostShare: true});
+    h.session.room = memberRoom();
+    h.session.handlers.room(h.session.room);
+    h.session.receive('stream', offer);
+    const hls = h.desktopHls();
+    assert.equal(hls.source, url);
+    assert.equal(hls.config.progressive, true);
+    assert.equal((await hls.config.fetchSetup({url: 'seg.ts'}, {})).redirect, 'error');
+    h.get('proposalUrl').value = url;
+    if (reason) await h.session.finish('Party geschlossen.', reason);
+    else await h.session.close(false);
+    assert.equal(hls.destroyed, true);
+    assert.equal(hls.source, null);
+    assert.equal(h.session.receivedBrowserOffer, null);
+    assert.equal(h.get('proposalUrl').value, '');
+    assert.equal(h.get('roomProposalList').children.length, 0);
+    assert.ok(!JSON.stringify(h.storageWrites).includes('SYNTHETIC_MEDIA_TOKEN'));
+  }
+});
+
+for (const [kind, stream] of [
+  ['public', sharedMp4()],
+  ['family HLS', hostShareModule.hostShareStream('https://media.tb-cdn.io/v/master.m3u8?token=SYNTHETIC_MEDIA_TOKEN',
+    playback.media_key, true).stream],
+]) test(`a promoted browser re-offers the ${kind} source at the inherited position without reloading`, async () => {
+  const h = await harness({autoHost: true, browserHostShare: true}), sent = [];
+  const room = memberRoom();
+  h.session.room = room;
+  h.session.channel = {send: async message => { sent.push(message); return 'ok'; }};
+  h.session.playback = {...playback, paused: false, position_ms: 5000};
+  h.session.handlers.room(room);
+  h.session.handlers.stream(stream);
+  h.metadata(); await settlePlayback();
+  const previous = h.session.playback, loads = h.player.loadCount;
+  room.info.host_member_id = room.memberId;
+  h.session.playback = null;
+  h.session.handlers.stream(null, 'host_changed');
+  h.session.handlers.room(room);
+  h.session.handlers.promoted({stream, playback: previous});
+  await settlePlayback();
+  const state = sent.filter(message => message.event === 'state').at(-1).payload;
+  assert.equal(state.member_id, room.memberId);
+  assert.equal(state.position_ms, 5000);
+  assert.equal(state.paused, false);
+  assert.ok(state.seq > previous.seq);
+  assert.equal(h.player.loadCount, loads);
+  assert.equal(protocol.browserPartyStream(h.session.hostStream).url, protocol.browserPartyStream(stream).url);
+});
+
+test('a remaining guest keeps its family HLS instance and resumes sync only after both successor messages', async () => {
+  const h = await harness({autoHost: true, browserHostShare: true});
+  const room = memberRoom();
+  const stream = hostShareModule.hostShareStream('https://media.tb-cdn.io/v/master.m3u8?token=SYNTHETIC_MEDIA_TOKEN',
+    playback.media_key, true).stream;
+  h.session.room = room;
+  h.session.playback = {...playback, paused: false, position_ms: 50000};
+  h.session.handlers.room(room);
+  h.session.receive('stream', {member_id: 'host', media_key: playback.media_key, source_revision: 1, stream});
+  h.metadata(); await settlePlayback();
+  const instance = h.desktopHls(), loads = h.player.loadCount;
+  h.player.currentTime = 50;
+  h.session.rpc = async () => ({party: {...room.info, host_member_id: 'successor', host_only: false, playback: h.session.playback},
+    members: [{id: 'successor'}, {id: 'guest'}]});
+  await h.session.refresh();
+  assert.equal(h.sync(), false);
+  assert.match(h.get('message').textContent, /Synchronisierung wird übernommen/);
+  h.session.receive('stream', {member_id: 'successor', media_key: playback.media_key, source_revision: 2, stream});
+  assert.equal(h.sync(), false);
+  assert.equal(h.player.currentTime, 50);
+  h.session.receive('state', {...playback, member_id: 'successor', seq: 0, position_ms: 50000});
+  assert.equal(h.sync(), true);
+  assert.equal(h.desktopHls(), instance);
+  assert.equal(h.player.loadCount, loads);
+  assert.equal(h.player.currentTime, 50);
+  assert.match(h.get('message').textContent, /Gemeinsam verbunden/);
+});
+
+test('a member joins directly into the player and new sources load independently of the Party drawer', async () => {
   const h = await harness({autoHost: true, browserHostShare: true});
   h.session.room = memberRoom();
   h.session.handlers.room(h.session.room);
-  assert.equal(h.get('roomOverview').hidden, false); assert.equal(h.get('playerWrap').hidden, true);
+  assert.equal(h.get('roomOverview').hidden, false); assert.equal(h.get('playerWrap').hidden, false);
   assert.match(h.get('roomWaiting').textContent, /Warte auf Video vom Host/);
   assert.equal(h.get('roomShareForm').hidden, true); assert.equal(h.get('roomOpenHost').hidden, true); assert.equal(h.get('tabHost').hidden, true);
   assert.equal(h.get('roomTitle').textContent, 'Film');
@@ -2223,19 +2356,39 @@ test('a member joins before any video: waiting room with title, people and invit
   assert.notEqual(h.get('message').style.borderColor, '#ff6969'); // No error just because nothing is shared.
   // The host shares: the member leaves the waiting room and loads the source automatically.
   h.session.receive('stream', {member_id: 'host', stream: sharedMp4()});
-  assert.equal(h.get('roomOverview').hidden, true); assert.equal(h.get('playerWrap').hidden, false);
+  assert.equal(h.get('playerWrap').hidden, false);
   assert.equal(h.player.src, 'https://cdn.example.test/film.mp4');
   // A new source replaces the old one; a revocation returns to the waiting room.
   h.session.receive('stream', {member_id: 'host', stream: sharedMp4('https://cdn.example.test/other.mp4')});
   assert.equal(h.player.src, 'https://cdn.example.test/other.mp4');
   h.session.receive('stream', {member_id: 'host', stream: null});
-  assert.equal(h.get('roomOverview').hidden, false); assert.equal(h.get('playerWrap').hidden, true);
-  // The waiting room stays reachable from the player (Party tab).
-  h.session.receive('stream', {member_id: 'host', stream: sharedMp4()});
-  h.get('partyShowRoom').fire('click');
-  assert.equal(h.get('roomOverview').hidden, false); assert.equal(h.get('roomBackToPlayer').hidden, false);
-  h.get('roomBackToPlayer').fire('click');
   assert.equal(h.get('playerWrap').hidden, false);
+  assert.match(h.get('noStream').textContent, /Warte auf Video vom Host/);
+  h.session.receive('stream', {member_id: 'host', stream: sharedMp4()});
+  h.get('ctlSettings').fire('click'); h.get('tabParty').fire('click');
+  assert.equal(h.get('roomOverview').hidden, false); assert.equal(h.get('roomBackToPlayer').hidden, false);
+  h.session.receive('stream', {member_id: 'host', stream: sharedMp4('https://cdn.example.test/new.mp4')});
+  assert.equal(h.get('playerWrap').hidden, false);
+  assert.equal(h.player.src, 'https://cdn.example.test/new.mp4');
+  assert.equal(h.get('infoDrawer').hidden, false);
+  h.get('roomBackToPlayer').fire('click');
+  assert.equal(h.get('infoDrawer').hidden, true);
+  assert.equal(h.get('playerWrap').hidden, false);
+  assert.equal(h.player.src, 'https://cdn.example.test/new.mp4');
+});
+
+test('an accepted source change invalidates a queued proposal for the same title', async () => {
+  const {h, channel} = await hostHarness();
+  h.session.receive('browser_stream_suggest', {member_id: 'guest', target_member_id: 'host', media_key: 'movie|tt1||', url: 'https://cdn.example.test/p.mp4'});
+  const oldAccept = h.get('roomProposalList').children[0].children[2];
+  h.get('roomShareUrl').value = 'https://cdn.example.test/new.mp4';
+  h.get('roomShareForm').fire('submit');
+  await settlePlayback();
+  assert.equal(h.get('roomProposalList').children.length, 0);
+  oldAccept.fire('click');
+  await settlePlayback();
+  assert.deepEqual(channel.filter(message => message.event === 'stream').map(message => message.payload.stream.url),
+    ['https://cdn.example.test/new.mp4']);
 });
 
 test('a failed offer keeps the previous source, is not resent later, and blocks no further sharing', async () => {
@@ -2288,7 +2441,7 @@ test('only one share action runs at a time; a failed revocation keeps the source
 
 test('proposals expire after a kick or a title change and are re-checked before acceptance', async () => {
   const {h, channel} = await hostHarness();
-  h.session.receive('stream_suggest', {member_id: 'guest', media_key: 'movie|tt1||', url: 'https://cdn.example.test/p.mp4'});
+  h.session.receive('browser_stream_suggest', {member_id: 'guest', target_member_id: 'host', media_key: 'movie|tt1||', url: 'https://cdn.example.test/p.mp4'});
   assert.equal(h.get('roomProposalList').children.length, 1);
   const [item] = h.get('roomProposalList').children;
   h.session.room.members = h.session.room.members.filter(member => member.id !== 'guest'); // Removed, UI not yet refreshed.
@@ -2296,7 +2449,7 @@ test('proposals expire after a kick or a title change and are re-checked before 
   assert.equal(channel.filter(m => m.event === 'stream').length, 0);
   assert.equal(h.get('roomProposals').hidden, true);
   h.session.room.members.push({id: 'guest', display_name: 'Gast'});
-  h.session.receive('stream_suggest', {member_id: 'guest', media_key: 'movie|tt1||', url: 'https://cdn.example.test/p.mp4'});
+  h.session.receive('browser_stream_suggest', {member_id: 'guest', target_member_id: 'host', media_key: 'movie|tt1||', url: 'https://cdn.example.test/p.mp4'});
   h.session.room.info.media = {...h.session.room.info.media, meta_id: 'tt2'};
   h.session.handlers.room(h.session.room); // Title changed.
   assert.equal(h.get('roomProposals').hidden, true);

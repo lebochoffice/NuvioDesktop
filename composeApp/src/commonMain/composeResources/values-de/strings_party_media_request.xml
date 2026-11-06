@@ -1,0 +1,10 @@
+<resources>
+    <string name="party_media_request_action">Für alle in der Party abspielen</string>
+    <string name="party_media_request_new">Neue Filmwechsel-Anfrage</string>
+    <string name="party_media_request_received">%1$s schlägt vor: %2$s</string>
+    <string name="party_media_request_blocked">Die Quelle des Mitglieds kann nicht übernommen werden. Du kannst eine eigene Quelle für diesen Titel wählen. Der Party-Titel ändert sich erst, wenn du ihn als Host wechselst.</string>
+    <string name="party_media_request_choose_source">Eigene Quelle wählen</string>
+    <string name="party_media_request_dismiss">Anfrage ablehnen</string>
+    <string name="party_media_request_sent">Filmwechsel angefragt. Zustellung nicht bestätigt. Der aktuelle Party-Titel bleibt aktiv.</string>
+    <string name="party_media_request_failed">Anfrage konnte nicht gesendet werden. Prüfe die Party-Verbindung.</string>
+</resources>

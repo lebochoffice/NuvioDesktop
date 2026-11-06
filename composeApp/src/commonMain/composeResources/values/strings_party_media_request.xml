@@ -1,0 +1,10 @@
+<resources>
+    <string name="party_media_request_action">Play for everyone in the party</string>
+    <string name="party_media_request_new">New request to change the title</string>
+    <string name="party_media_request_received">%1$s requested: %2$s</string>
+    <string name="party_media_request_blocked">The requester’s stream cannot be taken over. You can choose your own source for this title. The party title changes only when you switch it as host.</string>
+    <string name="party_media_request_choose_source">Choose my own source</string>
+    <string name="party_media_request_dismiss">Decline request</string>
+    <string name="party_media_request_sent">Title change requested. Delivery is not confirmed. The party keeps its current title.</string>
+    <string name="party_media_request_failed">Could not send the request. Check the party connection.</string>
+</resources>

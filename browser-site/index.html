@@ -83,43 +83,6 @@
 
     <!-- Cinema player: after joining. -->
     <section id="watchSection" class="watch" hidden>
-      <!-- Browser host: party room (before and between shared videos). -->
-      <article id="roomOverview" class="party-room" hidden>
-        <div class="room-hero">
-          <img id="roomPoster" class="room-poster" alt="" hidden>
-          <div class="room-heading">
-            <p id="roomKicker" class="room-kicker">Dein Party-Room</p>
-            <h2 id="roomTitle"></h2>
-            <p id="roomSubtitle" class="room-subtitle"></p>
-            <div class="room-meta">
-              <span id="roomCode" class="pill"></span>
-              <span id="roomMemberCount" class="pill"></span>
-              <span id="roomConnection" class="pill" role="status">Verbinde …</span>
-            </div>
-          </div>
-        </div>
-        <p id="roomWaiting" class="room-waiting" role="status"></p>
-        <form id="roomShareForm" class="room-share" autocomplete="off" novalidate>
-          <label class="field"><span>Direkter Videolink (HLS, MP4 oder WebM über HTTPS)</span>
-            <input id="roomShareUrl" type="url" inputmode="url" spellcheck="false" maxlength="4096" placeholder="https://…/video.mp4"></label>
-          <button id="roomShareButton" class="btn primary large" type="submit">Video für alle freigeben</button>
-          <p id="roomShareStatus" class="room-share-status" role="status"></p>
-          <p id="roomShareLocked" class="room-share-locked">Die Videofreigabe im Browser ist noch gesperrt: Das Backend kann bisher nicht bestätigen, dass ein Streamangebot wirklich vom Host stammt. Eine Desktop-Party mit „Share my stream“ funktioniert wie gewohnt.</p>
-          <p class="room-share-note">Alle laden das Video direkt beim Anbieter, der dabei ihre IP-Adresse sieht. Enthaltene Tokens sind für Party-Mitglieder sichtbar.</p>
-        </form>
-        <div id="roomProposals" class="room-proposals" role="region" aria-labelledby="roomProposalsTitle" hidden>
-          <h3 id="roomProposalsTitle">Vorschläge der Mitglieder</h3>
-          <ul id="roomProposalList"></ul>
-        </div>
-        <div class="room-actions">
-          <button id="roomBackToPlayer" type="button" class="btn primary" hidden>Zum Video</button>
-          <button id="roomCopyInvite" type="button" class="btn">Einladungslink kopieren</button>
-          <button id="roomOpenDrawer" type="button" class="btn">Teilnehmer &amp; Chat</button>
-          <button id="roomOpenHost" type="button" class="btn ghost">Host-Einstellungen</button>
-        </div>
-        <div class="room-people-box"><h3>Teilnehmer</h3><ul id="roomPeople" class="room-people"></ul></div>
-        <label class="field room-invite"><span>Einladungslink</span><input id="roomInvite" readonly></label>
-      </article>
       <div id="playerWrap" class="player-wrap" tabindex="-1">
         <video id="player" controls playsinline preload="metadata" crossorigin="anonymous"></video>
         <div id="noStream" class="player-state">Warte auf Video vom Host …</div>
@@ -196,8 +159,7 @@
         <form id="personalHlsForm" class="stack compact" autocomplete="off">
           <label class="sr-only" for="personalHlsUrl">Video-Link (HTTPS-HLS-Playlist)</label>
           <input id="personalHlsUrl" type="url" inputmode="url" autocomplete="off" spellcheck="false" maxlength="16384" placeholder="https://…/playlist.m3u8" aria-describedby="personalHlsStatus videoLinkFormats" required>
-          <div class="button-row"><button id="loadPersonalHls" class="btn ghost small" type="submit">Nur lokal laden</button><button id="loadAndSuggest" class="btn primary small" type="submit" aria-describedby="suggestNotice">Video laden &amp; vorschlagen</button></div>
-          <p id="suggestNotice" class="muted small">Beim Vorschlagen können Party-Mitglieder den Link samt Tokens sehen.</p>
+          <div class="button-row"><button id="loadPersonalHls" class="btn ghost small" type="submit">Nur lokal laden</button></div>
         </form>
         <p id="videoLinkFormats" class="sr-only">Öffentliche HTTPS-HLS-Playlist derselben Filmfassung. Nur VOD.</p>
         <p id="personalHlsStatus" class="muted small" role="status"></p>
@@ -219,7 +181,42 @@
         <p id="movieInfo" class="muted small"></p>
         <div class="party-code-row"><span>Party-Code</span><strong id="drawerCode">–</strong><button id="copyPartyCode" type="button" class="btn ghost small">Kopieren</button></div>
         <p id="controlInfo" class="sr-only"></p>
-        <button id="partyShowRoom" type="button" class="btn ghost">Party-Room anzeigen</button>
+      <article id="roomOverview" class="party-room" hidden>
+        <div class="room-hero">
+          <img id="roomPoster" class="room-poster" alt="" hidden>
+          <div class="room-heading">
+            <p id="roomKicker" class="room-kicker">Dein Party-Room</p>
+            <h2 id="roomTitle"></h2>
+            <p id="roomSubtitle" class="room-subtitle"></p>
+            <div class="room-meta">
+              <span id="roomCode" class="pill"></span>
+              <span id="roomMemberCount" class="pill"></span>
+              <span id="roomConnection" class="pill" role="status">Verbinde …</span>
+            </div>
+          </div>
+        </div>
+        <p id="roomWaiting" class="room-waiting" role="status"></p>
+        <form id="roomShareForm" class="room-share" autocomplete="off" novalidate>
+          <label class="field"><span>Direkter Videolink (HLS, MP4 oder WebM über HTTPS)</span>
+            <input id="roomShareUrl" type="url" inputmode="url" spellcheck="false" maxlength="4096" placeholder="https://…/video.mp4"></label>
+          <button id="roomShareButton" class="btn primary large" type="submit">Video für alle freigeben</button>
+          <p id="roomShareStatus" class="room-share-status" role="status"></p>
+          <p id="roomShareLocked" class="room-share-locked">Die Videofreigabe im Browser ist noch gesperrt: Das Backend kann bisher nicht bestätigen, dass ein Streamangebot wirklich vom Host stammt. Eine Desktop-Party mit „Share my stream“ funktioniert wie gewohnt.</p>
+          <p class="room-share-note">Alle laden das Video direkt beim Anbieter, der dabei ihre IP-Adresse sieht. Enthaltene Tokens sind für Party-Mitglieder sichtbar.</p>
+        </form>
+        <div id="roomProposals" class="room-proposals" role="region" aria-labelledby="roomProposalsTitle" hidden>
+          <h3 id="roomProposalsTitle">Vorschläge der Mitglieder</h3>
+          <ul id="roomProposalList"></ul>
+        </div>
+        <div class="room-actions">
+          <button id="roomBackToPlayer" type="button" class="btn primary" hidden>Zum Player</button>
+          <button id="roomCopyInvite" type="button" class="btn">Einladungslink kopieren</button>
+          <button id="roomOpenDrawer" type="button" class="btn">Teilnehmer &amp; Chat</button>
+          <button id="roomOpenHost" type="button" class="btn ghost">Host-Einstellungen</button>
+        </div>
+        <div class="room-people-box"><h3>Teilnehmer</h3><ul id="roomPeople" class="room-people"></ul></div>
+        <label class="field room-invite"><span>Einladungslink</span><input id="roomInvite" readonly></label>
+      </article>
         <button id="drawerResync" type="button" class="btn ghost" disabled>Mich synchronisieren</button>
         <button id="leaveButton" type="button" class="btn ghost leave">Party verlassen</button>
       </section>

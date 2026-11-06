@@ -82,6 +82,34 @@ object PartyRepository {
     fun dismissHlsSuggestion(suggestion: PartyHlsSuggestion): Boolean =
         _hlsSuggestion.compareAndSet(suggestion, null)
 
+    private val _mediaRequest = MutableStateFlow<PartyMediaRequest?>(null)
+    internal val mediaRequest = _mediaRequest.asStateFlow()
+    private var mediaRequestId = 0
+
+    internal suspend fun requestMedia(expectedParty: ActiveParty, media: PartyMedia): Boolean = withContext(dispatcher) {
+        val party = _state.value.party ?: return@withContext false
+        val hostId = party.hostMemberId ?: return@withContext false
+        if (party.id != expectedParty.id || party.memberId != expectedParty.memberId ||
+            hostId != expectedParty.hostMemberId || party.media.key != expectedParty.media.key ||
+            !party.canRequestMedia(media)) return@withContext false
+        val target = media.forMediaRequest() ?: return@withContext false
+        runRemote {
+            channel?.sendIfSubscribed("media_change_request", buildJsonObject {
+                put("party_id", party.id)
+                put("member_id", party.memberId)
+                put("target_member_id", hostId)
+                put("current_media_key", party.media.key)
+                put("media", PartyApi.json.encodeToJsonElement(PartyMedia.serializer(), target))
+            }) == true
+        } == true
+    }
+
+    internal fun dismissMediaRequest(id: Double) {
+        val request = _mediaRequest.value ?: return
+        val party = _state.value.party ?: return
+        if (id == request.id.toDouble() && request.isCurrent(party)) _mediaRequest.compareAndSet(request, null)
+    }
+
     // Shared start (host announcement in server time); display only for members.
     private val _countdown = MutableStateFlow<PartyCountdown?>(null)
     val countdown: StateFlow<PartyCountdown?> = _countdown.asStateFlow()
@@ -410,6 +438,7 @@ object PartyRepository {
         _playback.value = null
         _sharedStream.value = null
         _hlsSuggestion.value = null
+        _mediaRequest.value = null
         _countdown.value = null
         _state.value = PartyUiState()
         PartyChat.stop()
@@ -493,6 +522,17 @@ object PartyRepository {
                     is PartyCountdownSignal.Start -> _countdown.value = signal.countdown
                     null -> Unit
                 }
+            }
+            "media_change_request" -> {
+                // This is an informational request. The channel does not
+                // authenticate the member_id in the payload.
+                if (!party.isHost || payload.string("target_member_id") != party.memberId ||
+                    payload.string("party_id") != party.id || payload.string("current_media_key") != party.media.key) return
+                val memberId = payload.string("member_id") ?: return
+                if (memberId == party.memberId || party.member(memberId) == null) return
+                val target = payload["media"]?.let { decode(it, PartyMedia.serializer()) }?.forMediaRequest() ?: return
+                if (target.key == party.media.key) return
+                _mediaRequest.value = PartyMediaRequest(++mediaRequestId, party.id, party.memberId, memberId, party.media.key, target)
             }
             "stream_suggest" -> {
                 // Realtime sender identities are not verified by the server: the
@@ -844,6 +884,8 @@ object PartyRepository {
 
     private fun updateParty(transform: (ActiveParty) -> ActiveParty) {
         _state.update { state -> state.party?.let { state.copy(party = transform(it)) } ?: state }
+        val request = _mediaRequest.value ?: return
+        if (_state.value.party?.let(request::isCurrent) != true) _mediaRequest.compareAndSet(request, null)
     }
 
     private suspend fun <T> runRemote(block: suspend () -> T): T? =

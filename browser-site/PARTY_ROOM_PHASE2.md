@@ -1,5 +1,79 @@
 # Browser-Party-Room Phase 2: Videofreigabe durch den Browser-Host
 
+## Phase 2.3: Wiedergabe beim Hostwechsel
+
+### Quellenwiederherstellung nach Host-Reload
+
+Beim Neuladen gehen `hostStream`, das letzte Angebot und die lokale Player-Quelle verloren. Der Rejoin liefert Mitgliedschaft und Playback, aber keine Quelle. Der normale `state_request` wird für Quellen nur vom Host beantwortet. Deshalb konnte der neu geladene Host die bestätigte Kopie im Speicher seiner Gäste bisher nicht zurückholen.
+
+Mit aktivierter Familien-Beta fragt nur ein automatisch wieder beigetretener, serverbestätigter Host ohne lokale Quelle den privaten Party-Kanal ab. Anfrage und Antworten sind an Party-ID, Host-Mitglieds-ID, Medienkennung und eine einmalige Anfrage-ID gebunden. Alle übrigen Mitglieder des Snapshots müssen innerhalb des Antwortfensters dieselbe bestätigte Quellenrevision melden. Ein Widerruf, widersprüchliche Revisionen, fehlende Antworten, alte Clients oder ein zwischenzeitlicher Rollen- bzw. Medienwechsel verhindern die automatische Übernahme. Beim Verlust des Kanals wird der Versuch verworfen und nach bestätigtem Reconnect mit neuer Anfrage-ID wiederholt.
+
+Die bisherige URL bleibt einschließlich TorBox-Query unverändert. Der Host lädt sie im vorhandenen Player, folgt dem aus der Party bekannten Playback-Stand und kündigt erst nach erfolgreichem Laden und aktivem Sync dieselbe Revision erneut an. Gäste, die diese Revision bereits kennen, laden ihren Player nicht erneut. Der Ablauf speichert keine Quelle und setzt den gemeinsamen Wiedergabestand nicht auf 0. Ein abgelaufener oder nicht abspielbarer Link verlangt eine neue Freigabe.
+
+Ohne eine verbleibende bestätigte Kopie gibt es keine automatische Wiederherstellung. Das betrifft auch einen gleichzeitigen Reload aller Browser. Antworten sind Broadcasts im bestehenden privaten Kanal und für Kanalmitglieder technisch lesbar. Die Absenderidentität ist weiterhin nicht serverseitig gebunden. Ohne serverseitigen Quellenstand lässt sich ein Widerruf, den alle antwortenden Mitglieder verpasst haben, nicht nachweisen. Der Pfad bleibt standardmäßig deaktiviert.
+
+Ob das offizielle NUVIO-Backend die Party beim regulären Austritt des Hosts fortführt, ist weiterhin nicht live bestätigt. `close()` entfernt den lokalen Kanal und ruft beim regulären Austritt `watch_party_leave` auf. Die Antwort des Austritts wird vom Browser nicht als Wahlentscheidung verwendet. Der verbleibende Client liest den maßgeblichen Stand über `watch_party_heartbeat`. Bei abruptem Tab- oder Netzabbruch kann der Server zunächst dieselbe Mitgliedschaft und Host-ID zurückgeben. Die Dauer und eine etwaige Nachfolgeregel sind nicht durch den Clientvertrag belegt.
+
+- **Party und bestätigter Nachfolger:** Eine bereits geladene identische Browserquelle bleibt im Player. Nach dem Rollenwechsel wartet der Gast auf das Angebot und einen gültigen Playback-Stand des neuen Hosts, bevor er wieder synchronisiert. Verspätete Snapshots des alten Hosts und Realtime-Playback eines entfernten bisherigen Hosts werden verworfen. Ein Reconnect löst keine Wahl aus. Vor der erneuten Browser-Freigabe prüft der Host-Client die Rolle per Heartbeat.
+- **Party besteht ohne bestätigten Nachfolger:** Der vorhandene Player kann bei erreichbarer Quelle lokal weiterlaufen. Es gibt keinen zweiten Sender für Playback. Die Absenderidentität bleibt bei Realtime wie bisher eine Client-Angabe.
+- **Party serverseitig beendet:** Die Mitgliedschaft und gemeinsame Synchronisierung enden. Der bestehende lokale Weiterlauf bleibt für dafür geeignete Quellen verfügbar. Tokenisierte Quellen der neuen Familien-Beta werden beim Ende aus dem lokalen Player entfernt. Beim eigenen Austritt oder Kick wird die Quelle ebenfalls bereinigt.
+
+Ohne serverbestätigte Nachfolge gibt es keine verlässliche Einigung darüber, welche Browser noch aktiv sind, wer zuerst beigetreten ist und wann der bisherige Host seine Autorität verliert. Deterministisches Sortieren lokaler Listen löst unterschiedliche Sichtweisen bei Netztrennung nicht. Für einen separaten Koordinator wären ein serverseitig bestätigtes Mandat und eine geordnete Revision zur Entwertung alter Sender nötig. Ein Desktop-Host bleibt der maßgebliche Sender, solange ihn der Server führt.
+
+**Manueller Backend-Nachweis:** In einer privaten Party mit drei autorisierten Testkonten und öffentlichem Testmedium A regulär verlassen lassen. Bei B und C prüfen, ob der Heartbeat dieselbe Party-ID und einen gültigen neuen `host_member_id` liefert oder `party_ended` bzw. keinen Party-Snapshot meldet. Den Versuch getrennt für einen kurzen Verbindungsabbruch, Tab-Schließen und späteren Reconnect wiederholen. Nur IDs und Zustandskategorien festhalten. Keine Stream-URLs, Tokens oder Authentifizierungsdaten in den Testbericht übernehmen.
+
+## Desktop-Anfragen für einen Filmwechsel
+
+Ein Desktop-Gast mit einem anderen, geladenen Titel kann eine Filmwechsel-Anfrage über den vorhandenen privaten Party-Kanal an die aktuelle Host-ID senden. Sie enthält Titel, Medien-ID und bei Serien die konkrete Episodenidentität. Der Desktop-Host sieht die Anfrage und kann sie in seinem Menü ablehnen. Das Ablehnen entfernt die Anfrage lokal. Eine Zustell- oder Ablehnungsbestätigung an den Absender gibt es in diesem Stand nicht. Host-only betrifft Wiedergabesteuerung und sperrt diese Anfrage nicht. Das Realtime-Ereignis ist ein Hinweis, da die Absender-ID nicht serverseitig gebunden ist.
+
+Die Annahme mit Übernahme der Gastquelle bleibt gesperrt. Der bestehende Desktop-Code kann als Host per `watch_party_update` Medium und Playback publizieren. `watch_party_leave` hat keinen Zielparameter für einen gewünschten Nachfolger. `watch_party_heartbeat` liest unter anderem die aktuelle `host_member_id`. Keiner dieser sichtbaren Clientverträge bestätigt einen vom bisherigen Host autorisierten Transfer an ein bestimmtes Mitglied.
+
+Der kleinste erforderliche Backend-Vertrag wäre eine atomare, autorisierte Annahme mit bisherigem Host, anfragendem Mitglied und erwartetem Party- und Medienstand. Vor dem Wechsel muss der Zielclient seine neue Quelle bereit haben. Der Server müsste Mitgliedschaft, Zustimmung und veraltete Anfragen prüfen, Hostrolle, Medienidentität und Playback-Start gemeinsam aktualisieren und beiden Clients den neuen Stand für dieselbe Party zurückgeben. Quellenfreigabe erfolgt anschließend über die vorhandenen Wege durch den neuen, serverbestätigten Host. Party-Code und Chat bleiben an derselben Party-ID. Eine abgelehnte oder gescheiterte Annahme lässt den alten Stand bestehen.
+
+### Alternative mit unverändertem Host
+
+Der Desktop-Host kann aus einer noch gültigen Anfrage **Eigene Quelle wählen**. Das öffnet für genau den angefragten Film oder die Episode die normale NUVIO-Stream-Auswahl. Der Wechsel des lokalen Players publiziert weder einen neuen Party-Titel noch übernimmt er die Position des alten Films. Die eigentliche Umstellung ist ein separater, bestehender Host-Schritt. Wenn die lokale Quellenauswahl scheitert oder der Host sie abbricht, bleibt der Party-Titel bestehen.
+
+`watch_party_update` kann Medium und Playback für die vorhandene Party speichern. Das ermöglicht den bestehenden Ablauf, bei dem A eine **eigene** Quelle für den neuen Titel öffnet und danach den Titel als Host umstellt. Die Filmwechsel-Anfrage liefert nur Medienidentität und Anzeigetitel. Sie liefert weder eine Quelle, die A öffnen kann, noch die Position von B. Der bestehende Desktop-Player baut sein Angebot aus der tatsächlich aktiven lokalen Quelle des Hosts. Die Stream-Auswahl bietet empfangene Freigaben nur Gästen an. Ein Mitglied kann mit dem vorhandenen Vertrag daher keine eigene NUVIO-Quelle als das Angebot des Hosts bereitstellen.
+
+Selbst bei getrennt beschaffter Quelle ist der bestehende Host-Wechsel des Titels kein Ersatz für eine sichere Annahme: `publishMedia` ändert den lokalen Titel und verwirft das alte Angebot bereits vor Bestätigung von `watch_party_update`. Eine fehlgeschlagene Serveraktualisierung stellt den alten Stand nicht automatisch wieder her. Andere Filme führen auf Desktop zur Party- oder Stream-Auswahl. Automatisches Öffnen ist nur für bestimmte vorhandene Episodenpfade möglich. Browser leeren beim Medienwechsel ihren Player und brauchen ein neues browserkompatibles Host-Angebot.
+
+Der kleinste Weg ohne Hosttransfer wäre deshalb ein bewusst eingeschränkter Ablauf mit einer von A unabhängig gefundenen, vorab geprüften Quelle. Nach Zustimmung und Prüfung des noch aktuellen Antrags müsste der Client den passenden Server-Snapshot für Medium und Startposition abwarten, bevor er den Wechsel als erfolgreich anzeigt. Für zuverlässiges Akzeptieren unter konkurrierenden Änderungen wäre eine serverseitige Bedingung auf den erwarteten bisherigen Host und Medienstand nötig. **Wenn exakt die Quelle von B übernommen werden soll**, braucht es zusätzlich einen autorisierten, auf Party und neue Medienrevision beschränkten Quellenzugang für A. Der muss vor dem Wechsel geprüft werden können und darf keine privaten Addon- oder Account-Zugangsdaten weitergeben. Die bestehende Freigabe durch A kann danach unverändert genutzt werden. Ohne diesen Quellenvertrag bleibt die Annahme für den geforderten Ablauf gesperrt.
+
+`PartyStream.toStreamItem()` übernimmt die URL sowie Request- und Response-Header in die bestehenden Player-Hinweise. Das beweist, dass der Desktop solche Angebote darstellen und mit seiner normalen Stream-Auswahl öffnen kann. Es beweist keine Abspielbarkeit auf A: Tokens, IP-Bindung, Redirects und Header können sich auf den Quellclient beziehen. Der normale Pfad hat keine isolierte Vorbereitung mit einem bestätigten mpv-Ladeergebnis, bevor der aktuelle Player und der Party-Zustand gewechselt werden. Der private Kanal ist außerdem für Kanalmitglieder lesbar und bindet die behauptete Absender-ID nicht an den Sender. In diesem Stand werden deshalb weiterhin nur Mediendaten für die Anfrage übertragen. Es gibt keine temporäre Gast-URL und keine neue Speicherung.
+
+## Phase 2.2: Serverbestätigte Nachfolge und Player-Ansicht
+
+Browser-Erstellung und Beitritt zeigen direkt den Player. Party-Details und Freigabeformular befinden sich im Party-Reiter des rechten Menüs. Bei bestätigter Hostrolle öffnet sich das Menü, ohne den Player anzuhalten.
+
+Nach einem serverbestätigten Hostwechsel kann ein Browser-Host mit aktivierter interner Freigabe einen im Speicher vorhandenen, zuvor vollständig angekündigten direkten Browser-Link und dessen letzten Playback-Stand übernehmen. Automatisch erneut verteilt werden Links ohne Query sowie zuvor ausdrücklich für diese Party freigegebene TorBox-HLS-Links der Familien-Beta. Alte Desktop-Angebote, private Eingaben, HLS-Worker-Grants und sonstige signierte Links werden dafür nicht übernommen. Wenn keine geeignete Quelle vorliegt, fordert der Browser den neuen Host zum Freigeben auf. Bereits geladene identische Quellen müssen nicht neu geladen werden. Andere Quellen und abgelaufene Links brauchen eine neue Freigabe.
+
+Die Nachfolge wird weiterhin ausschließlich vom Backend bestimmt. Die Clientverträge für `watch_party_leave` und `watch_party_heartbeat` zeigen, dass ein neuer `host_member_id` verarbeitet werden kann. Ein Transfer-RPC, eine nachgewiesene serverseitige Desktop-/Browser-Klassifikation und eine dokumentierte Wahlregel nach Beitrittszeit oder Verbindungsabbruch fehlen im Repository. Daher sind Desktop-Priorität, automatische Verdrängung beim Desktop-Beitritt und die Reihenfolge mehrerer Desktop-Mitglieder offen. Kein Client wählt sich selbst zum Host.
+
+Manuell mit Testkonten prüfen: regulärer Browser-Host-Austritt, kurzer Reconnect, Desktop-Host-Austritt mit und ohne verbleibenden Desktop und Desktop-Beitritt zu einem Browser-Host. Im verbleibenden Client jeweils die serverbestätigte Host-ID, Party-Code, Chat und Host-only prüfen. Bei tatsächlicher Browser-Nachfolge mit einem öffentlichen Link ohne Zugangsdaten Playbackposition, Play/Pause und ausbleibendes Reload der gleichen Quelle prüfen. Beim Desktop-Host muss das Browser-Vorschlagsformular verborgen bleiben.
+
+### Familien-Beta und Vorschläge
+
+- `VITE_PARTY_BROWSER_HOST_SHARE` bleibt standardmäßig aus. Nur bei aktiver privater Beta und nach Bestätigung kann ein direkter HTTPS-TorBox-HLS-Link mit `token` geteilt oder vorgeschlagen werden. Ein solcher Link kann Account-Zugriff vermitteln. Die Party verteilt ihn im lesbaren Realtime-Kanal und kann empfangene Kopien nicht löschen. Das Browser-Feld verhindert ein Desktop-mpv-Angebot, aber Desktop-Kanalmitglieder können den Broadcast technisch lesen.
+- Der neue HLS-Pfad lädt über hls.js mit Fetch. Unteranfragen sind auf die exakte HTTPS-Origin der Playlist beschränkt. Redirects werden abgelehnt. Quellen, die Cross-Origin-Varianten, Redirects, native HLS-Wiedergabe oder tokenisierte MP4/WebM-Links erfordern, fallen außerhalb dieses Pfads. Echte TorBox-Wiedergabe ist noch zu prüfen.
+- Der Client leert bei Austritt, Kick und Party-Ende Vorschläge, Eingabefelder, Angebot und HLS-Instanz. URL und Token werden nicht im Browser-Speicher oder in Einladungen abgelegt. Ein Account-Key bleibt bis zum Ablauf oder zur Rotation nutzbar. TorBox-Hilfe und API-Bedingungen formulieren die Weitergabe unterschiedlich. Echte Account-Credentials nur mit ausdrücklicher Anbieterfreigabe verwenden.
+- Das Vorschlagsformular wird erst nach einem Fähigkeitssignal der aktuellen Host-ID für dasselbe Medium angezeigt. `browser_stream_suggest` wird vom Desktop nicht verarbeitet. Das Signal ist kein serverbestätigter Gerätetyp. Das bekannte Realtime-Absenderrisiko bleibt bestehen. Die persönliche HLS-Eingabe ist ausschließlich lokal.
+
+## Phase 2.1: Grenzen der privaten Beta
+
+- Der Browser-Host hält den letzten abgeschlossenen Quellenstand im Speicher. Ein ausdrücklicher Widerruf hat eine eigene Revision und wird bei `state_request` und Reconnect erneut gesendet. Ältere Angebote derselben Host-/Medienkombination werden im Browser verworfen. Alte Desktop-Clients lesen weiterhin das gewöhnliche Streamangebot und bieten es zur manuellen Auswahl an.
+- Angebot und Playback bleiben getrennte Broadcasts. Gäste können eine Quelle vorübergehend erhalten, bevor ein Fehler erkannt wird. Bei einem Fehler im zweiten Schritt wird der alte Stand oder ein Widerruf mit höherer Revision erneut angeboten, auch wenn die unmittelbare Rücknahme fehlschlägt. Ein Send-Ergebnis bestätigt weder die Zustellung an alle Gäste noch die spätere Speicherung des Playback-States per RPC.
+- Host-Reload und Hostwechsel haben ohne serverseitig abrufbaren Quellenstand keine garantierte Wiederherstellung. Der neue Host muss seine eigene Quelle ausdrücklich freigeben. Die Revisionen dienen der Reihenfolge, nicht der Authentifizierung. Das bekannte Risiko frei behaupteter Realtime-Absender bleibt für die private Beta akzeptiert. Der Freigabeschalter ist standardmäßig aus.
+- Außerhalb des ausdrücklich aktivierten TorBox-HLS-Pfads werden bekannte TorBox-Domains und typische Account-Token-Parameter abgelehnt. Eine URL-Prüfung kann beliebig eingebettete Geheimnisse nicht erkennen.
+
+### Phase 2.2: Host-Übergabe
+
+Desktop und Browser schließen lokal ihre Session und verwenden beim regulären Verlassen `watch_party_leave`. `watch_party_end` ist eine separate Aktion. Desktop kann eine neue Host-ID aus einem Mitgliedschaftsereignis verarbeiten. Beide Clients können einen Hostwechsel über einen `watch_party_heartbeat`-Snapshot übernehmen. Der Browser erkennt sich als Host, wenn der Snapshot die eigene Mitglieds-ID als Host nennt und das Mitglied in der Liste steht. Beim Hostwechsel werden alte Freigaben verworfen. Der Browser kann Playback aus dem neuen Snapshot übernehmen, sofern es zur aktuellen Medienidentität und Host-only-Regel passt. Das belegt Client-Unterstützung, aber keine serverseitige Wahlregel.
+
+Bei einem Verbindungsabbruch senden die Reconnect-Pfade keinen regulären Austritt. Der Server kann die alte Mitgliedschaft noch führen. Wann sie abläuft und ob der Server dann einen Nachfolger bestimmt, ist aus den vorhandenen Verträgen nicht ableitbar.
+
+Kleinster nächster Schritt ist ein kontrollierter Test mit zwei autorisierten Konten. Desktop- und Browser-Host jeweils regulär verlassen lassen und getrennt davon die Verbindung unterbrechen. Beim verbleibenden Konto im Heartbeat Party-ID, `host_member_id`, Mitgliedschaft und den gültigen Playback-Stand prüfen. Wenn der Server den Nachfolger bestätigt, zunächst eine explizite Neu-Freigabe durch diesen Host vorsehen und die letzte bestätigte Position verwenden. Ohne bestätigten Nachfolger keine clientseitige Wahl. Automatische Quellenübernahme separat prüfen, da sie autorisierten Quellenstand und erneute Zustimmung braucht.
+
 Branch `restore/watchparty-0.1.49`. Die Implementierung ist in `f595fa818` enthalten; die Härtung unten ist **nicht getestet und nicht committet**.
 
 ## Sicherheitsstatus (Härtung nach dem Review): GESPERRT, durch das Backend blockiert
@@ -24,7 +98,6 @@ Branch `restore/watchparty-0.1.49`. Die Implementierung ist in `f595fa818` entha
   - Erstellen über die Cinemeta-Suche
 - **Unverändert:**
   - Desktop-Host-Freigaben („Share my stream“, Browser-HLS)
-  - das bisherige HLS-„Video laden & vorschlagen“ an einen Desktop-Host
   - Host-only, Solo-Modus und Countdown
   - Diese bestehenden Wege haben dieselbe ungeprüfte Absenderidentität. Das ist bekannt und hier nicht verschlimmert.
 
@@ -52,7 +125,7 @@ Erst wenn 1 und 2 vorhanden sind, darf die Browser-Freigabe öffentlich aktivier
 |---|---|
 | Host-Imitation bei Streamangebot, Widerruf und Party-Zeit des Browser-Hosts | **DURCH BACKEND BLOCKIERT**; die Funktion ist fail-closed gesperrt. |
 | Host-Imitation bei Vorschlagsentscheidungen | **DURCH BACKEND BLOCKIERT**; die Vorschläge sind gesperrt. |
-| Token-Leaks über Freigabe und Vorschläge (Realtime, für alle lesbar) | **ABGESICHERT, ABER EINGESCHRÄNKT**: Die neuen Wege sind gesperrt. Das bestehende HLS-Vorschlagen an Desktop-Hosts warnt weiterhin, dass Mitglieder den Link samt Tokens sehen. Eine URL-Prüfung kann unbekannte Secrets nicht erkennen. |
+| Token-Zugriff über Realtime | Die neuen Wege sind standardmäßig gesperrt. In der ausdrücklich aktivierten Familien-Beta sind weitergegebene Links für Kanalmitglieder lesbar. Der alte Browser-Vorschlagsweg an Desktop ist entfernt. |
 | Atomarer Quellenwechsel, verspätete Angebote nach Widerruf | **DURCH BACKEND BLOCKIERT**: Ohne serverseitige Revision ist keine Garantie möglich. Durch die Sperre entstehen keine widersprüchlichen Browser-Host-Quellen. |
 | Vorschläge nach Kick oder Medienwechsel | **ABGESICHERT, ABER EINGESCHRÄNKT**: Mit der Sperre wird nichts angenommen. Für den internen Schalter prüft die Annahme den Snapshot nur beim Eingang. |
 | Desktop-Gäste erhalten ein neues Angebot, mpv wechselt nicht automatisch | **ABGESICHERT, ABER EINGESCHRÄNKT**: Mit der Sperre kommt kein Browser-Host-Angebot an. Für Desktop-Host-Angebote bleibt die bestehende manuelle Quellenauswahl. Automatische Desktop-Wiedergabe ist nicht implementiert. |
@@ -109,7 +182,7 @@ Erst wenn 1 und 2 vorhanden sind, darf die Browser-Freigabe öffentlich aktivier
    - Browser-Gäste übernehmen das Angebot über den bestehenden Pfad.
    - Desktop-Gäste sehen es als „vom Host geteilte“ Quelle im Stream-Bildschirm.
 6. **Vorschläge:**
-   - Browser-Mitglieder nutzen „Video vorschlagen“ im Stream-Reiter, Desktop-Mitglieder „Video vorschlagen“ im Party-Menü.
+   - Browser-Mitglieder nutzen „Video vorschlagen“ im Stream-Reiter, wenn der aktuelle Browser-Host die Fähigkeit signalisiert.
    - Der Host sieht im Room Name, Format und Hostname. „Link prüfen“ zeigt die vollständige Adresse nur ihm.
    - „Annehmen“ gibt das Video wie unter 3 frei, „Ablehnen“ verwirft es. Der Vorschlagende sieht die Entscheidung.
 7. **Host-Reiter** in den Einstellungen, nur für den serverseitig bestätigten Host (`session.isHost()`):
@@ -148,7 +221,7 @@ Erst wenn 1 und 2 vorhanden sind, darf die Browser-Freigabe öffentlich aktivier
   - Der Backend-Vertrag ist nicht einsehbar, ein Live-Aufruf war nicht freigegeben.
   - Clientseitig ist eine Episode nötig: Der Wiedergabeschlüssel enthält Staffel und Episode, und Desktop-Gäste öffnen eine Party ohne Episode mit `videoId = metaId` (`MainAppContent.openPartyMedia`). Das liefert für Serien keine passenden Streams.
   - Die bestehende Episodenauswahl bleibt erhalten, es gibt keine Dummy-Daten.
-- **Desktop-Host und Vorschläge:** Ein Desktop-Host prüft Vorschläge wie bisher als HLS. MP4/WebM-Vorschläge kann nur ein Browser-Host annehmen.
+- **Desktop-Host und Vorschläge:** Der Browser sendet keine Vorschläge an Desktop-Hosts. Desktop-Streaming und vorhandene HLS-Empfängerlogik bleiben unverändert.
 
 ## Autoplay
 

@@ -52,7 +52,20 @@ export class PartySession {
     this.presence = {status: 'browsing'};
     this.closing = null;
     this.hostCommands = false; this.commands = new Map(); this.latestCommand = null;
+    this.browserHostLinksEnabled = false;
+    this.browserHostLinks = false;
     this.hostStream = null; // Browser host only: the link it currently shares (memory only).
+    this.hostOffer = null;
+    this.hostOfferRevision = 0;
+    this.receivedOfferRevision = 0;
+    this.receivedBrowserOffer = null;
+    this.previousHostId = null;
+    this.waitingForHostState = false;
+    this.hostOfferDeferred = false;
+    this.hostShareAction = null;
+    this.hostSourceRevision = 0;
+    this.sourceRecoveryScope = null;
+    this.sourceRecovery = null;
     this.commandTimers = new Set(); this.ackTimeoutMs = ACK_TIMEOUT_MS;
     // Latest informational status/position report per member (display only).
     this.memberStatus = new Map(); this.positionProvider = null;
@@ -67,40 +80,189 @@ export class PartySession {
   // The server-confirmed host always controls (watch_party_update authorizes it).
   canControl() {
     const room = this.room;
-    if (!room || !this.channel) return false;
+    if (!room || !this.channel || this.hostOfferDeferred) return false;
     if (this.isHost()) return true;
-    return room.info.host_only === false && !!room.info.host_member_id && room.info.host_member_id !== room.memberId;
+    return !this.waitingForHostState && room.info.host_only === false &&
+      !!room.info.host_member_id && room.info.host_member_id !== room.memberId;
   }
   // --- Browser host: shared video link (same `stream` offer as a Desktop host) --
   // Distributed over the private party channel and answered again on every
   // state_request (late joiners, reconnects). Memory only: after a reload of
   // the host page the link has to be shared again (no URLs are stored).
-  // The local source changes only after the channel accepted the message: a
-  // failed send keeps the previous source, and a failed offer is never resent
-  // later (state_request and reconnect announce only this.hostStream). This is
-  // client-side consistency, not a server-side transaction.
-  async shareHostStream(stream) {
-    if (!this.isHost()) throw new Error('Host-Rolle nicht vom Backend bestätigt.');
-    if (!this.channel) throw new Error('Keine Party-Verbindung.');
-    await this.sendHostStream(stream);
-    this.hostStream = stream;
+  // Reconnects replay only the committed offer or a tombstone. A send result
+  // does not confirm delivery to other members.
+  async shareHostStream(stream, startState, canShare) {
+    return this.changeHostStream(stream, startState, canShare);
   }
   async stopHostStream() {
-    if (!this.isHost()) return;
-    if (!this.channel) throw new Error('Keine Party-Verbindung.');
-    await this.sendHostStream(null);
-    this.hostStream = null;
+    return this.changeHostStream(null);
   }
-  async sendHostStream(stream = this.hostStream) {
-    if (!this.isHost() || !this.channel) return;
-    const sent = await this.channel.send({type: 'broadcast', event: 'stream', payload: {member_id: this.room.memberId, stream: stream ?? null}});
+  async changeHostStream(stream, startState, canShare = () => true) {
+    if (!this.isHost()) throw new Error('Host-Rolle nicht vom Backend bestätigt.');
+    const room = this.room, channel = this.channel, key = mediaKey(room.info.media);
+    if (!channel || this.hostOfferDeferred) throw new Error('Party-Verbindung noch nicht bestätigt.');
+    if (this.hostShareAction) throw new Error('Eine Freigabe läuft bereits.');
+    this.cancelSourceRecovery();
+    const action = {};
+    this.hostShareAction = action;
+    const current = () => this.hostShareAction === action && this.room === room && this.isHost() && mediaKey(room.info.media) === key;
+    const check = () => {
+      if (!current() || this.channel !== channel || this.hostOfferDeferred)
+        throw Object.assign(new Error('Party-Kontext geändert.'), {code: 'closed'});
+    };
+    const checkShare = () => {
+      check();
+      if (!canShare()) throw new Error('Der Vorschlag gilt nicht mehr.');
+    };
+    const offer = value => {
+      this.hostOfferRevision = Math.max(this.hostOfferRevision + 1, Date.now());
+      return {member_id: room.memberId, media_key: key, source_revision: this.hostOfferRevision, stream: value};
+    };
+    let sent = false;
+    try {
+      checkShare();
+      const next = offer(stream);
+      await this.sendHostStream(next, channel);
+      sent = true;
+      checkShare();
+      if (startState) { await this.hostPublish(startState, checkShare); checkShare(); }
+      this.hostStream = stream;
+      this.hostOffer = next;
+      this.hostSourceRevision++;
+      if (stream) channel.send({type: 'broadcast', event: 'stream_commit',
+        payload: {member_id: room.memberId, media_key: key, source_revision: next.source_revision}}).catch(() => {});
+    } catch (error) {
+      if (!sent || !current()) throw error;
+      // Even if compensation cannot be sent now, reconnects only replay the
+      // previous committed source (or its tombstone), at a higher wire revision.
+      const recovery = offer(this.hostStream);
+      this.hostOffer = recovery;
+      try { check(); await this.sendHostStream(recovery, channel); check(); }
+      catch { throw Object.assign(new Error('Die vorherige Freigabe konnte nicht erneut gesendet werden.'), {code: 'share_restore_failed'}); }
+      throw Object.assign(new Error('Die vorherige Freigabe wurde wieder angekündigt.'), {code: 'share_restored'});
+    } finally {
+      const replay = current() && (this.channel !== channel || action.replayRequested);
+      if (this.hostShareAction === action) this.hostShareAction = null;
+      if (replay) this.announceHostOffer();
+    }
+  }
+  announceHostOffer() {
+    if (!this.isHost() || !this.channel || this.hostOfferDeferred) return;
+    if (this.hostShareAction) { this.hostShareAction.replayRequested = true; return; }
+    if (!this.hostOffer) return;
+    this.sendHostStream({...this.hostOffer, handoff_ready: !!this.hostStream}, this.channel).catch(() => {});
+    if (this.hostStream && this.playback) this.channel.send({type: 'broadcast', event: 'state', payload: this.playback}).catch(() => {});
+  }
+  async sendHostStream(payload, channel) {
+    const sent = await channel.send({type: 'broadcast', event: 'stream', payload});
     if (sent && sent !== 'ok') throw new Error('Videofreigabe nicht gesendet (' + sent + ').');
+  }
+  armSourceRecovery() {
+    if (!this.browserHostLinksEnabled || !this.isHost() || this.hostOffer || this.sourceRecoveryScope) return;
+    this.sourceRecoveryScope = {room: this.room, key: mediaKey(this.room.info.media), memberId: this.room.memberId};
+    this.requestSourceRecovery();
+  }
+  sourceRecoveryMatches(scope) {
+    return !!scope && this.room === scope.room && this.isHost() && this.room.memberId === scope.memberId &&
+      mediaKey(this.room.info.media) === scope.key && !this.hostOffer && !this.hostShareAction;
+  }
+  requestSourceRecovery() {
+    const scope = this.sourceRecoveryScope, channel = this.channel;
+    if (!this.sourceRecoveryMatches(scope) || this.sourceRecovery || !channel || this.hostOfferDeferred ||
+        this.diagnostics.connection !== 'SUBSCRIBED') return;
+    const peers = this.room.members.map(member => member.id).filter(id => id !== scope.memberId).sort();
+    if (!peers.length) { this.failSourceRecovery(); return; }
+    const attempt = {...scope, channel, peers, id: newCommandId(), replies: new Map(), offer: null};
+    this.sourceRecovery = attempt;
+    attempt.timer = setTimeout(() => {
+      if (this.sourceRecovery === attempt) this.failSourceRecovery();
+    }, 3500);
+    attempt.timer?.unref?.();
+    channel.send({type: 'broadcast', event: 'browser_source_request', payload: {
+      request_id: attempt.id, party_id: scope.room.info.id, media_key: scope.key, host_member_id: scope.memberId,
+    }}).then(result => {
+      if (result && result !== 'ok' && this.sourceRecovery === attempt && !attempt.offer) this.failSourceRecovery();
+    }).catch(() => {
+      if (this.sourceRecovery === attempt && !attempt.offer) this.failSourceRecovery();
+    });
+  }
+  sourceRecoveryCurrent(attempt) {
+    if (!attempt || this.sourceRecovery !== attempt || !this.sourceRecoveryMatches(attempt) ||
+        this.channel !== attempt.channel || this.hostOfferDeferred) return false;
+    const peers = this.room.members.map(member => member.id).filter(id => id !== attempt.memberId).sort();
+    return peers.length === attempt.peers.length && peers.every((id, i) => id === attempt.peers[i]);
+  }
+  cancelSourceRecovery(retry = false) {
+    if (!retry) this.sourceRecoveryScope = null;
+    const attempt = this.sourceRecovery;
+    if (!attempt) return;
+    clearTimeout(attempt.timer);
+    this.sourceRecovery = null;
+    this.emit('sourceRecoveryCancelled', attempt);
+  }
+  failSourceRecovery() {
+    this.cancelSourceRecovery();
+    this.emit('sourceRecoveryUnavailable');
+  }
+  completeSourceRecovery(attempt, stream = attempt?.offer?.stream) {
+    if (!this.sourceRecoveryCurrent(attempt) || !attempt.offer) return false;
+    this.hostStream = stream;
+    this.hostOffer = {...attempt.offer, stream};
+    this.hostOfferRevision = Math.max(this.hostOfferRevision, attempt.offer.source_revision);
+    this.hostSourceRevision++;
+    clearTimeout(attempt.timer);
+    this.sourceRecovery = this.sourceRecoveryScope = null;
+    this.announceHostOffer();
+    return true;
+  }
+  receiveSourceRecovery(event, payload) {
+    const room = this.room, channel = this.channel;
+    if (!this.browserHostLinksEnabled || !channel || this.hostOfferDeferred || payload.party_id !== room.info.id ||
+        payload.media_key !== mediaKey(room.info.media) || !room.info.host_member_id ||
+        payload.host_member_id !== room.info.host_member_id || typeof payload.request_id !== 'string' ||
+        !/^[a-z0-9-]{8,64}$/i.test(payload.request_id)) return;
+    if (event === 'browser_source_request') {
+      if (this.isHost() || !room.memberId || !room.members.some(member => member.id === room.memberId) ||
+          !room.members.some(member => member.id === payload.host_member_id)) return;
+      const offer = this.receivedBrowserOffer;
+      channel.send({type: 'broadcast', event: 'browser_source_reply', payload: {
+        request_id: payload.request_id, party_id: room.info.id, media_key: payload.media_key,
+        host_member_id: payload.host_member_id, member_id: room.memberId,
+        source_revision: this.receivedOfferRevision,
+        stream: offer?.ready && offer.hostId === payload.host_member_id ? offer.stream : null,
+      }}).catch(() => {});
+      return;
+    }
+    const attempt = this.sourceRecovery;
+    if (!this.sourceRecoveryCurrent(attempt) || payload.request_id !== attempt.id || attempt.offer ||
+        !attempt.peers.includes(payload.member_id) || attempt.replies.has(payload.member_id)) return;
+    attempt.replies.set(payload.member_id, {revision: payload.source_revision, stream: payload.stream ?? null});
+    if (attempt.replies.size !== attempt.peers.length) return;
+    const first = attempt.replies.get(attempt.peers[0]);
+    // A missing, revoked, uncommitted or conflicting report cannot prove
+    // the current source. Never choose a link just because it arrived first.
+    if (!Number.isSafeInteger(first.revision) || first.revision <= 0 || first.stream?.media_key !== attempt.key ||
+        ![...attempt.replies.values()].every(reply => reply.revision === first.revision &&
+          JSON.stringify(reply.stream) === JSON.stringify(first.stream))) {
+      this.failSourceRecovery();
+      return;
+    }
+    clearTimeout(attempt.timer);
+    attempt.offer = {member_id: attempt.memberId, media_key: attempt.key, source_revision: first.revision, stream: first.stream};
+    attempt.timer = setTimeout(() => {
+      if (this.sourceRecovery === attempt) this.failSourceRecovery();
+    }, 30000);
+    attempt.timer?.unref?.();
+    this.emit('sourceRecoveryCandidate', attempt);
   }
   // Host's own play/pause/seek: broadcast first, then persisted by the
   // authorized watch_party_update (the same order as Nuvio Desktop).
-  hostPublish({paused, positionMs}) {
+  hostPublish({paused, positionMs, previousSeq}, check) {
     if (!this.isHost()) return Promise.reject(Object.assign(new Error('host_only'), {code: 'host_only'}));
-    return this.commitControl(this.prepareControl({paused, positionMs}), {mode: 'desktop'});
+    const {room, gen, playback} = this.prepareControl({paused, positionMs});
+    if (Number.isSafeInteger(previousSeq) && previousSeq < Number.MAX_SAFE_INTEGER)
+      playback.seq = Math.max(playback.seq, previousSeq + 1);
+    return this.publishLikeDesktop(room, gen, playback, check);
   }
   // Host decision about a member's proposal (display only for that member).
   answerProposal(memberId, accepted) {
@@ -145,24 +307,32 @@ export class PartySession {
       throw e;
     }
   }
-  async publishLikeDesktop(room, gen, playback) {
+  async publishLikeDesktop(room, gen, playback, check = () => {}) {
     const d = this.diagnostics;
-    const sent = await this.channel?.send({type: 'broadcast', event: 'state', payload: playback});
+    const channel = this.channel, key = mediaKey(room.info.media), hostId = room.info.host_member_id;
+    const sent = await channel?.send({type: 'broadcast', event: 'state', payload: playback});
+    check();
     if (!this.channel || (sent && sent !== 'ok')) throw Object.assign(new Error('broadcast_failed'), {code: 'broadcast_failed'});
-    if (gen !== this.generation || room !== this.room) throw Object.assign(new Error('closed'), {code: 'closed'});
+    if (gen !== this.generation || room !== this.room || this.channel !== channel ||
+        mediaKey(room.info.media) !== key || room.info.host_member_id !== hostId)
+      throw Object.assign(new Error('closed'), {code: 'closed'});
     this.acceptPlayback(playback, 'command');
     d.lastCommandResult = 'broadcast';
     // Persist in the background like Desktop's schedulePersist: the command is
     // already distributed, so the next gesture must not wait for this RPC.
-    this.persistControl(room, gen, playback);
+    this.persistControl(room, gen, playback, () => {
+      if (this.channel !== channel || mediaKey(room.info.media) !== key || room.info.host_member_id !== hostId)
+        throw new Error('Party-Kontext geändert.');
+    });
     return playback;
   }
   // A failure does not revert the distributed state; a late or stale reply is
   // applied with normal ordering (acceptPlayback) and cannot roll back newer ones.
-  async persistControl(room, gen, playback) {
+  async persistControl(room, gen, playback, check = () => {}) {
     const d = this.diagnostics;
     try {
       const result = await this.rpc('watch_party_update', {p_party_id: room.info.id, p_device_id: this.deviceId, p_playback: playback});
+      check();
       if (gen !== this.generation || room !== this.room) return;
       const party = result?.party;
       if (party && typeof party.host_only === 'boolean' && party.host_only !== room.info.host_only) { room.info.host_only = party.host_only; this.emit('room', room); }
@@ -295,6 +465,10 @@ export class PartySession {
     return !!this.room?.memberId && this.room.info.host_member_id === this.room.memberId &&
       this.room.members.some(member => member.id === this.room.memberId);
   }
+  canSuggestBrowserLink() {
+    return this.browserHostLinksEnabled && this.browserHostLinks && !!this.channel &&
+      !!this.room?.memberId && !!this.room.info.host_member_id && !this.isHost();
+  }
   async hostAction(name, fields = {}) {
     const room = this.room;
     if (!this.isHost()) throw new Error('Host-Rolle nicht vom Backend bestätigt.');
@@ -357,9 +531,11 @@ export class PartySession {
       config: {private: true, broadcast: {ack: false, self: false}, presence: {key: room.memberId}},
     });
     this.channel = ch;
+    this.browserHostLinks = false;
+    this.emit('hostCapabilities');
     this.noteConnection('CONNECTING');
     this.emit('connection', 'CONNECTING');
-    for (const event of ['state', 'stream', 'media', 'control', 'chat', 'ended', 'member_left', 'member_joined', 'state_request', 'status', 'ack', 'countdown', 'stream_suggest', 'stream_suggest_result']) {
+    for (const event of ['state', 'stream', 'stream_commit', 'browser_source_request', 'browser_source_reply', 'media', 'control', 'chat', 'ended', 'member_left', 'member_joined', 'state_request', 'status', 'ack', 'countdown', 'browser_stream_suggest', 'stream_suggest_result']) {
       ch.on('broadcast', {event}, ({payload}) => {
         if (gen === this.generation && this.room === room && this.channel === ch) this.receive(event, payload);
       });
@@ -367,14 +543,14 @@ export class PartySession {
     ch.subscribe(async (state, error) => {
       // Callbacks of a replaced or removed channel are stale.
       if (gen !== this.generation || this.channel !== ch) return;
+      this.hostOfferDeferred = true;
       this.noteConnection(state, error);
       this.emit('connection', state);
       if (error) this.emit('error', new Error('Privater Realtime-Kanal nicht verbunden. Anmeldung und Netzwerk prüfen.'));
-      if (state !== 'SUBSCRIBED') { this.scheduleReconnect(gen, state); return; }
+      if (state !== 'SUBSCRIBED') { this.cancelSourceRecovery(true); this.scheduleReconnect(gen, state); return; }
       this.reconnectAttempts = 0;
       if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
-      // A browser host re-announces its shared link and party time after (re)connecting.
-      if (this.isHost() && this.hostStream) { this.sendHostStream().catch(() => {}); if (this.playback) this.channel.send({type: 'broadcast', event: 'state', payload: this.playback}).catch(() => {}); }
+      // The heartbeat revalidates the role before a (re)connected host replays an offer.
       try { await Promise.all([this.sendPresence(), this.requestState(), this.refresh()]); }
       catch (e) { this.emit('error', e); }
     });
@@ -409,6 +585,8 @@ export class PartySession {
     if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
     this.diagnostics.reconnects++;
     this.reconnectAttempts++;
+    this.hostOfferDeferred = true;
+    this.cancelSourceRecovery(true);
     this.channel = null; // Silences the old channel's callbacks before removal.
     this.reconnecting = (async () => {
       try {
@@ -433,14 +611,42 @@ export class PartySession {
   receive(event, payload) {
     if (event === 'state') { this.acceptPlayback(payload, 'realtime'); return; }
     if (!this.room || !payload) return;
+    if (event === 'browser_source_request' || event === 'browser_source_reply') {
+      this.receiveSourceRecovery(event, payload);
+      return;
+    }
     if (event === 'ack') { this.receiveAck(payload); return; }
     // Only the current host's status announces the sequencer capability.
     if (event === 'status') {
-      if (payload.member_id === this.room.info.host_member_id) this.hostCommands = payload.commands === COMMAND_PROTOCOL;
+      if (payload.member_id === this.room.info.host_member_id) {
+        this.hostCommands = payload.commands === COMMAND_PROTOCOL;
+        const supported = payload.browser_host_links === 1 && payload.media_key === mediaKey(this.room.info.media);
+        if (this.browserHostLinks !== supported && payload.media_key === mediaKey(this.room.info.media)) {
+          this.browserHostLinks = supported;
+          this.emit('hostCapabilities');
+        }
+      }
       this.noteMemberStatus(payload);
       return;
     }
-    if (event === 'stream' && payload.member_id === this.room.info.host_member_id) this.emit('stream', payload.stream ?? null);
+    if (event === 'stream' && this.room.info.host_member_id && payload.member_id === this.room.info.host_member_id) {
+      if (Object.hasOwn(payload, 'source_revision')) {
+        const key = mediaKey(this.room.info.media);
+        if (!Number.isSafeInteger(payload.source_revision) || payload.source_revision < this.receivedOfferRevision ||
+            payload.media_key !== key || (payload.stream && payload.stream.media_key !== key)) return;
+        if (payload.source_revision === this.receivedOfferRevision) {
+          if (payload.handoff_ready === true && this.receivedBrowserOffer) this.receivedBrowserOffer.ready = true;
+          return;
+        }
+        this.receivedOfferRevision = payload.source_revision;
+        this.receivedBrowserOffer = payload.stream
+          ? {stream: payload.stream, hostId: payload.member_id, ready: payload.handoff_ready === true} : null;
+      } else if (this.receivedOfferRevision) return;
+      this.emit('stream', payload.stream ?? null);
+    }
+    if (event === 'stream_commit' && payload.member_id === this.room.info.host_member_id &&
+        payload.media_key === mediaKey(this.room.info.media) && payload.source_revision === this.receivedOfferRevision &&
+        this.receivedBrowserOffer) this.receivedBrowserOffer.ready = true;
     // Shared start announced by the host (server time); display only.
     if (event === 'countdown' && payload.member_id === this.room.info.host_member_id) this.emit('countdown', payload);
     // Database snapshots are authoritative for media, membership and host-only changes.
@@ -450,15 +656,13 @@ export class PartySession {
       this.sendPresence().catch(e => this.emit('error', e));
       // Browser host: late joiners and reconnects get the shared link and the
       // party time, only while it actually shares one (no unsolicited revocation).
-      if (this.isHost() && this.hostStream) {
-        this.sendHostStream().catch(() => {});
-        if (this.playback) this.channel?.send({type: 'broadcast', event: 'state', payload: this.playback}).catch(() => {});
-      }
+      this.announceHostOffer();
     }
     // Proposals arrive on the shared party channel: every member can read them,
     // and the sender ID is claimed, not authenticated. Only the host's view uses
     // them, and main.js ignores them while browser-host sharing is locked.
-    if (event === 'stream_suggest' && this.isHost()) this.emit('proposal', payload);
+    if (event === 'browser_stream_suggest' && this.browserHostLinksEnabled && this.isHost() &&
+        payload.target_member_id === this.room.memberId) this.emit('proposal', payload);
     // The host's decision about this member's own proposal (display only).
     if (event === 'stream_suggest_result' && payload.member_id === this.room.info.host_member_id &&
         payload.target_member_id === this.room.memberId && ['accepted', 'declined'].includes(payload.status)) this.emit('proposalResult', payload.status);
@@ -480,11 +684,15 @@ export class PartySession {
     const info = this.room?.info;
     d.lastDecision = !info ? 'no_room' : !validPlayback(next) ? 'invalid_playback'
       : next.media_key && next.media_key !== mediaKey(info.media) ? 'wrong_media'
+      : this.waitingForHostState && (!info.host_member_id || next.member_id !== info.host_member_id) ? 'not_host'
+      : this.previousHostId && next.member_id === this.previousHostId && next.member_id !== info.host_member_id &&
+        (source === 'snapshot' || !this.room.members.some(member => member.id === next.member_id)) ? 'not_host'
       : info.host_only && next.member_id !== info.host_member_id ? 'not_host'
       : !isNewerPlayback(next, this.playback) ? 'not_newer' : 'accepted';
     if (d.lastDecision !== 'accepted') return;
     d.lastAcceptedAt = receivedAt; d.acceptedSource = source;
     this.playback = next;
+    this.waitingForHostState = false;
     // The ordered revision of one of our commands, published by the host.
     const entry = next.command_id && next.origin_member_id === this.room.memberId && next.member_id === info.host_member_id
       ? this.commands.get(String(next.command_id)) : null;
@@ -498,27 +706,45 @@ export class PartySession {
     const room = this.room;
     if (!room || this.refreshBusy === room) return;
     this.refreshBusy = room;
+    const channel = this.channel;
     try {
       const result = await this.rpc('watch_party_heartbeat', {p_party_id: room.info.id, p_device_id: this.deviceId});
       if (room !== this.room) return;
       if (!result?.party) return await this.finish('Die Party wurde beendet.', 'ended');
       const changed = mediaKey(room.info.media) !== mediaKey(result.party.media);
       const hostChanged = room.info.host_member_id !== result.party.host_member_id;
+      const previousHostId = room.info.host_member_id;
+      const nextPlayback = result.party.playback;
+      const confirmedPlayback = validPlayback(nextPlayback) && nextPlayback.member_id === result.party.host_member_id &&
+        nextPlayback.media_key === mediaKey(result.party.media) ? nextPlayback : this.playback;
+      const inherited = hostChanged && !changed && this.receivedBrowserOffer?.ready
+        ? {stream: this.receivedBrowserOffer.stream, playback: confirmedPlayback} : null;
       room.info = result.party; room.members = result.members || [];
+      if (this.sourceRecoveryScope && !this.sourceRecoveryMatches(this.sourceRecoveryScope)) this.cancelSourceRecovery();
       // Sequence numbers belong to a coordinator. A new host may start at 0;
       // never keep following the previous host while waiting for its state.
       if (changed || hostChanged) this.playback = null;
       // New epoch: commands for the previous host or film never become valid.
-      if (hostChanged) this.hostCommands = false;
+      if (hostChanged) {
+        this.hostCommands = false;
+        this.previousHostId = previousHostId || this.previousHostId;
+        this.waitingForHostState = true;
+      }
       // A shared link belongs to its host and film; it is never carried over.
-      if (changed || hostChanged) this.hostStream = null;
+      if (changed || hostChanged) { this.browserHostLinks = false; this.resetHostOffer(); }
       if (changed || hostChanged) this.dropCommands('stale_epoch');
       if (changed) { this.memberStatus.clear(); this.emit('members', this.memberStatus); }
       if (changed) { this.presence = {status: 'browsing'}; this.emit('media', room.info.media); }
       // A host change is not a revocation by the sharing host; main decides
       // whether an already loaded source may continue locally.
       if (changed || hostChanged) this.emit('stream', null, changed ? 'media_changed' : 'host_changed');
+      const revalidated = this.hostOfferDeferred && channel === this.channel && this.diagnostics.connection === 'SUBSCRIBED';
+      if (revalidated) this.hostOfferDeferred = false;
       this.emit('room', room); this.acceptPlayback(result.party.playback, 'snapshot');
+      if (hostChanged && this.isHost()) this.emit('promoted', inherited);
+      if (revalidated && room === this.room && channel === this.channel) this.announceHostOffer();
+      if (this.sourceRecovery && !this.sourceRecoveryCurrent(this.sourceRecovery) && !this.hostOfferDeferred) this.failSourceRecovery();
+      this.requestSourceRecovery();
       if (changed || hostChanged) { await this.sendPresence(); await this.requestState(); }
     } catch (e) {
       if (room !== this.room) return;
@@ -554,25 +780,30 @@ export class PartySession {
     if (!this.room || !this.channel) return;
     const fields = this.positionFields();
     if (!('position_ms' in fields)) return;
-    const payload = {...this.presence, member_id: this.room.memberId, media_key: mediaKey(this.room.info.media), ...fields};
+    const payload = {...this.presence, member_id: this.room.memberId, media_key: mediaKey(this.room.info.media), ...fields,
+      ...(this.isHost() ? {browser_host_links: Number(this.browserHostLinksEnabled)} : {})};
     await this.channel.send({type: 'broadcast', event: 'status', payload}).catch(() => {});
   }
   async sendPresence(status, behindMs, solo = false) {
     if (!this.room || !this.channel) return;
     // solo: watching alone on purpose (shown as "Allein"); optional field.
     if (status) this.presence = {status, ...(behindMs != null ? {behind_ms: behindMs} : {}), ...(solo ? {solo: true} : {})};
-    const payload = {...this.presence, member_id: this.room.memberId, media_key: mediaKey(this.room.info.media), ...this.positionFields()};
-    const tracked = await this.channel.track(payload);
+    const room = this.room, channel = this.channel;
+    const payload = {...this.presence, member_id: room.memberId, media_key: mediaKey(room.info.media), ...this.positionFields(),
+      ...(this.isHost() ? {browser_host_links: Number(this.browserHostLinksEnabled)} : {})};
+    const tracked = await channel.track(payload);
+    if (room !== this.room || channel !== this.channel || payload.media_key !== mediaKey(room.info.media) ||
+        ('browser_host_links' in payload && !this.isHost())) return;
     if (tracked && tracked !== 'ok') throw new Error('Online-Status nicht bestätigt (' + tracked + '). RPC-Beitritt allein stellt keine Realtime-Verbindung her.');
-    const sent = await this.channel.send({type: 'broadcast', event: 'status', payload});
+    const sent = await channel.send({type: 'broadcast', event: 'status', payload});
     if (sent && sent !== 'ok') throw new Error('Party-Status nicht gesendet (' + sent + ').');
   }
-  // Proposal of a video link to the Desktop host (explicit opt-in per link).
-  // Never applied by the sender: the host must confirm, and the host's checked
-  // stream event is what guests then play.
+  // This event is ignored by Desktop. The capability is a client claim, not an
+  // authenticated device type. The private party channel can still read the URL.
   async suggestStream(url, key) {
-    if (!this.room || !this.channel) throw new Error('Keine Party-Verbindung.');
-    const result = await this.channel.send({type: 'broadcast', event: 'stream_suggest', payload: {member_id: this.room.memberId, media_key: key, url}});
+    if (!this.canSuggestBrowserLink() || key !== mediaKey(this.room.info.media)) throw new Error('Dieser Host nimmt keine Browser-Vorschläge an.');
+    const result = await this.channel.send({type: 'broadcast', event: 'browser_stream_suggest',
+      payload: {member_id: this.room.memberId, target_member_id: this.room.info.host_member_id, media_key: key, url}});
     if (result && result !== 'ok') throw new Error('Vorschlag nicht gesendet (' + result + ').');
   }
   async requestState() {
@@ -620,12 +851,23 @@ export class PartySession {
     // An explicit close or a newer join supersedes this end notification.
     if (gen === this.generation && !this.room) this.emit('ended', message, reason);
   }
+  resetHostOffer() {
+    this.hostStream = this.hostOffer = this.hostShareAction = null;
+    this.receivedOfferRevision = 0;
+    this.receivedBrowserOffer = null;
+    this.hostSourceRevision++;
+  }
   close(callLeave = true) {
     this.generation++; // Also cancel joins still awaiting authentication/RPC.
     if (this.closing) return this.closing;
     const old = this.room, ch = this.channel;
+    this.cancelSourceRecovery();
     this.room = null; this.channel = null; this.playback = null;
-    this.hostCommands = false; this.commands.clear(); this.latestCommand = null; this.memberStatus.clear(); this.hostStream = null;
+    this.previousHostId = null;
+    this.waitingForHostState = false;
+    this.hostOfferDeferred = false;
+    this.browserHostLinks = false;
+    this.hostCommands = false; this.commands.clear(); this.latestCommand = null; this.memberStatus.clear(); this.resetHostOffer();
     this.commandTimers.forEach(clearTimeout); this.commandTimers.clear();
     if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
     this.reconnectAttempts = 0;

@@ -5,7 +5,7 @@ import {normalizeCode, validCode, partyCodeFromPath, mediaKey, expectedPositionM
 import {PartySession, callRpc} from './session.js';
 import {PersonalHlsSource, personalHlsUrlProblem} from './personal-hls.js';
 import {loadRoomTitle, resolveRoomMedia, roomMediaForEpisode, searchRoomMedia} from './room-media.js';
-import {classifyShareLink, hostShareStream, proposalFrom} from './host-share.js';
+import {classifyShareLink, familyHlsRequest, hostShareStream, proposalFrom} from './host-share.js';
 import {SYNC, HLS_TUNING, bufferedRanges, bufferAhead, correctionFor, seekTarget, SeekLead, StallTracker, qualityOptions} from './sync-policy.js';
 
 const $ = id => document.getElementById(id);
@@ -88,6 +88,11 @@ const session = client ? new PartySession(client, deviceId, {
     renderPartyRoom();
     renderControlInfo();
     showPanel('watch');
+    if (session.isHost() && hostMenuRoom !== room) {
+      hostMenuRoom = room;
+      openDrawer('settings', $('membersButton'));
+      selectDrawerTab('Host');
+    } else if (!session.isHost()) hostMenuRoom = null;
   },
   connection: state => {
     $('roomConnection').textContent = state === 'SUBSCRIBED' ? 'Verbunden'
@@ -107,6 +112,8 @@ const session = client ? new PartySession(client, deviceId, {
       syncEnabled = false;
       if (!soloMode) pauseLocally(); // Watching alone does not depend on the party.
       status('Realtime-Verbindung unterbrochen. Sie wird automatisch neu aufgebaut; danach folgt die Wiedergabe wieder der Party-Zeit.', true);
+    } else if (state === 'SUBSCRIBED' && awaitingHandoff) {
+      finishBrowserHandoff();
     } else if (state === 'SUBSCRIBED' && resumeAfterReconnect) {
       // Reconnect restores the authoritative party state (state_request + snapshot).
       resumeAfterReconnect = false;
@@ -114,38 +121,94 @@ const session = client ? new PartySession(client, deviceId, {
     }
   },
   playback: () => {
+    if (awaitingHandoff) { finishBrowserHandoff(); return; }
     updatePersonalHlsReadiness();
     if (awaitingPartyState && loadedStream && !soloMode && session.playback) { awaitingPartyState = false; resyncNow(); }
-    applySync(); renderSyncDebug();
+    applySync(); finishSourceRecovery(); renderSyncDebug();
+  },
+  sourceRecoveryCandidate: attempt => {
+    const offered = browserPartyStream(attempt.offer.stream);
+    const validated = hostShareStream(offered?.url, attempt.key, browserHostShareEnabled);
+    const source = browserPartyStream(validated.stream);
+    if (!source || !!source.family_beta !== !!offered.family_beta || shareBusy || loadedStream || selectedStream) {
+      session.failSourceRecovery();
+      return;
+    }
+    recoveringSource = {attempt, stream: validated.stream};
+    selectedStream = source;
+    $('streamInfo').textContent = 'Die bisherige Videoquelle wird wiederhergestellt …';
+    startStream();
+  },
+  sourceRecoveryCancelled: attempt => {
+    if (recoveringSource?.attempt !== attempt) return;
+    recoveringSource = null;
+    resetVideo();
+  },
+  sourceRecoveryUnavailable: () => {
+    if (!session.isHost() || session.hostOffer) return;
+    $('roomShareStatus').textContent = 'Keine eindeutig aktive Videoquelle gefunden. Bitte den Link erneut freigeben.';
+    status($('roomShareStatus').textContent);
   },
   command: entry => commandSettled(entry),
   // Browser host only (session checks the host role first).
   proposal: payload => {
     if (!browserHostShareEnabled) return; // Locked: unauthenticated sender, readable by all members.
-    const room = session.room, proposal = proposalFrom(payload, room, mediaKey(room?.info.media));
+    const room = session.room, proposal = proposalFrom(payload, room, mediaKey(room?.info.media), browserHostShareEnabled);
     if (!proposal) return;
     const existing = proposals.findIndex(item => item.memberId === proposal.memberId);
     if (existing >= 0) proposals.splice(existing, 1); // One open proposal per member.
-    proposals.unshift({...proposal, mediaKey: mediaKey(room.info.media), id: ++proposalSeq});
+    proposals.unshift({...proposal, room, mediaKey: mediaKey(room.info.media), revision: session.hostSourceRevision, id: ++proposalSeq});
     proposals.length = Math.min(proposals.length, 10);
     renderPartyRoom();
     status(`Neuer Videovorschlag von ${proposal.name}. Prüfen und annehmen im Party-Room.`);
   },
+  hostCapabilities: () => renderProposalForm(),
   proposalResult: result => {
+    if (!session.canSuggestBrowserLink()) return;
     $('suggestStatus').textContent = result === 'accepted' ? 'Der Host hat deinen Vorschlag angenommen.' : 'Der Host hat deinen Vorschlag abgelehnt.';
     status($('suggestStatus').textContent, result !== 'accepted');
   },
   members: () => { if (session?.room) { renderMembers(session.room); renderPartyRoom(); } },
+  promoted: inherited => {
+    if (!browserHostShareEnabled) return;
+    const source = browserPartyStream(inherited?.stream);
+    const link = classifyShareLink(source?.url, browserHostShareEnabled);
+    // Family links were explicitly shared with this party. Other signed URLs
+    // and Desktop grants still need an explicit new share.
+    if (!inherited?.playback || soloMode || link.problem ||
+        (new URL(link.url).search && !(link.family && source.family_beta))) {
+      selectDrawerTab('Party');
+      status('Du bist jetzt Host. Gib einen gültigen Videolink für die Party frei.');
+      return;
+    }
+    shareHostVideo(link.url, undefined, inherited.playback);
+  },
   stream: (stream, reason) => {
-    if (session?.isHost?.()) return;
     // A host change is no revocation by the sharing host: an already loaded
     // source continues locally ("Allein"); an explicit revocation (null without
     // reason) still stops it at once.
-    if (!stream && reason === 'host_changed' && loadedStream && !personalHls.active) {
+    if (!stream && reason === 'host_changed') {
+      hostShared = null;
+      proposals.length = 0;
+      pendingCommand = queuedCommand = null;
       lastHostStreamEvent = undefined;
-      continueLocally('Der Host hat gewechselt. Die bisherige Quelle läuft lokal weiter; „Zur Party“ übernimmt die Party-Zeit des neuen Hosts.');
+      awaitingHandoff = !soloMode && (syncEnabled || resumeAfterReconnect || awaitingHandoff) && !!loadedStream && !personalHls.active;
+      handoffSourceReady = false;
+      awaitingPartyState = false;
+      resumeAfterReconnect = false;
+      if (awaitingHandoff) {
+        syncEnabled = false; pendingPlay = pendingSeek = null;
+        player.playbackRate = 1;
+        presence(); renderPlayerUi();
+        status('Synchronisierung wird übernommen …');
+      } else if (loadedStream && !personalHls.active) {
+        continueLocally('Der Host hat gewechselt. Die bisherige Quelle läuft lokal weiter.');
+      } else if (!personalHls.active) resetVideo();
       return;
     }
+    if (session?.isHost?.()) return;
+    if (stream?.browser_hls?.family_beta_url &&
+        (!browserHostShareEnabled || !classifyShareLink(stream.browser_hls.family_beta_url, true).family)) return;
     // Includes revocations, incompatible URLs and host source changes. Only an
     // authoritative media/room lifecycle event clears a personal source.
     if (stream && stream.media_key !== mediaKey(session.room?.info.media)) return;
@@ -180,7 +243,14 @@ const session = client ? new PartySession(client, deviceId, {
     }
     if (stream.media_key !== mediaKey(session.room?.info.media)) return;
     const identity = JSON.stringify(stream);
-    if (identity === JSON.stringify(selectedStream)) return; // Reconnect re-offers the same source: no reload.
+    if (identity === JSON.stringify(selectedStream)) {
+      if (awaitingHandoff && !soloMode) {
+        handoffSourceReady = !!loadedStream;
+        finishBrowserHandoff();
+      }
+      return;
+    }
+    awaitingHandoff = false;
     // Watching alone: a renewed source continues locally where it was.
     soloResume = soloMode && loadedStream ? {seconds: player.currentTime, playing: !player.paused} : null;
     // Do not keep playing a revoked or superseded source until the next user click.
@@ -210,7 +280,7 @@ const session = client ? new PartySession(client, deviceId, {
     }
     else { $('noStream').textContent = 'Stream bereit. Tippe auf ▶, um gemeinsam zu schauen.'; status('Stream bereit. Tippe auf ▶ zum Abspielen.'); }
   },
-  media: () => { lastHostStreamEvent = undefined; soloMode = false; soloResume = null; resetVideo('Film gewechselt. Persönliche Quelle entfernt. Bitte eine neue eigene Quelle laden.'); $('streamInfo').textContent = 'Film gewechselt. Warte auf die neue Streamfreigabe oder lade eine eigene HLS-Quelle.'; },
+  media: () => { hostShared = null; lastHostStreamEvent = undefined; soloMode = false; soloResume = null; resetVideo('Film gewechselt. Persönliche Quelle entfernt. Bitte eine neue eigene Quelle laden.'); $('streamInfo').textContent = 'Film gewechselt. Warte auf die neue Streamfreigabe oder lade eine eigene HLS-Quelle.'; },
   // Shared start: count down to the host's server-time start; playback itself
   // still follows the host's authoritative state (no local start here).
   countdown: payload => {
@@ -239,7 +309,10 @@ const session = client ? new PartySession(client, deviceId, {
   closed: reason => {
     lastHostStreamEvent = undefined; familyGrant = null; familyStream = null; familyRequest++;
     // A closed party has no shared source, open proposals or waiting room.
-    hostShared = null; roomOverviewOpen = false; proposals.length = 0; renderPartyRoom();
+    hostShared = null; hostMenuRoom = null; awaitingHandoff = false; proposals.length = 0; renderPartyRoom();
+    $('roomShareUrl').value = ''; $('proposalUrl').value = '';
+    $('roomShareStatus').textContent = ''; $('suggestStatus').textContent = '';
+    $('roomProposalList').replaceChildren();
     // Party ended / host left: a loaded source may keep playing locally (see
     // "ended"). A removal, leave or new join stops it.
     if (!keepAfterPartyEnd(reason)) resetVideo('Party-Verbindung geschlossen. Persönliche Quelle entfernt.');
@@ -254,6 +327,7 @@ const session = client ? new PartySession(client, deviceId, {
     resetVideo('Party beendet oder Mitgliedschaft verloren. Persönliche Quelle entfernt.'); showPanel('join'); status(message);
   },
 }) : null;
+if (session) session.browserHostLinksEnabled = browserHostShareEnabled;
 
 // Transient toast instead of a permanent banner; errors stay a little longer.
 let toastTimer = null, connectionLost = false, realtimeReconnecting = false, resumeAfterReconnect = false;
@@ -323,18 +397,40 @@ function renderAvatar(element, member) {
 // authorized watch_party_update), and with host_only=false it follows the
 // members' states like any member. Memory only: after a reload of the host
 // page the link has to be shared again.
-let hostShared = null, roomOverviewOpen = false, shareBusy = false;
+let hostShared = null, hostMenuRoom = null, awaitingHandoff = false, handoffSourceReady = false, shareBusy = false;
+let recoveringSource = null;
+
+function finishSourceRecovery() {
+  const recovery = recoveringSource;
+  const state = session?.playback;
+  if (!recovery || !state || !syncEnabled || connectionLost || waitingForTarget || player.seeking || pendingPlay ||
+      player.readyState < 2 || !loadedStream || player.paused !== state.paused) return;
+  if (!session.completeSourceRecovery(recovery.attempt, recovery.stream)) return;
+  recoveringSource = null;
+  hostShared = recovery.stream;
+  $('roomShareStatus').textContent = '';
+  renderPartyRoom();
+  status('Video wiederhergestellt – gemeinsam verbunden');
+}
+
+function finishBrowserHandoff() {
+  const state = session?.playback, room = session?.room;
+  if (!awaitingHandoff || !handoffSourceReady || !loadedStream || soloMode || connectionLost ||
+      !room || !state || state.member_id !== room.info.host_member_id) return;
+  awaitingHandoff = handoffSourceReady = false;
+  resyncNow();
+  if (syncEnabled) status('Gemeinsam verbunden.');
+}
 const proposals = [];
 let proposalSeq = 0;
-// Waiting room for everyone: the host until it shares a video, members until a
-// source is offered or loaded (no error just because nothing is shared yet).
-// Both can open it again from the player (Party tab, Host tab).
+// Party details live in the drawer and never hide the player.
 function renderPartyRoom() {
   const room = session?.room, host = session?.isHost?.() === true;
+  renderProposalForm();
   $('tabHost').hidden = !host;
   if (!room) {
     $('roomOverview').hidden = true;
-    hostShared = null; roomOverviewOpen = false; proposals.length = 0;
+    hostShared = null; hostMenuRoom = null; awaitingHandoff = false; proposals.length = 0;
     return;
   }
   if (!host) {
@@ -344,14 +440,15 @@ function renderPartyRoom() {
   // Proposals of members who left or were removed, or for another title, expire.
   const currentKey = mediaKey(room.info.media);
   for (let i = proposals.length - 1; i >= 0; i--) {
-    if (proposals[i].mediaKey !== currentKey || !room.members.some(member => member.id === proposals[i].memberId)) proposals.splice(i, 1);
+    if (proposals[i].room !== room || proposals[i].revision !== session.hostSourceRevision ||
+        proposals[i].mediaKey !== currentKey || !room.members.some(member => member.id === proposals[i].memberId)) proposals.splice(i, 1);
   }
   const hasSource = host ? !!hostShared : !!(loadedStream || selectedStream);
-  const showRoom = !hasSource || roomOverviewOpen;
-  $('roomOverview').hidden = !showRoom;
-  $('playerWrap').hidden = showRoom;
+  $('roomOverview').hidden = false;
+  $('playerWrap').hidden = false;
   $('roomKicker').textContent = host ? 'Dein Party-Room' : 'Party-Room';
-  $('roomWaiting').textContent = hasSource ? '' : host ? 'Noch kein Video freigegeben. Mitglieder können schon beitreten und chatten.'
+  const newVideo = !host && selectedStream && !loadedStream && !streamProblem(selectedStream);
+  $('roomWaiting').textContent = newVideo ? 'Neues Video verfügbar' : hasSource ? '' : host ? 'Noch kein Video freigegeben. Mitglieder können schon beitreten und chatten.'
     : 'Warte auf Video vom Host …';
   $('roomShareForm').hidden = !host;
   $('roomOpenHost').hidden = !host;
@@ -368,7 +465,7 @@ function renderPartyRoom() {
   $('roomCode').textContent = 'Party-Code ' + room.info.code;
   const max = Number(room.info.max_members);
   $('roomMemberCount').textContent = `${room.members.length}${max > 0 ? ' / ' + max : ''} Teilnehmer`;
-  $('roomBackToPlayer').hidden = !hasSource;
+  $('roomBackToPlayer').hidden = false;
   const code = normalizeCode(room.info.code);
   $('roomInvite').value = validCode(code) ? new URL('/party/' + code, location.origin).href : '';
   if (!host) { $('roomProposals').hidden = true; return; }
@@ -420,7 +517,9 @@ function renderProposals() {
     const item = document.createElement('li'), label = document.createElement('span');
     label.textContent = `${proposal.name} · ${proposal.kind.toUpperCase()} · ${proposal.host}`;
     const full = document.createElement('code');
-    full.className = 'room-proposal-url'; full.hidden = true; full.textContent = proposal.url;
+    full.className = 'room-proposal-url'; full.hidden = true;
+    const address = new URL(proposal.url);
+    full.textContent = classifyShareLink(proposal.url, true).family ? address.origin : address.origin + address.pathname;
     const button = (text, kind, action) => {
       const element = document.createElement('button');
       element.type = 'button'; element.className = `btn small ${kind}`; element.textContent = text;
@@ -432,10 +531,14 @@ function renderProposals() {
       button('Annehmen', 'primary', async () => {
         // Re-check against the current server snapshot: still a member, same party title.
         const room = session?.room;
-        const current = room && proposalFrom({member_id: proposal.memberId, media_key: proposal.mediaKey, url: proposal.url}, room, mediaKey(room.info.media));
-        if (!current) { dropProposal(proposal.id); status('Dieser Vorschlag gilt nicht mehr (Mitglied nicht mehr dabei oder Titel gewechselt).', true); return; }
-        if (!await shareHostVideo(proposal.url)) return;
-        session.answerProposal(proposal.memberId, true);
+        const current = () => session.room === room && room === proposal.room && session.isHost() && proposals.includes(proposal) &&
+          proposal.revision === session.hostSourceRevision &&
+          proposalFrom({member_id: proposal.memberId, media_key: proposal.mediaKey, url: proposal.url},
+            room, mediaKey(room.info.media), browserHostShareEnabled);
+        if (!current()) { dropProposal(proposal.id); status('Dieser Vorschlag gilt nicht mehr (Mitglied nicht mehr dabei oder Freigabe gewechselt).', true); return; }
+        if (!await shareHostVideo(proposal.url, current)) return;
+        if (session.room === room && session.isHost() && room.members.some(member => member.id === proposal.memberId))
+          session.answerProposal(proposal.memberId, true);
         dropProposal(proposal.id);
       }),
       button('Ablehnen', 'ghost', () => { session.answerProposal(proposal.memberId, false); dropProposal(proposal.id); }),
@@ -454,74 +557,91 @@ function dropProposal(id) {
 // are two uncoupled steps, so this is best effort, not a transaction: if the
 // start state cannot be published, the previous offer is announced again and
 // the host's own player keeps its previous source. One action at a time.
-async function shareHostVideo(input) {
+async function shareHostVideo(input, canShare, inheritedPlayback) {
   const room = session?.room;
   if (!browserHostShareEnabled) { status('Die Videofreigabe im Browser ist gesperrt, bis das Backend den Host bestätigen kann.', true); return false; }
   if (!session?.isHost()) { status('Nur der vom Backend bestätigte Host kann Videos freigeben.', true); return false; }
   if (shareBusy) { status('Eine Freigabe läuft bereits. Bitte kurz warten.'); return false; }
-  const result = hostShareStream(input, mediaKey(room.info.media));
+  const result = hostShareStream(input, mediaKey(room.info.media), browserHostShareEnabled);
   if (result.problem) { $('roomShareStatus').textContent = result.problem; status(result.problem, true); return false; }
-  const same = hostShared?.url === result.stream.url && session.playback;
-  const positionMs = same ? expectedPositionMs(session.playback, session.now()) : 0;
-  const previous = session.hostStream;
+  const source = browserPartyStream(result.stream);
+  if (source.family_beta && !inheritedPlayback &&
+      !window.confirm('Dieser TorBox-Link samt Token wird an die Party gesendet. Ein Token kann Zugriff auf dein Konto geben und bleibt nach dem Austritt kopierbar. Link jetzt freigeben?')) return false;
+  const same = browserPartyStream(hostShared)?.url === source.url && session.playback;
+  const playback = inheritedPlayback ?? (same ? session.playback : null);
+  const positionMs = playback ? expectedPositionMs(playback, session.now()) : 0;
+  const reusePlayer = !!inheritedPlayback && loadedStream?.url === source.url;
+  const channel = session.channel, key = mediaKey(room.info.media);
+  const current = () => session.room === room && session.channel === channel && session.isHost() && mediaKey(room.info.media) === key;
   shareBusy = true; renderPartyRoom();
   $('roomShareStatus').textContent = 'Video wird freigegeben …';
   try {
-    try { await session.shareHostStream(result.stream); }
-    catch (e) {
-      // Nothing was distributed: the previous source stays as it was.
-      if (session.room === room) { $('roomShareStatus').textContent = 'Freigabe nicht gesendet: ' + friendlyError(e) + ' Die bisherige Quelle bleibt aktiv.'; status($('roomShareStatus').textContent, true); }
-      return false;
+    await session.shareHostStream(result.stream, {paused: inheritedPlayback?.paused ?? true, positionMs,
+      previousSeq: inheritedPlayback?.seq}, canShare);
+  } catch (e) {
+    if (current()) {
+      $('roomShareStatus').textContent = e.code === 'share_restored'
+        ? 'Die vorherige Freigabe wurde wieder angekündigt; bitte erneut versuchen.'
+        : e.code === 'share_restore_failed'
+          ? 'Die Freigabe konnte nicht abgeschlossen und die Rücknahme nicht gesendet werden. Beim erneuten Verbinden wird nur der bisherige Freigabestand angeboten.'
+          : 'Freigabe nicht gesendet. Verbindung und Party prüfen.';
+      status($('roomShareStatus').textContent, true);
     }
-    try { await session.hostPublish({paused: true, positionMs}); }
-    catch (e) {
-      let restored = false;
-      try { if (previous) await session.shareHostStream(previous); else await session.stopHostStream(); restored = true; } catch { /* Reported below. */ }
-      if (session.room === room) {
-        $('roomShareStatus').textContent = restored
-          ? 'Die Party-Zeit konnte nicht veröffentlicht werden. Die vorherige Freigabe wurde wieder angekündigt; bitte erneut versuchen.'
-          : 'Die Party-Zeit konnte nicht veröffentlicht werden, und die vorherige Freigabe ließ sich nicht wiederherstellen. Bitte die Verbindung prüfen und erneut freigeben.';
-        status($('roomShareStatus').textContent, true);
-      }
-      return false;
-    }
+    return false;
   } finally { shareBusy = false; if (session?.room) renderPartyRoom(); }
-  if (session.room !== room || !session.isHost()) return false;
-  resetVideo('Neues Video freigegeben.');
-  hostShared = result.stream; roomOverviewOpen = false;
+  if (!current() || session.hostStream !== result.stream) return false;
+  if (!reusePlayer) resetVideo('Neues Video freigegeben.');
+  hostShared = result.stream;
   $('roomShareUrl').value = ''; $('roomShareStatus').textContent = '';
-  selectedStream = result.stream;
+  selectedStream = source;
   $('streamInfo').textContent = 'Du teilst einen Video-Link mit allen Mitgliedern.';
   renderPartyRoom();
-  startStream();
-  status('Video für alle freigegeben. Starte mit ▶ – alle folgen deiner Wiedergabe.');
+  if (reusePlayer) {
+    if (awaitingHandoff) { handoffSourceReady = true; finishBrowserHandoff(); }
+    else if (!soloMode) resyncNow();
+  }
+  else startStream();
+  status(inheritedPlayback ? 'Bisherige Quelle für die Party übernommen.' : 'Videoangebot gesendet. Starte mit ▶.');
   return true;
 }
 $('roomShareForm').addEventListener('submit', e => { e.preventDefault(); shareHostVideo($('roomShareUrl').value); });
-$('roomBackToPlayer').addEventListener('click', () => { roomOverviewOpen = false; renderPartyRoom(); });
+$('roomBackToPlayer').addEventListener('click', () => {
+  closeDrawer();
+  if (loadedStream || !selectedStream || !autoHostStream || streamProblem(selectedStream)) return;
+  if (soloMode) { if (soloResume) loadStream(); }
+  else startStream();
+});
 $('roomOpenHost').addEventListener('click', () => { openDrawer('settings', $('roomOpenHost')); selectDrawerTab('Host'); });
-$('roomShowOverview').addEventListener('click', () => { roomOverviewOpen = true; closeDrawer(); renderPartyRoom(); });
+$('roomShowOverview').addEventListener('click', () => selectDrawerTab('Party'));
 $('roomStopShare').addEventListener('click', async () => {
   if (!session?.isHost() || !hostShared || shareBusy) return;
-  // The revocation counts only once it was sent; otherwise everything stays as it was.
+  const room = session.room, channel = session.channel, key = mediaKey(room.info.media);
+  const current = () => session.room === room && session.channel === channel && session.isHost() && mediaKey(room.info.media) === key;
+  shareBusy = true; renderPartyRoom();
   try { await session.stopHostStream(); }
-  catch (e) { status('Freigabe nicht beendet: ' + friendlyError(e) + ' Die Mitglieder sehen das Video weiterhin.', true); return; }
-  hostShared = null; roomOverviewOpen = false;
+  catch (e) { if (current()) status('Widerruf nicht gesendet: ' + friendlyError(e), true); return; }
+  finally { shareBusy = false; if (session?.room) renderPartyRoom(); }
+  if (!current() || session.hostStream) return;
+  hostShared = null;
   resetVideo('Videofreigabe beendet.');
   closeDrawer(); renderPartyRoom();
-  status('Videofreigabe beendet. Die Mitglieder sehen kein Video mehr.');
+  status('Widerruf der Videofreigabe gesendet.');
 });
 // Members propose a link; only the host decides. Locked by default: the
 // proposal travels over the shared party channel (every member can read it).
-$('proposalSection').hidden = !browserHostShareEnabled;
+function renderProposalForm() {
+  $('proposalSection').hidden = !session?.canSuggestBrowserLink();
+  if ($('proposalSection').hidden) $('proposalUrl').value = '';
+}
 $('proposalForm').addEventListener('submit', async e => {
   e.preventDefault();
-  if (!browserHostShareEnabled) return;
+  if (!session?.canSuggestBrowserLink()) return;
   const room = session?.room;
   if (!room) { status('Zuerst einer Party beitreten.', true); return; }
   if (session.isHost()) { $('suggestStatus').textContent = 'Als Host gibst du Videos direkt im Party-Room frei.'; return; }
-  const link = classifyShareLink($('proposalUrl').value);
+  const link = classifyShareLink($('proposalUrl').value, browserHostShareEnabled);
   if (link.problem) { $('suggestStatus').textContent = link.problem; return; }
+  if (link.family && !window.confirm('Der TorBox-Link samt Token ist für Party-Mitglieder lesbar. Jetzt vorschlagen?')) return;
   $('proposalUrl').value = '';
   $('suggestStatus').textContent = 'Vorschlag wird gesendet …';
   try {
@@ -568,8 +688,6 @@ function renderMembers(room) {
   $('participantCount').textContent = room.members.length === 1 ? '1 Person' : `${room.members.length} Personen`;
   $('movieInfo').textContent = `Host: ${room.members.find(m => m.id === room.info.host_member_id)?.display_name || 'Unbekannt'}`;
   $('drawerCode').textContent = room.info.code || '–';
-  $('loadAndSuggest').hidden = !room.memberId || !room.info.host_member_id || room.memberId === room.info.host_member_id;
-  $('suggestNotice').hidden = $('loadAndSuggest').hidden;
 }
 // Own row from the live player; others from their last status report.
 function memberSyncFor(room, member) {
@@ -613,6 +731,11 @@ function pauseLocally() {
   player.pause();
 }
 function resetVideo(reason = 'Persönliche Quelle entfernt. Für diesen Film kann eine neue eigene Quelle geladen werden.') {
+  if (recoveringSource) {
+    recoveringSource = null;
+    session?.cancelSourceRecovery();
+  }
+  awaitingHandoff = handoffSourceReady = false;
   cancelPersonalAutoSync();
   pendingSeek = internalHlsSeek = pendingPlay = ownSeek = null;
   waitingForTarget = false;
@@ -814,6 +937,7 @@ function applySync(forcePlay = false) {
       finished();
       if (loadedStream === playbackSource) {
         if (autoStarting || autoStartPhase === 'synced') { autoStarting = false; autoStartPhase = autoStartPhase === 'muted' ? 'muted' : 'playing'; }
+        finishSourceRecovery();
         presence();
       }
     }, rejected); }
@@ -821,6 +945,11 @@ function applySync(forcePlay = false) {
   }
 }
 function failVideo(message, errorCode = 'media_error') {
+  if (recoveringSource) {
+    session.failSourceRecovery();
+    status('Die bisherige Videoquelle ist nicht abspielbar. Bitte einen gültigen Link erneut freigeben.', true);
+    return;
+  }
   lastPlaybackError = errorCode;
   cancelPersonalAutoSync();
   pendingSeek = internalHlsSeek = pendingPlay = ownSeek = null;
@@ -1102,6 +1231,7 @@ function enterSolo() {
   if (!session?.room || !loadedStream) return;
   cancelPersonalAutoSync();
   soloMode = true; syncEnabled = false; resumeAfterReconnect = false;
+  awaitingHandoff = handoffSourceReady = false;
   pendingPlay = null; pendingSeek = ownSeek = null; userSeekPending = false;
   if (player.playbackRate !== 1) player.playbackRate = 1; // No party nudging any more.
   status('Du schaust allein weiter. Play, Pause und Springen gelten nur für dich. „Zur Party“ übernimmt wieder die Party-Zeit.');
@@ -1109,7 +1239,7 @@ function enterSolo() {
 }
 // Continue the loaded source alone after a party end or host change; never
 // after a removal or an explicit revocation (those reset the player).
-function keepAfterPartyEnd(reason) { return (reason === 'ended' || reason === 'host_left') && !!loadedStream; }
+function keepAfterPartyEnd(reason) { return (reason === 'ended' || reason === 'host_left') && !!loadedStream && !loadedStream.family_beta; }
 function continueLocally(message) {
   soloMode = true; syncEnabled = false; resumeAfterReconnect = false;
   pendingPlay = null; pendingSeek = ownSeek = null; userSeekPending = false;
@@ -1365,19 +1495,26 @@ function loadStream() {
   status('Quelle wird geladen. Erst nach erfolgreichem Laden ist die Synchronisierung verfügbar.');
   try {
     if (streamIsHls(stream)) {
-      if (player.canPlayType('application/vnd.apple.mpegurl') && !Object.keys(stream.headers || {}).length) { player.src = stream.url; renderQuality(null, true); }
+      if (!stream.family_beta && player.canPlayType('application/vnd.apple.mpegurl') && !Object.keys(stream.headers || {}).length) { player.src = stream.url; renderQuality(null, true); }
       else if (Hls.isSupported()) {
         // TorBox link with token: variants/segments that lost the query get the same token.
         let ownToken = null;
         try { ownToken = stream.propagate_token === true ? new URL(stream.url).searchParams.get('token') : null; } catch { ownToken = null; }
         const familyToken = (familyStream && familyStream.url === stream.url ? familyStream.token : null) || ownToken;
-        const instance = new Hls({...HLS_TUNING, debug: false, enableWorker: true, xhrSetup: (xhr, requestUrl) => {
+        const instance = new Hls({...HLS_TUNING, debug: false, enableWorker: true, ...(stream.family_beta ? {
+          progressive: true,
+          fetchSetup: async (context, init) => familyHlsRequest(stream.url, context.url, init),
+        } : {xhrSetup: (xhr, requestUrl) => {
           // Family share with propagate_token: variants that lost the query get the same token.
           const target = familyToken ? withFamilyToken(requestUrl, familyToken) : requestUrl;
           if (target !== requestUrl) xhr.open('GET', target, true);
           xhr.withCredentials = false;
           for (const [name, value] of Object.entries(stream.headers || {})) xhr.setRequestHeader(name, value);
-        }});
+        }})});
+        if (stream.family_beta && instance.config.loader === Hls.DefaultConfig.loader) {
+          instance.destroy();
+          return failVideo('Dieser Browser kann TorBox-HLS mit geschützter Weiterleitungsprüfung nicht laden.');
+        }
         hls = instance;
         watchHlsInstance(instance);
         instance.on(Hls.Events.ERROR, (_event, error) => {
@@ -1463,8 +1600,6 @@ $('personalHlsForm').addEventListener('submit', e => {
   const currentMediaKey = media?.meta_type && media?.meta_id ? mediaKey(media) : '';
   const problem = personalHlsUrlProblem(value) || (!currentMediaKey ? 'Die Party hat noch keine gültige Filmkennung. Bitte den Host prüfen und erneut laden.' : '');
   if (problem) { $('personalHlsStatus').textContent = problem; status(problem, true); return; }
-  const room = session.room;
-  const suggest = e.submitter === $('loadAndSuggest') && room.memberId && room.info.host_member_id && room.memberId !== room.info.host_member_id;
   const solo = soloMode;
   resetVideo();
   cancelPersonalAutoSync();
@@ -1472,7 +1607,6 @@ $('personalHlsForm').addEventListener('submit', e => {
   loadedStream = {personal: true, media_key: currentMediaKey};
   renderPartyRoom();
   loading = true;
-  const offer = loadedStream;
   $('useDesktopStream').hidden = false;
   $('streamInfo').textContent = 'Persönliche HLS-Quelle';
   $('personalHlsStatus').textContent = 'Playlist wird geprüft …';
@@ -1482,15 +1616,6 @@ $('personalHlsForm').addEventListener('submit', e => {
     const problem = personalHls.open(value, loadedStream.media_key);
     if (problem) failVideo(problem);
   } catch { failVideo('Die persönliche HLS-Quelle konnte nicht geöffnet werden. Bitte Link und Browser-Unterstützung prüfen.'); }
-  if (suggest && loadedStream === offer) {
-    const report = message => {
-      if (session.room === room && loadedStream === offer && mediaKey(room.info.media) === currentMediaKey) $('suggestStatus').textContent = message;
-    };
-    if (value.length > 4096) report('Link zu lang zum Vorschlagen.');
-    else session.suggestStream(value, currentMediaKey)
-      .then(() => report('Vorschlag gesendet. Der Host entscheidet über die Freigabe.'))
-      .catch(() => report('Vorschlag nicht gesendet. Verbindung prüfen.'));
-  }
   presence();
 });
 $('useDesktopStream').addEventListener('click', () => {
@@ -1743,8 +1868,9 @@ async function joinParty({auto = false, create = false} = {}) {
         try { globalThis.history?.replaceState?.(null, '', `/party/${confirmedCode}`); } catch { /* URL unchanged. */ }
       }
     }
-    status(session.isHost() ? 'Party-Room geöffnet. Host-Verwaltung vom Backend bestätigt.'
-      : auto ? 'Party nach dem Neuladen wieder betreten. Host-Freigabe und Party-Zeit werden übernommen …' : 'Beigetreten. Du bist im Party-Room; das Video startet, sobald der Host es freigibt.');
+    status(session.isHost() ? 'Party geöffnet. Host-Verwaltung vom Backend bestätigt.'
+      : auto ? 'Party nach dem Neuladen wieder betreten. Host-Freigabe und Party-Zeit werden angefragt …' : 'Party beigetreten.');
+    if (auto && session.isHost() && !loadedStream && !selectedStream) session.armSourceRecovery();
   } catch (err) {
     showPanel('join');
     // Expired or revoked session: show the sign-in fields again.
@@ -1787,6 +1913,11 @@ $('loadStream').addEventListener('click', startStream);
 function resyncNow() {
   // After a party end there is no party time to return to.
   if (!session?.room && soloMode) { status('Die Party ist beendet. Für eine neue Party den Einladungslink öffnen.'); return; }
+  if (awaitingHandoff) {
+    status('Synchronisierung wird übernommen …');
+    session?.requestState().catch(() => {});
+    return;
+  }
   // Back to the party time always ends "Allein schauen".
   if (soloMode) { soloMode = false; renderSoloUi(); }
   // A lost subscription is not repaired by requestState/applySync: rebuild it
@@ -1811,6 +1942,7 @@ function resyncNow() {
   applySync(true); presence(); renderPlayerUi();
   if (syncEnabled && loadedStream && autoStartPhase !== 'muted') autoStartPhase = !player.paused ? 'playing' : 'synced';
   if (syncEnabled && !waitingForTarget && session.playback.paused) { autoStarting = false; status('Der Host hat pausiert. Die Wiedergabe startet, sobald er fortsetzt.'); }
+  finishSourceRecovery();
 }
 $('resync').addEventListener('click', resyncNow);
 player.addEventListener('loadedmetadata', () => {
@@ -1880,7 +2012,7 @@ player.addEventListener('seeked', () => {
     const p = effectivePlayback();
     if (syncEnabled && sendControl(p?.paused ?? player.paused, player.currentTime, 'seek')) { presence(); return; }
   }
-  applySync(); presence();
+  applySync(); finishSourceRecovery(); presence();
 });
 // Guest presses play while the party is paused: shared resume, if allowed.
 // Our own play() attempts (pendingPlay) are never echoed as commands.
@@ -1898,11 +2030,10 @@ player.addEventListener('play', () => {
 // load() cancels old media tasks; their pause events may never be delivered.
 player.addEventListener('emptied', () => { expectedPauses = 0; });
 player.addEventListener('waiting', () => { if (!buffering) bufferingEvents++; buffering = true; presence(); });
-player.addEventListener('playing', () => { $('autoplayStart').hidden = true; buffering = false; mediaResumed(); applySync(); presence(); });
+player.addEventListener('playing', () => { $('autoplayStart').hidden = true; buffering = false; mediaResumed(); applySync(); finishSourceRecovery(); presence(); });
 // Autoplay fallback: the tap itself starts playback at the current party time.
 $('autoplayStart').addEventListener('click', () => { $('autoplayStart').hidden = true; markGesture(); resyncNow(); });
-$('partyShowRoom').addEventListener('click', () => { if (!session?.room) return; roomOverviewOpen = true; closeDrawer(); renderPartyRoom(); });
-player.addEventListener('canplay', () => { buffering = false; mediaResumed(); applySync(); presence(); });
+player.addEventListener('canplay', () => { buffering = false; mediaResumed(); applySync(); finishSourceRecovery(); presence(); });
 player.addEventListener('error', () => { if (loadedStream && player.error) failVideo('Video nicht abspielbar: möglicher Codec-/Containerfehler, CORS, DRM, abgelaufener Link oder fehlende Zugriffsrechte. Der Browser nennt die Ursache häufig nicht genauer.'); });
 function renderSyncDebug() {
   if (!debugEnabled) return;
@@ -1997,13 +2128,12 @@ client?.auth.onAuthStateChange((event, authSession) => {
     if (error) throw error;
     // Valid session: no credentials. Otherwise e-mail and password inline.
     renderAuthState(usableSession(auth));
-    showPanel('join');
-    await preview();
+    if (!session?.room) { showPanel('join'); await preview(); }
     // Reload of an active membership in this tab: join the same party again.
     const code = partyCodeFromPath(location.pathname);
     if (code && usableSession(auth) && joinedPartyCode() === code && !session?.room) {
       status('Party wird nach dem Neuladen wieder betreten …');
       await joinParty({auto: true});
     }
-  } catch (e) { renderAuthState(false); showPanel('join'); status(friendlyError(e), true); }
+  } catch (e) { if (!session?.room) { renderAuthState(false); showPanel('join'); status(friendlyError(e), true); } }
 })();

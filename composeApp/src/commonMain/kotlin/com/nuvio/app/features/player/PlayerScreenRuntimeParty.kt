@@ -890,7 +890,7 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
             val othersWatching = party.presence.values.any {
                 it.memberId != party.memberId && it.mediaKey == party.media.key && it.status != PartyMemberStatus.Browsing
             }
-            if (party.media.key == partyKey && playback != null && !playback.paused && !othersWatching) {
+            if (!partyOpeningRequestedSource && party.media.key == partyKey && playback != null && !playback.paused && !othersWatching) {
                 PartyRepository.publishPlayback(paused = true, positionMs = playbackSnapshot.positionMs, rate = playback.rate)
             }
             PartyRepository.setLocalStatus(PartyMemberStatus.Browsing, null)

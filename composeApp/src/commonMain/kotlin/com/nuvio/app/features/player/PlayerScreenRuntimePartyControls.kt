@@ -18,12 +18,14 @@ import com.nuvio.app.features.party.PartySync
 import com.nuvio.app.features.party.PartyRepository
 import com.nuvio.app.features.party.partyChatRows
 import com.nuvio.app.features.party.behindMs
+import com.nuvio.app.features.party.canRequestMedia
 import com.nuvio.app.features.party.displayTitle
 import com.nuvio.app.features.party.formatPartyCode
 import com.nuvio.app.features.party.partyInviteLink
 import com.nuvio.app.features.party.presenceState
 import com.nuvio.app.features.party.rememberProfileAvatar
 import com.nuvio.app.features.party.statusRes
+import com.nuvio.app.features.streams.PlaybackAvailability
 import nuvio.composeapp.generated.resources.Res
 import nuvio.composeapp.generated.resources.action_cancel
 import nuvio.composeapp.generated.resources.action_close
@@ -50,6 +52,14 @@ import nuvio.composeapp.generated.resources.party_host_only_title
 import nuvio.composeapp.generated.resources.party_invite_copied
 import nuvio.composeapp.generated.resources.party_invite_message
 import nuvio.composeapp.generated.resources.party_leave
+import nuvio.composeapp.generated.resources.party_media_request_action
+import nuvio.composeapp.generated.resources.party_media_request_blocked
+import nuvio.composeapp.generated.resources.party_media_request_choose_source
+import nuvio.composeapp.generated.resources.party_media_request_dismiss
+import nuvio.composeapp.generated.resources.party_media_request_failed
+import nuvio.composeapp.generated.resources.party_media_request_new
+import nuvio.composeapp.generated.resources.party_media_request_received
+import nuvio.composeapp.generated.resources.party_media_request_sent
 import nuvio.composeapp.generated.resources.party_now_watching
 import nuvio.composeapp.generated.resources.party_open_seat
 import nuvio.composeapp.generated.resources.party_reconnecting
@@ -73,7 +83,9 @@ import nuvio.composeapp.generated.resources.party_title
 import nuvio.composeapp.generated.resources.party_unavailable
 import nuvio.composeapp.generated.resources.party_watch_with_party
 import nuvio.composeapp.generated.resources.party_you
+import nuvio.composeapp.generated.resources.playback_unavailable_message
 import org.jetbrains.compose.resources.stringResource
+import org.jetbrains.compose.resources.getString
 import kotlinx.coroutines.launch
 import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
@@ -84,6 +96,7 @@ internal fun PlayerScreenRuntime.rememberPartyControlsState(): PlayerControlPart
     val playback by PartyRepository.playback.collectAsStateWithLifecycle()
     val available by PartyRepository.available.collectAsStateWithLifecycle()
     val hlsSuggestion by PartyRepository.hlsSuggestion.collectAsStateWithLifecycle()
+    val mediaRequest by PartyRepository.mediaRequest.collectAsStateWithLifecycle()
     val countdown by PartyRepository.countdown.collectAsStateWithLifecycle()
     val notice = rememberPartyNotice()
     val avatar = rememberProfileAvatar()
@@ -229,6 +242,10 @@ internal fun PlayerScreenRuntime.rememberPartyControlsState(): PlayerControlPart
         PlayerControlChatState(unread = unread)
     }
     val canSwitch = elsewhere && party.isHost
+    val canRequestSwitch = activeStream != null && !playbackSnapshot.isLoading && !playbackSnapshot.isEnded &&
+        party.canRequestMedia(playerMedia)
+    val currentRequest = mediaRequest?.takeIf { it.isCurrent(party) }
+    val requestSender = currentRequest?.let { party.member(it.memberId)?.displayName }.orEmpty().take(80)
     val pendingSuggestion = hlsSuggestion?.takeIf { party.isHost && !elsewhere && it.mediaKey == party.media.key }
     return base.copy(
         active = true,
@@ -333,8 +350,20 @@ internal fun PlayerScreenRuntime.rememberPartyControlsState(): PlayerControlPart
         nowWatching = if (elsewhere) stringResource(Res.string.party_now_watching, party.media.displayTitle()) else "",
         switchLabel = if (canSwitch) stringResource(Res.string.party_switch, playerMedia.displayTitle()) else "",
         switchMessage = if (canSwitch) stringResource(Res.string.party_switch_message, playerMedia.displayTitle()) else "",
-        pillMessage = if (pendingSuggestion != null) "Neuer Video-Vorschlag" else partyPillMessage(party, playback, notice).orEmpty(),
-        pillPinned = pendingSuggestion != null || partyPillPinned(party, playback, notice),
+        mediaRequestAction = if (canRequestSwitch) stringResource(Res.string.party_media_request_action) else "",
+        mediaRequestId = currentRequest?.id,
+        mediaRequestTitle = if (currentRequest != null) stringResource(Res.string.party_media_request_received,
+            requestSender, currentRequest.media.displayTitle()) else "",
+        mediaRequestNotice = if (currentRequest != null) stringResource(Res.string.party_media_request_blocked) else "",
+        mediaRequestChooseSource = if (currentRequest != null && party.connected)
+            stringResource(Res.string.party_media_request_choose_source) else "",
+        mediaRequestDismiss = if (currentRequest != null) stringResource(Res.string.party_media_request_dismiss) else "",
+        pillMessage = when {
+            currentRequest != null -> stringResource(Res.string.party_media_request_new)
+            pendingSuggestion != null -> "Neuer Video-Vorschlag"
+            else -> partyPillMessage(party, playback, notice).orEmpty()
+        },
+        pillPinned = currentRequest != null || pendingSuggestion != null || partyPillPinned(party, playback, notice),
         chat = chat,
     )
 }
@@ -447,6 +476,32 @@ internal fun PlayerScreenRuntime.handlePartyControlsEvent(type: String, value: D
         }
         "partyWatch" -> watchWithParty()
         "partySwitch" -> switchPartyMedia()
+        "partyRequestMedia" -> {
+            val party = PartyRepository.state.value.party
+            val media = currentPartyMedia()
+            if (party != null && activeStream != null && !playbackSnapshot.isLoading && !playbackSnapshot.isEnded &&
+                party.canRequestMedia(media)) {
+                scope.launch {
+                    val sent = PartyRepository.requestMedia(party, media)
+                    if (PartyRepository.state.value.party?.id == party.id && currentPartyMedia().key == media.key) {
+                        showPartyMessage(getString(if (sent) Res.string.party_media_request_sent else Res.string.party_media_request_failed))
+                    }
+                }
+            }
+        }
+        "partyDismissMediaRequest" -> PartyRepository.dismissMediaRequest(value)
+        "partyChooseRequestedSource" -> {
+            val party = PartyRepository.state.value.party
+            val media = party?.let { PartyRepository.mediaRequest.value?.mediaForOwnSelection(value, it) }
+            if (media != null) {
+                if (PlaybackAvailability.current().canStream(media.type, media.videoId ?: media.metaId)) {
+                    partyOpeningRequestedSource = true
+                    showPartyPanel = false
+                    flushWatchProgress()
+                    args.onOpenPartyMedia(media)
+                } else scope.launch { showPartyMessage(getString(Res.string.playback_unavailable_message)) }
+            }
+        }
         "partySolo" -> {
             if (PartyRepository.state.value.party?.isHost == false) {
                 if (partySolo) syncMeWithParty() else {

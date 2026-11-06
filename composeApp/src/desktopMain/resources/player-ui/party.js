@@ -791,9 +791,9 @@ const buildPartyTorboxLink = party => {
   return box;
 };
 
-const closeAndSendParty = type => {
+const closeAndSendParty = (type, value = 0) => {
   closePlayerModal();
-  send(type, 0);
+  send(type, value);
 };
 
 const buildPartyContent = party => {
@@ -831,10 +831,27 @@ const buildPartyContent = party => {
         onConfirm: () => send("partySwitch", 0),
       })));
     }
+    if (party.mediaRequestAction) {
+      section.appendChild(partyElement("div", "party-divider"));
+      section.appendChild(partyIconTextButton("icon-swap", party.mediaRequestAction, "", "requestMedia",
+        () => send("partyRequestMedia", 0)));
+    }
     content.appendChild(section);
   }
 
   if (party.isHost) {
+    if (Number.isInteger(party.mediaRequestId)) {
+      const request = partyElement("div", "party-section party-card");
+      request.appendChild(partyElement("p", "party-card-title", party.mediaRequestTitle));
+      request.appendChild(partyElement("p", "party-text", party.mediaRequestNotice));
+      if (party.mediaRequestChooseSource) {
+        request.appendChild(partyButtonElement(party.mediaRequestChooseSource, "compact", "chooseRequestedSource",
+          () => closeAndSendParty("partyChooseRequestedSource", party.mediaRequestId)));
+      }
+      request.appendChild(partyButtonElement(party.mediaRequestDismiss, "compact", "dismissMediaRequest",
+        () => send("partyDismissMediaRequest", party.mediaRequestId)));
+      content.appendChild(request);
+    }
     content.appendChild(partyElement("div", "party-divider"));
     content.appendChild(buildPartyHostSettings(party));
   }
