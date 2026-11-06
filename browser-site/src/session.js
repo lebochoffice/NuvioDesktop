@@ -818,6 +818,8 @@ export class PartySession {
     this.chatBusy = room;
     try {
       const args = {p_party_id: room.info.id, p_device_id: this.deviceId};
+      // The first load per room is history (display only, e.g. no overlay toasts).
+      const history = this.chatCursor == null;
       if (this.chatCursor != null) args.p_after = this.chatCursor;
       const result = await this.rpc('watch_party_list_messages', args);
       if (room !== this.room) return;
@@ -828,7 +830,7 @@ export class PartySession {
         this.seenMessages.add(id);
         if (this.seenMessages.size > 500) this.seenMessages.delete(this.seenMessages.values().next().value);
         if (this.chatCursor == null || BigInt(id) > BigInt(this.chatCursor)) this.chatCursor = id;
-        this.emit('chat', message);
+        this.emit('chat', message, history);
       }
     } catch (e) { if (room === this.room) this.emit('error', new Error('Chat konnte nicht geladen werden: ' + e.message)); }
     finally { if (this.chatBusy === room) this.chatBusy = null; }

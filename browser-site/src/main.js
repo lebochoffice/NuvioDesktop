@@ -297,9 +297,11 @@ const session = client ? new PartySession(client, deviceId, {
     };
     tick();
   },
-  chat: message => {
+  chat: (message, history = false) => {
     const line = document.createElement('div'), author = document.createElement('b');
     author.textContent = `${message.name || session.room?.members.find(m => m.id === message.member_id)?.display_name || 'Gast'}: `;
+    // New messages of others also appear briefly on the player (bottom left).
+    if (!history && message.member_id !== session.room?.memberId) showChatToast(author.textContent, message.body || '');
     line.append(author, document.createTextNode(message.body || ''));
     $('chatLog').append(line);
     if ($('chatLog').children.length > 100) $('chatLog').firstChild.remove();
@@ -345,6 +347,19 @@ let autoStarting = false, autoStartPhase = null, awaitingPartyState = false;
 // incoming party states do not touch the local player.
 let soloMode = false, soloResume = null;
 try { autoHostStream = globalThis.localStorage?.getItem(AUTO_HOST_STREAM_KEY) !== '0'; } catch { /* Preference unavailable: default. */ }
+// Chat overlay on the player: at most 5 toasts, newest at the bottom, each
+// gone after about 5 seconds. Display only (text nodes, no markup).
+const CHAT_TOAST_LIMIT = 5, CHAT_TOAST_MS = 5000;
+function showChatToast(author, body) {
+  const box = $('chatOverlay');
+  if (!box || !String(body).trim()) return;
+  const item = document.createElement('div'), name = document.createElement('b');
+  item.className = 'chat-toast';
+  name.textContent = author;
+  item.append(name, document.createTextNode(String(body).slice(0, 240)));
+  box.replaceChildren(...[...box.children, item].slice(-CHAT_TOAST_LIMIT));
+  setTimeout(() => box.replaceChildren(...[...box.children].filter(child => child !== item)), CHAT_TOAST_MS);
+}
 function status(message, error = false) {
   $('message').textContent = message;
   $('message').style.borderColor = error ? '#ff6969' : '';
@@ -434,7 +449,7 @@ function renderPartyRoom() {
     return;
   }
   if (!host) {
-    if (!$('panelHost').hidden && !$('infoDrawer').hidden) selectDrawerTab('General'); // Host role lost while open.
+    if (!$('panelHost').hidden && !$('infoDrawer').hidden) selectDrawerTab('Party'); // Host role lost while open.
     hostShared = null; proposals.length = 0;
   }
   // Proposals of members who left or were removed, or for another title, expire.
@@ -448,8 +463,7 @@ function renderPartyRoom() {
   $('playerWrap').hidden = false;
   $('roomKicker').textContent = host ? 'Dein Party-Room' : 'Party-Room';
   const newVideo = !host && selectedStream && !loadedStream && !streamProblem(selectedStream);
-  $('roomWaiting').textContent = newVideo ? 'Neues Video verfügbar' : hasSource ? '' : host ? 'Noch kein Video freigegeben. Mitglieder können schon beitreten und chatten.'
-    : 'Warte auf Video vom Host …';
+  $('roomWaiting').textContent = newVideo ? 'Neues Video verfügbar' : hasSource || host ? '' : 'Warte auf Video vom Host …';
   $('roomShareForm').hidden = !host;
   $('roomOpenHost').hidden = !host;
   $('roomPeople').replaceChildren(...room.members.map(member => {
@@ -462,10 +476,6 @@ function renderPartyRoom() {
   $('roomSubtitle').textContent = media.meta_type === 'series' && Number.isInteger(media.season) && Number.isInteger(media.episode)
     ? `Serie · Staffel ${media.season} · Episode ${media.episode}` : media.meta_type === 'movie' ? 'Film' : '';
   showImage($('roomPoster'), media.poster);
-  $('roomCode').textContent = 'Party-Code ' + room.info.code;
-  const max = Number(room.info.max_members);
-  $('roomMemberCount').textContent = `${room.members.length}${max > 0 ? ' / ' + max : ''} Teilnehmer`;
-  $('roomBackToPlayer').hidden = false;
   const code = normalizeCode(room.info.code);
   $('roomInvite').value = validCode(code) ? new URL('/party/' + code, location.origin).href : '';
   if (!host) { $('roomProposals').hidden = true; return; }
@@ -506,10 +516,6 @@ $('roomHostOnly').addEventListener('change', async () => {
   try { await session.setHostOnly(value); }
   catch (e) { status(friendlyError(e), true); }
   finally { input.disabled = false; renderPartyRoom(); }
-});
-$('roomOpenDrawer').addEventListener('click', () => {
-  openDrawer('settings', $('roomOpenDrawer'));
-  selectDrawerTab('Chat');
 });
 function renderProposals() {
   $('roomProposals').hidden = !proposals.length;
@@ -605,12 +611,14 @@ async function shareHostVideo(input, canShare, inheritedPlayback) {
   return true;
 }
 $('roomShareForm').addEventListener('submit', e => { e.preventDefault(); shareHostVideo($('roomShareUrl').value); });
-$('roomBackToPlayer').addEventListener('click', () => {
+// Closing the drawer returns to the player; a newly offered source starts
+// then (automatic mode), exactly like the former "Zum Player" button.
+function closeDrawerToPlayer() {
   closeDrawer();
   if (loadedStream || !selectedStream || !autoHostStream || streamProblem(selectedStream)) return;
   if (soloMode) { if (soloResume) loadStream(); }
   else startStream();
-});
+}
 $('roomOpenHost').addEventListener('click', () => { openDrawer('settings', $('roomOpenHost')); selectDrawerTab('Host'); });
 $('roomShowOverview').addEventListener('click', () => selectDrawerTab('Party'));
 $('roomStopShare').addEventListener('click', async () => {
@@ -1259,12 +1267,12 @@ function toggleFullscreen() {
   if (wrap.requestFullscreen) Promise.resolve(wrap.requestFullscreen()).catch(() => {});
   else player.webkitEnterFullscreen?.(); // iOS Safari: native fullscreen player.
 }
-const drawerTabs = ['General', 'Stream', 'Party', 'Chat', 'Advanced', 'Host'];
+const drawerTabs = ['Party', 'People', 'Advanced', 'Host'];
 // "Host" exists only for the server-confirmed host (session.isHost).
 const visibleDrawerTabs = () => drawerTabs.filter(name => name !== 'Host' || session?.isHost?.() === true);
 let drawerOpener = null;
 function selectDrawerTab(selected, focus = false) {
-  if (!visibleDrawerTabs().includes(selected)) selected = 'General';
+  if (!visibleDrawerTabs().includes(selected)) selected = 'Party';
   for (const name of drawerTabs) {
     const tab = $(`tab${name}`);
     tab.setAttribute?.('aria-selected', String(name === selected));
@@ -1278,10 +1286,9 @@ function openDrawer(view, opener) {
   closeSubtitleMenu();
   if ($('infoDrawer').hidden) drawerOpener = opener;
   const participants = view === 'participants';
-  $('drawerTitle').textContent = participants ? 'Teilnehmer' : 'Einstellungen';
-  $('participantsView').hidden = !participants;
-  $('settingsView').hidden = participants;
-  if (!participants) selectDrawerTab('General');
+  // One drawer: participants are a tab, the members badge opens it directly.
+  $('drawerTitle').textContent = 'Party';
+  selectDrawerTab(participants ? 'People' : 'Party');
   $('infoDrawer').hidden = false; $('drawerScrim').hidden = false;
   $('partyApp').inert = true;
   $('membersButton').setAttribute?.('aria-expanded', String(participants));
@@ -1316,7 +1323,6 @@ $('ctlSolo').addEventListener('click', toggleSolo);
 $('ctlBack').addEventListener('click', backToInvite);
 $('ctlSettings').addEventListener('click', () => openDrawer('settings', $('ctlSettings')));
 $('membersButton').addEventListener('click', () => openDrawer('participants', $('membersButton')));
-$('participantSettings').addEventListener('click', () => openDrawer('settings'));
 for (const name of drawerTabs) {
   const tab = $(`tab${name}`);
   tab.addEventListener('click', () => selectDrawerTab(name));
@@ -1336,8 +1342,8 @@ $('copyPartyCode').addEventListener('click', async () => {
   catch { status('Kopieren nicht möglich. Der Party-Code steht im Menü.', true); }
 });
 $('drawerResync').addEventListener('click', () => { if (!$('resync').disabled) resyncNow(); });
-$('drawerClose').addEventListener('click', closeDrawer);
-$('drawerScrim').addEventListener('click', closeDrawer);
+$('drawerClose').addEventListener('click', closeDrawerToPlayer);
+$('drawerScrim').addEventListener('click', closeDrawerToPlayer);
 $('ctlMute').addEventListener('click', () => { player.muted = !player.muted; if (!player.muted && autoStartPhase === 'muted') autoStartPhase = 'playing'; renderPlayerUi(); });
 $('ctlVolume').addEventListener('input', () => { player.volume = Number($('ctlVolume').value); player.muted = player.volume === 0; renderPlayerUi(); });
 $('ctlSeek').addEventListener('input', () => {
@@ -1643,6 +1649,9 @@ window.addEventListener('pagehide', () => {
 // a visible fallback solely when the link carries no valid code.
 $('partyCode').value = partyCodeFromPath(location.pathname);
 $('codeFallback').hidden = validCode($('partyCode').value);
+// With an invitation link "Party beitreten" is the primary action, otherwise
+// "Party erstellen" (CSS orders and weights the two; no logic changes).
+setClass($('joinSection'), 'invite-first', validCode($('partyCode').value));
 function updateInviteLinks() {
   const code = normalizeCode($('partyCode').value), valid = validCode(code);
   $('openInNuvio').hidden = !valid;

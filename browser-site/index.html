@@ -86,6 +86,7 @@
       <div id="playerWrap" class="player-wrap" tabindex="-1">
         <video id="player" controls playsinline preload="metadata" crossorigin="anonymous"></video>
         <div id="noStream" class="player-state">Warte auf Video vom Host …</div>
+        <div id="chatOverlay" class="chat-overlay" aria-live="polite"></div>
         <button id="autoplayStart" class="btn primary large autoplay-start" type="button" hidden>▶ Wiedergabe starten</button>
         <button id="loadStream" type="button" class="play-orb center" aria-label="Abspielen" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l10.5-6.5z"/></svg></button>
 
@@ -133,96 +134,86 @@
   <!-- Info drawer: right on desktop, bottom sheet on phones. -->
   <div id="drawerScrim" class="scrim" hidden></div>
   <aside id="infoDrawer" class="drawer" role="dialog" aria-modal="true" aria-labelledby="drawerTitle" hidden>
-    <div class="drawer-head"><h3 id="drawerTitle">Teilnehmer</h3><button id="drawerClose" class="icon-btn" type="button" aria-label="Schließen"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg></button></div>
-    <section id="participantsView" class="drawer-stack">
-      <p id="participantCount" class="muted small"></p>
-      <ul id="memberList" class="members"></ul>
-      <button id="participantSettings" class="btn ghost" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m10 3-.6 2.6-2 .9L5 5.4 3 8.8l1.9 1.8v2.8L3 15.2l2 3.4 2.4-1.1 2 .9L10 21h4l.6-2.6 2-.9 2.4 1.1 2-3.4-1.9-1.8v-2.8L21 8.8l-2-3.4-2.4 1.1-2-.9L14 3z"/><circle cx="12" cy="12" r="3"/></svg>Einstellungen</button>
-    </section>
-    <section id="settingsView" class="drawer-stack" hidden>
-      <div id="settingsTabs" class="settings-tabs" role="tablist" aria-label="Einstellungen">
-        <button id="tabGeneral" role="tab" type="button" aria-controls="panelGeneral" aria-selected="true">Allgemein</button>
-        <button id="tabStream" role="tab" type="button" aria-controls="panelStream" aria-selected="false" tabindex="-1">Stream</button>
-        <button id="tabParty" role="tab" type="button" aria-controls="panelParty" aria-selected="false" tabindex="-1">Party</button>
-        <button id="tabChat" role="tab" type="button" aria-controls="panelChat" aria-selected="false" tabindex="-1">Chat</button>
+    <div class="drawer-head"><h3 id="drawerTitle">Party</h3><button id="drawerClose" class="icon-btn" type="button" aria-label="Schließen"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg></button></div>
+    <section id="settingsView" class="drawer-stack">
+      <div id="settingsTabs" class="settings-tabs" role="tablist" aria-label="Party">
+        <button id="tabParty" role="tab" type="button" aria-controls="panelParty" aria-selected="true">Party</button>
+        <button id="tabPeople" role="tab" type="button" aria-controls="panelPeople" aria-selected="false" tabindex="-1">Teilnehmer</button>
         <button id="tabAdvanced" role="tab" type="button" aria-controls="panelAdvanced" aria-selected="false" tabindex="-1">Erweitert</button>
         <button id="tabHost" role="tab" type="button" aria-controls="panelHost" aria-selected="false" tabindex="-1" hidden>Host</button>
       </div>
-      <section id="panelGeneral" class="settings-panel" role="tabpanel" aria-labelledby="tabGeneral" tabindex="0">
+      <section id="panelParty" class="settings-panel party-panel" role="tabpanel" aria-labelledby="tabParty" tabindex="0">
+        <p id="controlInfo" class="sr-only"></p>
+        <article id="roomOverview" class="party-room" hidden>
+          <div class="room-hero">
+            <img id="roomPoster" class="room-poster" alt="" hidden>
+            <div class="room-heading">
+              <p id="roomKicker" class="room-kicker">Dein Party-Room</p>
+              <h2 id="roomTitle"></h2>
+              <p id="roomSubtitle" class="room-subtitle"></p>
+              <p id="movieInfo" class="room-host"></p>
+              <div class="room-meta">
+                <button id="copyPartyCode" type="button" class="code-chip" aria-label="Party-Code kopieren"><span>Code</span><strong id="drawerCode">–</strong></button>
+                <span id="roomConnection" class="status-chip" role="status">Verbinde …</span>
+              </div>
+            </div>
+          </div>
+          <div class="room-quick">
+            <button id="roomCopyInvite" type="button" class="btn small">Einladungslink kopieren</button>
+            <button id="roomOpenHost" type="button" class="btn small ghost">Host-Einstellungen</button>
+          </div>
+          <ul id="roomPeople" class="room-people" aria-label="Teilnehmer"></ul>
+          <p id="roomWaiting" class="room-waiting" role="status"></p>
+          <form id="roomShareForm" class="room-share" autocomplete="off" novalidate>
+            <label class="sr-only" for="roomShareUrl">Direkter Videolink (HLS, MP4 oder WebM über HTTPS)</label>
+            <div class="room-share-row">
+              <input id="roomShareUrl" type="url" inputmode="url" spellcheck="false" maxlength="4096" placeholder="Videolink (HLS, MP4, WebM)">
+              <button id="roomShareButton" class="btn primary small" type="submit">Video für alle freigeben</button>
+            </div>
+            <p id="roomShareStatus" class="room-share-status" role="status"></p>
+            <p id="roomShareLocked" class="room-share-locked">Die Videofreigabe im Browser ist noch gesperrt: Das Backend kann bisher nicht bestätigen, dass ein Streamangebot wirklich vom Host stammt. Eine Desktop-Party mit „Share my stream“ funktioniert wie gewohnt.</p>
+          </form>
+          <div id="roomProposals" class="room-proposals" role="region" aria-labelledby="roomProposalsTitle" hidden>
+            <h3 id="roomProposalsTitle">Vorschläge</h3>
+            <ul id="roomProposalList"></ul>
+          </div>
+          <!-- Members only (never the host); shown only when sharing is enabled. -->
+          <div id="proposalSection" class="room-propose" hidden>
+            <form id="proposalForm" class="room-share" autocomplete="off" novalidate>
+              <label class="sr-only" for="proposalUrl">Direkter Videolink für die Party</label>
+              <div class="room-share-row">
+                <input id="proposalUrl" type="url" inputmode="url" autocomplete="off" spellcheck="false" maxlength="4096" placeholder="Video vorschlagen (HLS, MP4, WebM)">
+                <button id="proposalSend" class="btn small" type="submit">Vorschlagen</button>
+              </div>
+              <p class="room-share-note">Für alle Mitglieder lesbar – nur Links ohne Zugangsdaten. Der Host entscheidet.</p>
+            </form>
+          </div>
+          <p id="suggestStatus" class="room-share-note" role="status"></p>
+          <label class="room-invite"><span class="sr-only">Einladungslink</span><input id="roomInvite" readonly aria-label="Einladungslink"></label>
+        </article>
+        <div class="party-footer">
+          <button id="drawerResync" type="button" class="btn small ghost" disabled>Mich synchronisieren</button>
+          <button id="leaveButton" type="button" class="btn small ghost leave">Party verlassen</button>
+        </div>
+      </section>
+      <section id="panelPeople" class="settings-panel people-panel" role="tabpanel" aria-labelledby="tabPeople" tabindex="0" hidden>
+        <p id="participantCount" class="muted small"></p>
+        <ul id="memberList" class="members"></ul>
+      </section>
+      <section id="panelAdvanced" class="settings-panel" role="tabpanel" aria-labelledby="tabAdvanced" tabindex="0" hidden>
         <div class="setting-row" title="Beim Laden sieht der Medienanbieter deine IP. Eine neue Host-Quelle kann deinen lokalen Link ersetzen.">
           <label class="setting-text" for="autoHostStream"><span class="setting-title">Host-Stream automatisch verwenden</span><span class="setting-desc">Neue Streams automatisch laden</span></label>
           <span class="switch"><input id="autoHostStream" type="checkbox" role="switch"><span class="switch-track" aria-hidden="true"></span></span>
         </div>
-      </section>
-      <section id="panelStream" class="settings-panel video-link" role="tabpanel" aria-labelledby="tabStream" tabindex="0" hidden>
-        <h4>Eigene HLS-Quelle</h4>
-        <form id="personalHlsForm" class="stack compact" autocomplete="off">
-          <label class="sr-only" for="personalHlsUrl">Video-Link (HTTPS-HLS-Playlist)</label>
-          <input id="personalHlsUrl" type="url" inputmode="url" autocomplete="off" spellcheck="false" maxlength="16384" placeholder="https://…/playlist.m3u8" aria-describedby="personalHlsStatus videoLinkFormats" required>
-          <div class="button-row"><button id="loadPersonalHls" class="btn ghost small" type="submit">Nur lokal laden</button></div>
-        </form>
-        <p id="videoLinkFormats" class="sr-only">Öffentliche HTTPS-HLS-Playlist derselben Filmfassung. Nur VOD.</p>
-        <p id="personalHlsStatus" class="muted small" role="status"></p>
-        <div id="proposalSection" hidden>
-          <h4>Video vorschlagen</h4>
-          <form id="proposalForm" class="stack compact" autocomplete="off" novalidate>
-            <label class="sr-only" for="proposalUrl">Direkter Videolink für die Party</label>
-            <input id="proposalUrl" type="url" inputmode="url" autocomplete="off" spellcheck="false" maxlength="4096" placeholder="https://…/video.mp4">
-            <div class="button-row"><button id="proposalSend" class="btn ghost small" type="submit">Dem Host vorschlagen</button></div>
-            <p class="muted small">Direkte HLS-, MP4- oder WebM-Links über HTTPS. Der Vorschlag ist für alle Party-Mitglieder lesbar, also nur Links ohne geheime Zugangsdaten. Erst wenn der Host annimmt, wird das Video für alle geladen.</p>
-          </form>
-        </div>
-        <p id="suggestStatus" class="muted small" role="status"></p>
-        <button id="useDesktopStream" type="button" class="btn ghost small" hidden>Zur Host-Quelle zurück</button>
-        <p id="streamInfo" class="muted small">Warte auf Video vom Host.</p>
-        <p id="qualityNote" class="muted small" hidden></p>
-      </section>
-      <section id="panelParty" class="settings-panel" role="tabpanel" aria-labelledby="tabParty" tabindex="0" hidden>
-        <p id="movieInfo" class="muted small"></p>
-        <div class="party-code-row"><span>Party-Code</span><strong id="drawerCode">–</strong><button id="copyPartyCode" type="button" class="btn ghost small">Kopieren</button></div>
-        <p id="controlInfo" class="sr-only"></p>
-      <article id="roomOverview" class="party-room" hidden>
-        <div class="room-hero">
-          <img id="roomPoster" class="room-poster" alt="" hidden>
-          <div class="room-heading">
-            <p id="roomKicker" class="room-kicker">Dein Party-Room</p>
-            <h2 id="roomTitle"></h2>
-            <p id="roomSubtitle" class="room-subtitle"></p>
-            <div class="room-meta">
-              <span id="roomCode" class="pill"></span>
-              <span id="roomMemberCount" class="pill"></span>
-              <span id="roomConnection" class="pill" role="status">Verbinde …</span>
-            </div>
-          </div>
-        </div>
-        <p id="roomWaiting" class="room-waiting" role="status"></p>
-        <form id="roomShareForm" class="room-share" autocomplete="off" novalidate>
-          <label class="field"><span>Direkter Videolink (HLS, MP4 oder WebM über HTTPS)</span>
-            <input id="roomShareUrl" type="url" inputmode="url" spellcheck="false" maxlength="4096" placeholder="https://…/video.mp4"></label>
-          <button id="roomShareButton" class="btn primary large" type="submit">Video für alle freigeben</button>
-          <p id="roomShareStatus" class="room-share-status" role="status"></p>
-          <p id="roomShareLocked" class="room-share-locked">Die Videofreigabe im Browser ist noch gesperrt: Das Backend kann bisher nicht bestätigen, dass ein Streamangebot wirklich vom Host stammt. Eine Desktop-Party mit „Share my stream“ funktioniert wie gewohnt.</p>
-          <p class="room-share-note">Alle laden das Video direkt beim Anbieter, der dabei ihre IP-Adresse sieht. Enthaltene Tokens sind für Party-Mitglieder sichtbar.</p>
-        </form>
-        <div id="roomProposals" class="room-proposals" role="region" aria-labelledby="roomProposalsTitle" hidden>
-          <h3 id="roomProposalsTitle">Vorschläge der Mitglieder</h3>
-          <ul id="roomProposalList"></ul>
-        </div>
-        <div class="room-actions">
-          <button id="roomBackToPlayer" type="button" class="btn primary" hidden>Zum Player</button>
-          <button id="roomCopyInvite" type="button" class="btn">Einladungslink kopieren</button>
-          <button id="roomOpenDrawer" type="button" class="btn">Teilnehmer &amp; Chat</button>
-          <button id="roomOpenHost" type="button" class="btn ghost">Host-Einstellungen</button>
-        </div>
-        <div class="room-people-box"><h3>Teilnehmer</h3><ul id="roomPeople" class="room-people"></ul></div>
-        <label class="field room-invite"><span>Einladungslink</span><input id="roomInvite" readonly></label>
-      </article>
-        <button id="drawerResync" type="button" class="btn ghost" disabled>Mich synchronisieren</button>
-        <button id="leaveButton" type="button" class="btn ghost leave">Party verlassen</button>
-      </section>
-      <section id="panelChat" class="settings-panel" role="tabpanel" aria-labelledby="tabChat" tabindex="0" hidden>
+        <h4>Chat</h4>
         <div id="chatLog" class="chat" role="log" aria-live="polite"></div>
         <form id="chatForm" class="chat-form"><input id="chatText" maxlength="500" placeholder="Nachricht schreiben …" aria-label="Chatnachricht" required><button type="submit" class="btn primary small">Senden</button></form>
+        <div id="previewLogoutRow" hidden><button type="button" id="previewLogout" class="btn ghost small">Preview abmelden</button></div>
+        <details class="debug-box">
+          <summary>Debug</summary>
+          <button id="showDiagnostics" class="btn ghost small" type="button">Sync-Diagnose anzeigen</button>
+          <div id="diagnosticsPanel"></div>
+        </details>
       </section>
       <!-- Only for the server-confirmed host (session.isHost). -->
       <section id="panelHost" class="settings-panel" role="tabpanel" aria-labelledby="tabHost" tabindex="0" hidden>
@@ -232,15 +223,22 @@
         </div>
         <h4>Mitglieder verwalten</h4>
         <ul id="roomMembers" class="room-member-list"></ul>
-        <button id="roomShowOverview" type="button" class="btn ghost">Party-Room öffnen</button>
-        <button id="roomStopShare" type="button" class="btn ghost" hidden>Videofreigabe beenden</button>
-        <button id="roomEnd" type="button" class="btn ghost leave">Party beenden</button>
+        <button id="roomShowOverview" type="button" class="btn small ghost">Party-Room öffnen</button>
+        <button id="roomStopShare" type="button" class="btn small ghost" hidden>Videofreigabe beenden</button>
+        <button id="roomEnd" type="button" class="btn small ghost leave">Party beenden</button>
       </section>
-      <section id="panelAdvanced" class="settings-panel" role="tabpanel" aria-labelledby="tabAdvanced" tabindex="0" hidden>
-        <div id="previewLogoutRow" hidden><button type="button" id="previewLogout" class="btn ghost small">Preview abmelden</button></div>
-        <button id="showDiagnostics" class="btn ghost small" type="button">Sync-Diagnose anzeigen</button>
-        <div id="diagnosticsPanel"></div>
-      </section>
+      <!-- Former "Stream" tab: no longer offered in the UI. The elements stay
+           (hidden) because the sync/source code still writes its status here. -->
+      <div id="streamLegacy" hidden>
+        <form id="personalHlsForm" autocomplete="off">
+          <input id="personalHlsUrl" type="url" aria-label="Video-Link (HTTPS-HLS-Playlist)" tabindex="-1">
+          <button id="loadPersonalHls" type="submit" tabindex="-1">Nur lokal laden</button>
+        </form>
+        <p id="personalHlsStatus" role="status"></p>
+        <button id="useDesktopStream" type="button" tabindex="-1" hidden>Zur Host-Quelle zurück</button>
+        <p id="streamInfo">Warte auf Video vom Host.</p>
+        <p id="qualityNote" hidden></p>
+      </div>
     </section>
   </aside>
   <script type="module" src="/src/main.js"></script>

@@ -91,7 +91,7 @@ async function harness({debug = false, guestControl = false, guestJoin = false, 
       return {status: reply.status, headers: {get: name => reply.headers?.[name] ?? null}, json: async () => reply.body};
     },
     env: {VITE_SUPABASE_URL: 'https://backend.example.test', VITE_SUPABASE_ANON_KEY: 'sb_publishable_TEST', ...(guestControl === true ? {VITE_PARTY_GUEST_CONTROL: '1'} : typeof guestControl === 'string' ? {VITE_PARTY_GUEST_CONTROL: guestControl} : {}), ...(guestJoin ? {VITE_PARTY_GUEST_JOIN: '1'} : {}), ...(share ? {VITE_PARTY_SHARE_WORKER: 'https://share.example.test'} : {}), ...(browserHostShare ? {VITE_PARTY_BROWSER_HOST_SHARE: '1'} : {})},
-    document: {getElementById: get, createElement: () => new Element()}, location, history: {replaceState: (_state, _title, url) => { historyCalls.push(url); location.pathname = url; }},
+    document: {getElementById: get, createElement: () => new Element(), createTextNode: data => ({data, textContent: data})}, location, history: {replaceState: (_state, _title, url) => { historyCalls.push(url); location.pathname = url; }},
     window: {confirm: () => true, addEventListener: (event, callback) => windowEvents.set(event, callback)},
     navigator: {mediaSession: {setActionHandler: (action, handler) => mediaActions.set(action, handler)}},
     resolveRoomMedia: (type, id, season, episode) => resolveRoomMedia(type, id, season, episode,
@@ -1026,27 +1026,23 @@ test('own controls: ±10 s, fullscreen, drawer, participants strip and connectio
   h.get('ctlFullscreen').fire('click'); assert.equal(fullscreen, 1);
   h.get('membersButton').fire('click'); assert.equal(h.get('infoDrawer').hidden, false); assert.equal(h.get('drawerScrim').hidden, false);
   h.get('drawerScrim').fire('click'); assert.equal(h.get('infoDrawer').hidden, true);
-  h.get('ctlSettings').fire('click'); h.get('tabChat').fire('click'); assert.equal(h.get('panelChat').hidden, false); h.get('drawerClose').fire('click');
+  h.get('ctlSettings').fire('click'); h.get('tabAdvanced').fire('click'); assert.equal(h.get('panelAdvanced').hidden, false); h.get('drawerClose').fire('click');
   h.session.handlers.connection('CHANNEL_ERROR'); assert.equal(h.get('syncChip').textContent, 'Verbindung unterbrochen');
   h.session.handlers.connection('SUBSCRIBED'); h.get('resync').fire('click'); h.tick();
   assert.equal(h.get('syncChip').textContent, 'Synchron');
 });
 
-test('participants and settings are separate, tabs support keyboard navigation and Escape restores focus', async () => {
+test('participants are a tab of the one drawer, tabs support keyboard navigation and Escape restores focus', async () => {
   const h = await harness();
   h.get('membersButton').fire('click');
-  assert.equal(h.get('participantsView').hidden, false);
-  assert.equal(h.get('settingsView').hidden, true);
+  assert.equal(h.get('panelPeople').hidden, false);
+  assert.equal(h.get('panelParty').hidden, true);
   assert.equal(h.get('partyApp').inert, true);
-  h.get('participantSettings').fire('click');
-  assert.equal(h.get('participantsView').hidden, true);
-  assert.equal(h.get('settingsView').hidden, false);
-  assert.equal(h.get('panelGeneral').hidden, false);
-  h.get('tabGeneral').fire('keydown', {key: 'ArrowRight'});
-  assert.equal(h.get('panelGeneral').hidden, true);
-  assert.equal(h.get('panelStream').hidden, false);
-  assert.equal(h.get('tabStream').getAttribute('aria-selected'), 'true');
-  assert.equal(h.get('tabStream').focused, true);
+  h.get('tabPeople').fire('keydown', {key: 'ArrowRight'});
+  assert.equal(h.get('panelPeople').hidden, true);
+  assert.equal(h.get('panelAdvanced').hidden, false);
+  assert.equal(h.get('tabAdvanced').getAttribute('aria-selected'), 'true');
+  assert.equal(h.get('tabAdvanced').focused, true);
   h.windowEvents.get('keydown')({key: 'Escape', preventDefault() {}});
   assert.equal(h.get('infoDrawer').hidden, true);
   assert.equal(h.get('partyApp').inert, false);
@@ -1783,17 +1779,20 @@ test('reload rejoin: a party that is full or gone ends the automatic rejoin with
   assert.equal(joinedWrites(h).at(-1), '');
 });
 
-test('the Stream tab has distinct local and suggestion actions and a short privacy notice', () => {
+test('compact drawer: Party, Teilnehmer, Erweitert (+Host); no Stream/General/Chat tabs; suggestions in the Party tab', () => {
   const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
-  const start = html.indexOf('<section id="panelStream"');
-  const block = html.slice(start, html.indexOf('</section>', start));
-  assert.match(block, /<h4>Eigene HLS-Quelle<\/h4>/);
-  assert.match(block, /id="personalHlsUrl"/); assert.match(block, />Nur lokal laden</);
-  assert.match(block, /id="proposalSection" hidden/); assert.match(block, />Dem Host vorschlagen</);
-  assert.match(block, />Zur Host-Quelle zurück</);
-  assert.match(block, /id="personalHlsStatus"/); assert.match(block, /Nur VOD/);
-  assert.match(block, /Vorschlag ist für alle Party-Mitglieder lesbar/);
-  assert.doesNotMatch(block, /id="loadAndSuggest"|Video laden &amp; vorschlagen/);
+  for (const id of ['tabParty', 'tabPeople', 'tabAdvanced', 'tabHost']) assert.match(html, new RegExp(`id="${id}"`));
+  for (const id of ['tabStream', 'tabGeneral', 'tabChat', 'participantsView', 'roomBackToPlayer', 'roomOpenDrawer', 'roomMemberCount'])
+    assert.doesNotMatch(html, new RegExp(`id="${id}"`));
+  assert.doesNotMatch(html, /Eigene HLS-Quelle/);
+  const party = html.slice(html.indexOf('<section id="panelParty"'), html.indexOf('<section id="panelPeople"'));
+  assert.match(party, /id="proposalSection" class="room-propose" hidden/);
+  assert.match(party, /Für alle Mitglieder lesbar/);
+  assert.match(party, /id="roomCopyInvite"/);
+  const advanced = html.slice(html.indexOf('<section id="panelAdvanced"'), html.indexOf('<section id="panelHost"'));
+  assert.match(advanced, /id="autoHostStream"/); assert.match(advanced, /id="chatLog"/);
+  assert.match(advanced, /<details class="debug-box">[\s\S]*id="diagnosticsPanel"/);
+  assert.match(html, /<div id="streamLegacy" hidden>/); // Status carriers for the source code, never visible.
 });
 
 // --- Double click, URL after join, rejoin + host source. Written, not executed here. ---
@@ -2118,7 +2117,7 @@ test('the browser host shares a direct link from the drawer without hiding the p
   assert.equal(h.get('panelHost').hidden, false);
   assert.equal(h.get('watchSection').hidden, false);
   assert.equal(h.get('tabHost').hidden, false);
-  assert.equal(h.get('roomMemberCount').textContent, '2 / 4 Teilnehmer');
+  assert.equal(h.get('roomPeople').children.length, 2);
   assert.equal(h.get('roomTitle').textContent, 'Film');
   h.get('roomShareUrl').value = 'http://cdn.example.test/film.mp4';
   h.get('roomShareForm').fire('submit'); await settlePlayback();
@@ -2147,7 +2146,7 @@ test('the browser host shares a direct link from the drawer without hiding the p
   assert.equal(playing.paused, false); assert.equal(playing.member_id, 'host'); assert.ok(playing.seq > start.seq);
   // Back to the room and stop sharing.
   h.get('roomShowOverview').fire('click');
-  assert.equal(h.get('roomOverview').hidden, false); assert.equal(h.get('roomBackToPlayer').hidden, false);
+  assert.equal(h.get('roomOverview').hidden, false);
   h.get('roomStopShare').fire('click'); await settlePlayback();
   const revoked = channel.filter(m => m.event === 'stream').at(-1).payload;
   assert.equal(revoked.member_id, 'host'); assert.equal(revoked.stream, null);
@@ -2366,12 +2365,12 @@ test('a member joins directly into the player and new sources load independently
   assert.match(h.get('noStream').textContent, /Warte auf Video vom Host/);
   h.session.receive('stream', {member_id: 'host', stream: sharedMp4()});
   h.get('ctlSettings').fire('click'); h.get('tabParty').fire('click');
-  assert.equal(h.get('roomOverview').hidden, false); assert.equal(h.get('roomBackToPlayer').hidden, false);
+  assert.equal(h.get('roomOverview').hidden, false);
   h.session.receive('stream', {member_id: 'host', stream: sharedMp4('https://cdn.example.test/new.mp4')});
   assert.equal(h.get('playerWrap').hidden, false);
   assert.equal(h.player.src, 'https://cdn.example.test/new.mp4');
   assert.equal(h.get('infoDrawer').hidden, false);
-  h.get('roomBackToPlayer').fire('click');
+  h.get('drawerClose').fire('click');
   assert.equal(h.get('infoDrawer').hidden, true);
   assert.equal(h.get('playerWrap').hidden, false);
   assert.equal(h.player.src, 'https://cdn.example.test/new.mp4');
@@ -2471,4 +2470,20 @@ test('blocked autoplay shows one clear start button; tapping it starts at the pa
   h.get('autoplayStart').fire('click'); await settlePlayback();
   assert.equal(h.get('autoplayStart').hidden, true);
   assert.equal(h.sync(), true); assert.equal(h.player.paused, false);
+});
+
+test('chat toasts: new messages of others appear on the player, at most five, gone after a while; history and own messages do not', async () => {
+  const h = await harness();
+  h.session.room.memberId = 'guest';
+  h.session.room.members = [{id: 'host', display_name: 'Host'}, {id: 'guest', display_name: 'Gast'}];
+  h.session.handlers.chat({id: '1', member_id: 'host', body: 'alt'}, true); // History of the first load.
+  h.session.handlers.chat({id: '2', member_id: 'guest', body: 'eigene'});  // Own message.
+  assert.equal(h.get('chatOverlay').children.length, 0);
+  for (let i = 0; i < 7; i++) h.session.handlers.chat({id: String(10 + i), member_id: 'host', body: `Nachricht ${i}`});
+  const toasts = h.get('chatOverlay').children;
+  assert.equal(toasts.length, 5);
+  assert.equal(toasts.at(-1).children.at(-1).textContent ?? toasts.at(-1).children.at(-1).data, 'Nachricht 6');
+  assert.equal(h.get('chatLog').children.length, 9); // The full chat log under "Erweitert" keeps everything.
+  h.runTimers();
+  assert.equal(h.get('chatOverlay').children.length, 0);
 });
