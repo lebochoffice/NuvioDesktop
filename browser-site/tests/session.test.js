@@ -21,7 +21,7 @@ function fixture(handlers = {}) {
       return {data: snapshot()};
     },
   };
-  return {client, calls, messages, tracks, ch, connect: () => cb('SUBSCRIBED'), disconnect: () => cb('CHANNEL_ERROR'), emit: (event, payload) => events.find(e => e.event === event).callback({payload}), session: new PartySession(client, 'device', handlers)};
+  return {client, calls, messages, tracks, ch, connect: () => cb('SUBSCRIBED'), emit: (event, payload) => events.find(e => e.event === event).callback({payload}), session: new PartySession(client, 'device', handlers)};
 }
 test('browser creation requires account auth, real media identity and a server-confirmed host membership', async t => {
   const f = fixture(); t.after(() => f.session.close());
@@ -100,8 +100,9 @@ test('authenticated private channel, state request, browsing presence and cleanu
   assert.equal(f.tracks[0].status, 'browsing');
   assert.equal(f.tracks[0].media_key, 'movie|tt1||');
   assert.ok(f.messages.some(m => m.event === 'state_request' && m.payload.member_id === 'guest'));
-  await f.session.sendPresence('ready'); assert.equal(f.tracks.at(-1).status, 'ready');
-  await f.session.sendPresence('behind', 5000); assert.equal(f.tracks.at(-1).behind_ms, 5000);
+  await f.session.sendPresence('ready'); assert.equal(f.messages.at(-1).payload.status, 'ready');
+  await f.session.sendPresence('behind', 5000); assert.equal(f.messages.at(-1).payload.behind_ms, 5000);
+  assert.equal(f.tracks.length, 1);
   await f.session.close();
   assert.equal(f.session.room, null); assert.equal(f.session.timers.length, 0);
   assert.ok(f.calls.some(c => c[0] === 'watch_party_leave'));
@@ -175,16 +176,12 @@ test('removed membership closes video/session and cancels periodic work', async 
 });
 
 test('presence failures are reported without suppressing the independent stream request', async t => {
-  let reportError, completeTrack;
-  const reported = new Promise(resolve => { reportError = resolve; });
-  const tracking = new Promise(resolve => { completeTrack = resolve; });
-  const f = fixture({error: reportError}); t.after(() => f.session.close());
+  const errors = [], f = fixture({error: e => errors.push(e.message)}); t.after(() => f.session.close());
   await f.session.join('UXZ83H', 'Guest');
-  f.ch.track = () => tracking;
+  f.ch.track = async () => 'timed out';
   await f.connect();
-  assert.ok(f.messages.some(m => m.event === 'state_request')); // Presence is still pending.
-  completeTrack('timed out');
-  assert.match((await reported).message, /Online-Status nicht bestätigt/);
+  assert.ok(errors.some(e => e.includes('Online-Status nicht bestätigt')));
+  assert.ok(f.messages.some(m => m.event === 'state_request'));
 });
 
 test('a replacement host can restart sequence ordering without a media reset', async t => {
@@ -606,28 +603,12 @@ test('media change and host change end the epoch: pending commands are rejected 
 
 test('reconnect: the authoritative snapshot is restored; closing clears commands and timers', async t => {
   const f = await sequenced(t);
-  const states = [], rpc = f.client.rpc;
-  f.session.handlers.connection = state => states.push([state, f.session.playback?.seq]);
-  let resolveHeartbeat;
-  const heartbeat = new Promise(resolve => { resolveHeartbeat = resolve; });
-  let heartbeatCalls = 0;
-  f.client.rpc = (name, args) => {
-    if (name !== 'watch_party_heartbeat') return rpc(name, args);
-    heartbeatCalls++;
-    return heartbeat;
-  };
-  const before = f.messages.length;
-  await f.disconnect();
-  const revalidating = f.connect();
-  assert.equal(heartbeatCalls, 1);
-  assert.equal(f.session.playback.seq, 2);
-  assert.equal(f.session.canControl(), false);
-  assert.deepEqual(states, [['CHANNEL_ERROR', 2]]);
-  resolveHeartbeat({data: {...snapshot(), party: {...snapshot().party, host_only: false, playback: {...playback, seq: 7, paused: true}}}});
-  await revalidating;
+  f.client.rpc = async name => name === 'watch_party_heartbeat'
+    ? {data: {...snapshot(), party: {...snapshot().party, host_only: false, playback: {...playback, seq: 7, paused: true}}}}
+    : {data: name === 'watch_party_clock' ? Date.now() : {messages: []}};
+  await f.connect(); await tick(0);
   assert.equal(f.session.playback.seq, 7); assert.equal(f.session.playback.paused, true);
-  assert.deepEqual(states, [['CHANNEL_ERROR', 2], ['SUBSCRIBED', 7]]);
-  assert.ok(f.messages.slice(before).some(m => m.event === 'state_request'));
+  assert.ok(f.messages.some(m => m.event === 'state_request'));
   const entry = f.session.issueCommand({paused: false, positionMs: 1000});
   assert.equal(entry.command.base_seq, 7);
   await f.session.close();
@@ -636,7 +617,7 @@ test('reconnect: the authoritative snapshot is restored; closing clears commands
 
 // --- P0 after 0.1.39: realtime recovery and rejected-command catch-up. Written, not executed here. ---
 // Separate channel objects per subscribe, so stale callbacks can be replayed.
-function realtimeFixture(device = 'device') {
+function realtimeFixture() {
   const calls = [], messages = [], channels = [];
   const client = {
     auth: {getSession: async () => ({data: {session: {access_token: 'session-jwt-REFRESHED', user: {id: 'u', is_anonymous: false}}}})},
@@ -654,7 +635,7 @@ function realtimeFixture(device = 'device') {
       return {data: snapshot()};
     },
   };
-  const session = new PartySession(client, device, {});
+  const session = new PartySession(client, 'device', {});
   session.reconnectBaseMs = 5; session.rejoinGraceMs = 20;
   return {client, calls, messages, channels, session, emit: (ch, event, payload) => ch.events.find(e => e.event === event).callback({payload})};
 }
@@ -749,7 +730,7 @@ test('position reports ride on the status event with allowlisted numbers only an
   const report = f.messages.filter(m => m.event === 'status').at(-1).payload;
   assert.equal(report.position_ms, 12346); assert.equal(report.playing, true); assert.ok(Number.isSafeInteger(report.position_at));
   assert.ok(!JSON.stringify(report).includes('secret'));
-  await f.session.sendPresence('ready'); assert.equal(f.tracks.at(-1).position_ms, 12346); // Presence carries it too.
+  await f.session.sendPresence('ready'); assert.equal(f.messages.at(-1).payload.position_ms, 12346);
   f.session.positionProvider = () => null; await f.session.reportPosition(); // Nothing loaded: no report.
   assert.equal(f.messages.filter(m => m.event === 'status').at(-1).payload.status, 'ready');
   f.emit('status', {member_id: 'host', status: 'ready', media_key: 'movie|tt1||', position_ms: 99999, position_at: 1, playing: true, seq: 99, paused: true});
@@ -876,7 +857,6 @@ test('reconnect: a sharing host announces its offer and party time again once su
   await f.session.shareHostStream(hostLinkStream);
   await f.session.hostPublish({paused: false, positionMs: 7000});
   const before = f.messages.length;
-  await f.disconnect();
   await f.connect(); // SUBSCRIBED again after a reconnect.
   const again = f.messages.slice(before);
   assert.ok(again.some(m => m.event === 'stream' && m.payload.stream === hostLinkStream));
@@ -886,9 +866,7 @@ test('reconnect: a sharing host announces its offer and party time again once su
 test('late completion after leaving cannot restore a pending offer, and revoke is serialized', async t => {
   const f = await hostFixture(t);
   let complete;
-  const send = f.ch.send;
-  f.ch.send = message => message.event === 'stream'
-    ? new Promise(resolve => { complete = resolve; }) : send(message);
+  f.ch.send = () => new Promise(resolve => { complete = resolve; });
   const sharing = f.session.shareHostStream(hostLinkStream);
   const rejected = assert.rejects(sharing, {code: 'closed'});
   await assert.rejects(f.session.stopHostStream(), /läuft bereits/);
@@ -994,7 +972,6 @@ test('a reconnected former host checks the heartbeat before reannouncing its sou
   await f.session.shareHostStream(hostLinkStream);
   let resolveHeartbeat;
   f.client.rpc = name => name === 'watch_party_heartbeat' ? new Promise(resolve => { resolveHeartbeat = resolve; }) : Promise.resolve({data: {}});
-  await f.disconnect();
   const before = f.messages.length, reconnecting = f.connect();
   f.emit('state_request', {member_id: 'guest'});
   assert.equal(f.messages.slice(before).some(message => message.event === 'stream'), false);
@@ -1078,135 +1055,373 @@ test('a host alone asks for manual sharing, and a rejoined guest never sends a r
   assert.ok(!g.messages.some(message => message.event === 'browser_source_request'));
 });
 
-test('a heartbeat already in flight cannot swallow subscription validation or a host change', async t => {
-  const f = realtimeFixture(), states = [], promotions = [];
-  t.after(() => f.session.close());
-  f.session.handlers.connection = state => states.push(state);
-  f.session.handlers.promoted = offer => promotions.push(offer);
-  await f.session.join('UXZ83H', 'Guest');
-  const ch = f.channels[0];
-  await ch.cb('SUBSCRIBED');
-  f.emit(ch, 'stream', {member_id: 'host', media_key: playback.media_key, source_revision: 1, stream: hostLinkStream, handoff_ready: true});
+// Controlled timers: no sleep or network, and the production deadlines remain unchanged.
+function controlledTimeouts(t) {
+  const timers = new Map();
+  t.mock.method(globalThis, 'setTimeout', (callback, delay) => {
+    const handle = {unref() {}};
+    timers.set(handle, {callback, delay});
+    return handle;
+  });
+  t.mock.method(globalThis, 'clearTimeout', handle => timers.delete(handle));
+  return {
+    fire(delay) {
+      const entry = [...timers].find(([, value]) => value.delay === delay);
+      assert.ok(entry, `Missing timer for ${delay} ms`);
+      timers.delete(entry[0]);
+      return entry[1].callback();
+    },
+    has: delay => [...timers.values()].some(timer => timer.delay === delay),
+  };
+}
 
-  const next = snapshot();
-  next.party.host_member_id = 'guest';
-  next.party.playback = null;
-  next.members = [{id: 'guest'}, {id: 'other'}];
-  let count = 0, release;
-  f.client.rpc = name => {
-    assert.equal(name, 'watch_party_heartbeat');
-    if (++count === 1) return new Promise(resolve => { release = resolve; });
-    return Promise.resolve({data: next});
+test('three subscribers answer one another’s state requests with status, without additional Presence tracks', async t => {
+  const browsers = [fixture(), fixture(), fixture()];
+  for (const [index, f] of browsers.entries()) {
+    t.after(() => f.session.close(false));
+    await f.session.join('UXZ83H', 'Guest');
+    f.session.room.memberId = index === 0 ? 'host' : 'guest-' + index;
+    f.session.browserHostLinksEnabled = index === 0;
+    await f.connect();
+  }
+  for (const sender of browsers) {
+    await sender.session.requestState();
+    const request = sender.messages.at(-1).payload;
+    for (const receiver of browsers) receiver.emit('state_request', request);
+  }
+  for (const f of browsers) {
+    assert.equal(f.tracks.length, 1);
+    assert.equal(f.messages.filter(m => m.event === 'status').length, 3);
+    assert.equal(f.session.playback.seq, playback.seq);
+  }
+  const hostStatus = browsers[0].messages.findLast(m => m.event === 'status').payload;
+  assert.equal(hostStatus.browser_host_links, 1);
+  browsers[1].emit('status', hostStatus);
+  assert.equal(browsers[1].session.browserHostLinks, true);
+});
+
+test('Presence coalesces latest status and spaces tracks across reconnects and fresh joins', async t => {
+  let now = 0;
+  t.mock.method(performance, 'now', () => now);
+  const timers = controlledTimeouts(t), f = fixture();
+  t.after(() => f.session.close(false));
+  await f.session.join('UXZ83H', 'Guest'); await f.connect();
+  const sentAt = [now];
+  for (let i = 1; i <= 5; i++) {
+    if (i === 3) await f.session.join('UXZ83H', 'Guest');
+    else await f.session.reconnect();
+    await f.connect();
+    await f.session.sendPresence('ready');
+    await f.session.sendPresence('buffering');
+    await f.session.sendPresence('behind', 1000 * i);
+    assert.equal(f.tracks.length, i);
+    assert.equal(f.messages.at(-1).payload.behind_ms, 1000 * i);
+    now += 6250;
+    await timers.fire(6250);
+    sentAt.push(now);
+    assert.equal(f.tracks.length, i + 1);
+    assert.equal(f.tracks.at(-1).status, 'behind');
+    assert.equal(f.tracks.at(-1).behind_ms, 1000 * i);
+    assert.equal(timers.has(6250), false);
+  }
+  for (const start of sentAt) assert.ok(sentAt.filter(at => at >= start && at - start < 30000).length <= 5);
+});
+
+test('server Presence limit delays automatic and manual reconnect until cooldown, then revalidates guest control', async t => {
+  let now = 0;
+  t.mock.method(performance, 'now', () => now);
+  const timers = controlledTimeouts(t), f = realtimeFixture();
+  t.after(() => f.session.close(false));
+  const rpc = f.client.rpc;
+  f.client.rpc = (name, args) => name === 'watch_party_heartbeat'
+    ? Promise.resolve({data: {...snapshot(), party: {...snapshot().party, host_only: false}}})
+    : rpc(name, args);
+  await f.session.join('UXZ83H', 'Guest'); await f.channels[0].cb('SUBSCRIBED');
+  const old = f.channels[0];
+  old.events.find(e => e.event === undefined).callback({
+    status: 'error', extension: 'system', message: 'Client presence rate limit exceeded SECRET_SENTINEL',
+  });
+  await old.cb('CLOSED');
+  assert.equal(f.session.diagnostics.serverError.reason, 'client_presence_limit');
+  assert.equal(f.session.diagnostics.serverError.source, 'system');
+  assert.ok(!JSON.stringify(f.session.diagnostics).includes('SECRET_SENTINEL'));
+  assert.equal(f.session.canControl(), false);
+  await f.session.reconnect();
+  assert.equal(f.channels.length, 1);
+  now = 31000; timers.fire(31000); await f.session.reconnecting;
+  assert.equal(f.channels.length, 2);
+  assert.equal(f.session.canControl(), false);
+  await f.channels[1].cb('SUBSCRIBED');
+  assert.equal(f.session.hostOfferDeferred, false);
+  assert.equal(f.session.canControl(), true);
+  f.session.room.info.host_only = true;
+  assert.equal(f.session.canControl(), false);
+});
+
+test('a heartbeat from a removed channel cannot swallow validation of its subscribed replacement', async t => {
+  const f = realtimeFixture(); t.after(() => f.session.close(false));
+  await f.session.join('UXZ83H', 'Guest'); await f.channels[0].cb('SUBSCRIBED');
+  let release, calls = 0;
+  const rpc = f.client.rpc;
+  f.client.rpc = (name, args) => {
+    if (name !== 'watch_party_heartbeat') return rpc(name, args);
+    if (++calls === 1) return new Promise(resolve => { release = resolve; });
+    return Promise.resolve({data: {...snapshot(), party: {...snapshot().party, playback: {...playback, seq: 7}}}});
   };
   const stale = f.session.refresh();
-  await ch.cb('CHANNEL_ERROR');
-  await ch.cb('CHANNEL_ERROR'); // Same status: no second UI transition.
-  const rejoining = ch.cb('SUBSCRIBED');
-  f.emit(ch, 'member_left', {member_id: 'host'});
-  assert.equal(f.session.canControl(), false);
-  release({data: snapshot()});
-  await Promise.all([stale, rejoining]);
-  assert.equal(count, 2);
-  assert.equal(f.session.isHost(), true);
-  assert.equal(f.session.canControl(), true);
-  assert.deepEqual(promotions, [null]); // A missed revocation is possible across the disconnect.
-  assert.deepEqual(states, ['CONNECTING', 'SUBSCRIBED', 'CHANNEL_ERROR', 'SUBSCRIBED']);
-  assert.equal(f.channels.length, 1);
+  await f.session.reconnect(); await f.channels[1].cb('SUBSCRIBED');
+  assert.equal(f.session.hostOfferDeferred, true);
+  const validated = new Promise(resolve => { f.session.handlers.room = resolve; });
+  release({data: {...snapshot(), party: {...snapshot().party, playback: {...playback, seq: 99}}}});
+  await stale; await validated;
+  assert.equal(calls, 2);
+  assert.equal(f.session.hostOfferDeferred, false);
+  assert.equal(f.session.playback.seq, 7);
+  assert.ok(Number.isFinite(f.session.diagnostics.lastHeartbeatAt));
 });
 
-test('three separate browser devices follow successive hosts and ignore departed epochs', async t => {
-  const browsers = ['device-a', 'device-b', 'device-c'].map(device => realtimeFixture(device));
-  for (const [index, f] of browsers.entries()) {
-    const base = f.client.rpc, memberId = ['host', 'next', 'last'][index];
-    let room = {...snapshot(), member_id: memberId, members: [{id: 'host'}, {id: 'next'}, {id: 'last'}]};
-    f.client.rpc = (name, args) => ['watch_party_join', 'watch_party_heartbeat'].includes(name)
-      ? (f.calls.push([name, args]), Promise.resolve({data: room})) : base(name, args);
-    t.after(() => f.session.close());
-    await f.session.join('UXZ83H', 'Guest');
-    const ch = f.channels[0];
-    await ch.cb('SUBSCRIBED');
-    assert.equal(f.calls.find(([name]) => name === 'watch_party_join')[1].p_device_id, f.session.deviceId);
-    if (index === 0) continue;
-
-    const promotions = [];
-    f.session.handlers.promoted = offer => promotions.push(offer);
-    f.emit(ch, 'stream', {member_id: 'host', media_key: playback.media_key, source_revision: 8, stream: hostLinkStream});
-    // The commit was lost. The current host's committed replay repairs it.
-    f.emit(ch, 'stream', {member_id: 'host', media_key: playback.media_key, source_revision: 8, stream: hostLinkStream, handoff_ready: true});
-    room = {...room, party: {...room.party, host_member_id: 'next', host_only: false, playback: null}, members: [{id: 'next'}, {id: 'last'}]};
-    await f.session.refresh();
-    const nextState = {...playback, member_id: 'next', seq: 0, paused: true};
-    f.emit(ch, 'state', nextState);
-    assert.equal(f.session.playback, nextState);
-    if (index === 1) { assert.deepEqual(promotions, [{stream: hostLinkStream, playback}]); continue; }
-
-    f.emit(ch, 'stream', {member_id: 'next', media_key: playback.media_key, source_revision: 1, stream: hostLinkStream, handoff_ready: true});
-    room = {...room, party: {...room.party, host_member_id: 'last', playback: nextState}, members: [{id: 'last'}]};
-    await f.session.refresh();
-    const lastState = {...playback, member_id: 'last', seq: 0};
-    f.emit(ch, 'state', lastState);
-    f.emit(ch, 'state', {...playback, seq: 900});
-    f.emit(ch, 'state', {...nextState, seq: 901});
-    assert.deepEqual(promotions, [{stream: hostLinkStream, playback: nextState}]);
-    assert.equal(f.session.playback, lastState);
+test('three independent browser clients: a third join and guest reconnect never reconnect the other clients', async t => {
+  // Account identity and device identity are separate. The mock confirms the
+  // membership; this does not claim what the live backend allows per account.
+  for (const sameAccount of [true, false]) {
+    const clients = ['a', 'b', 'c'].map(() => realtimeFixture());
+    for (const [i, f] of clients.entries()) {
+      t.after(() => f.session.close(false));
+      f.session.deviceId = `device-${i}`;
+      f.client.auth.getSession = async () => ({data: {session: {
+        access_token: 'SYNTHETIC_SESSION', user: {id: sameAccount ? 'account' : `account-${i}`, is_anonymous: false},
+      }}});
+      const rpc = f.client.rpc;
+      f.client.rpc = async (name, args) => {
+        const response = await rpc(name, args);
+        return ['watch_party_join', 'watch_party_heartbeat'].includes(name)
+          ? {data: {...snapshot(), member_id: i === 0 ? 'host' : `guest-${i}`,
+            members: [{id: 'host'}, {id: 'guest-1'}, {id: 'guest-2'}]}} : response;
+      };
+      await f.session.join('UXZ83H', 'Member');
+      await f.channels[0].cb('SUBSCRIBED');
+    }
+    const [a, b, c] = clients;
+    for (const f of [a, b]) {
+      const before = f.session.playback, transitions = [];
+      f.session.handlers.connection = state => transitions.push(state);
+      const refreshed = new Promise(resolve => { f.session.handlers.room = resolve; });
+      f.emit(f.channels[0], 'member_joined', {member_id: 'guest-2'});
+      f.emit(f.channels[0], 'state_request', {member_id: 'guest-2'});
+      await refreshed;
+      assert.equal(f.session.playback, before);
+      assert.deepEqual(transitions, []);
+      assert.equal(f.channels.length, 1);
+    }
+    await c.session.reconnect(); await c.channels[1].cb('SUBSCRIBED');
+    assert.deepEqual(clients.map(f => f.channels.length), [1, 1, 2]);
+    assert.deepEqual(clients.map(f => f.session.diagnostics.reconnects), [0, 0, 1]);
   }
-  assert.equal(new Set(browsers.map(f => f.session.deviceId)).size, 3);
 });
 
-test('a Desktop HLS offer without a browser revision is not inherited by a promoted browser', async t => {
-  const promoted = [], f = fixture({promoted: offer => promoted.push(offer)});
-  t.after(() => f.session.close());
-  await f.session.join('UXZ83H', 'Guest'); await f.connect();
-  f.emit('stream', {member_id: 'host', stream: {...hostLinkStream, browser_hls: {url: 'https://cdn.example.test/playlist.m3u8'}}});
-  const next = snapshot();
-  next.party.host_member_id = 'guest';
-  f.client.rpc = async () => ({data: next});
-  await f.session.refresh();
-  assert.deepEqual(promoted, [null]);
-  assert.equal(f.session.hostOffer, null);
+test('duplicate device values are sent unchanged to the backend and do not themselves trigger local channel eviction', async t => {
+  const a = realtimeFixture(), b = realtimeFixture();
+  for (const f of [a, b]) {
+    t.after(() => f.session.close(false));
+    await f.session.join('UXZ83H', 'Member'); await f.channels[0].cb('SUBSCRIBED');
+    f.session.attachRealtime(f.session.generation); // Guard a second local attach.
+    assert.equal(f.channels.length, 1);
+    assert.equal(f.calls.find(([name]) => name === 'watch_party_join')[1].p_device_id, 'device');
+  }
+  assert.equal(a.session.diagnostics.connection, 'SUBSCRIBED');
+  // Whether the real server replaces a duplicate membership is a live check.
 });
 
-test('a transient reconnect failure schedules a fresh attempt after releasing the reconnect lock', async t => {
-  const f = realtimeFixture();
-  t.after(() => f.session.close());
-  await f.session.join('UXZ83H', 'Guest');
-  const setAuth = f.client.realtime.setAuth;
-  f.client.realtime.setAuth = async () => { throw new Error('network'); };
+test('failed reconnect retries after releasing its lock; two-second closed cycles never overlap channels', async t => {
+  const timers = controlledTimeouts(t), f = realtimeFixture();
+  t.after(() => f.session.close(false));
+  await f.session.join('UXZ83H', 'Member'); await f.channels[0].cb('SUBSCRIBED');
+  const auth = f.client.realtime.setAuth;
+  f.client.realtime.setAuth = async () => { throw new Error('network SYNTHETIC_SECRET'); };
   await f.session.reconnect();
+  assert.equal(f.session.reconnecting, null);
   assert.ok(f.session.reconnectTimer);
-  f.client.realtime.setAuth = setAuth;
-  await tick(45);
-  assert.equal(f.channels.length, 2);
-  await f.channels[1].cb('SUBSCRIBED');
-  assert.equal(f.session.reconnectTimer, null);
+  assert.ok(!JSON.stringify(f.session.diagnostics).includes('SYNTHETIC_SECRET'));
+  f.client.realtime.setAuth = auth;
+  timers.fire(10); await f.session.reconnecting;
+  await f.channels.at(-1).cb('SUBSCRIBED');
+  f.session.reconnectBaseMs = 2000;
+  for (let i = 0; i < 3; i++) {
+    const old = f.channels.at(-1), count = f.channels.length;
+    await old.cb('CLOSED'); await old.cb('CLOSED');
+    timers.fire(2000);
+    const pending = f.session.reconnecting;
+    assert.equal(f.session.reconnect(), pending);
+    await pending;
+    assert.equal(f.channels.length, count + 1);
+    await old.cb('CLOSED'); // Stale callback cannot close its replacement.
+    assert.equal(f.session.diagnostics.connection, 'CONNECTING');
+    await f.channels.at(-1).cb('SUBSCRIBED');
+    assert.equal(f.session.reconnectTimer, null);
+  }
 });
 
-test('a leaving Browser host requests server-side departure before notifying guests', async t => {
-  const f = await hostFixture(t), order = [];
-  const rpc = f.client.rpc, send = f.ch.send;
+test('host refresh with two guests retries a lost reply once and accepts only both identical committed copies', async t => {
+  const timers = controlledTimeouts(t), candidates = [];
+  const f = await hostFixture(t, {sourceRecoveryCandidate: attempt => candidates.push(attempt)});
+  f.session.browserHostLinksEnabled = true;
+  f.session.room.members.push({id: 'other'});
+  f.session.armSourceRecovery();
+  const request = f.messages.find(message => message.event === 'browser_source_request').payload;
+  const reply = {...request, member_id: 'guest', source_revision: 42, stream: hostLinkStream};
+  f.emit('browser_source_reply', reply);
+  assert.equal(candidates.length, 0);
+  timers.fire(1750);
+  const repeated = f.messages.filter(message => message.event === 'browser_source_request');
+  assert.equal(repeated.length, 2);
+  assert.deepEqual(repeated[1].payload, request);
+  f.emit('browser_source_reply', reply); // Duplicate is not the second member.
+  assert.equal(f.session.diagnostics.recoveryReplies, 1);
+  f.emit('browser_source_reply', {...reply, member_id: 'other'});
+  assert.equal(candidates.length, 1);
+  assert.equal(f.session.completeSourceRecovery(candidates[0]), true);
+  assert.equal(f.session.diagnostics.recoveryResult, 'recovered');
+  assert.equal(timers.has(3500), false);
+});
+
+test('an offline peer or permanently lost reply times out without choosing a partial recovery quorum', async t => {
+  const timers = controlledTimeouts(t), failures = [];
+  const f = await hostFixture(t, {sourceRecoveryUnavailable: reason => failures.push(reason)});
+  f.session.browserHostLinksEnabled = true;
+  f.session.room.members.push({id: 'offline'});
+  f.session.armSourceRecovery();
+  const request = f.messages.find(message => message.event === 'browser_source_request').payload;
+  f.emit('browser_source_reply', {...request, member_id: 'guest', source_revision: 1, stream: hostLinkStream});
+  timers.fire(1750); timers.fire(3500);
+  assert.deepEqual(failures, ['timeout']);
+  assert.equal(f.session.hostStream, null);
+  assert.equal(f.session.sourceRecovery, null);
+  assert.equal(f.session.diagnostics.recoveryExpected, 2);
+  assert.equal(f.session.diagnostics.recoveryReplies, 1);
+  f.emit('browser_source_reply', {...request, member_id: 'offline', source_revision: 1, stream: hostLinkStream});
+  assert.equal(f.session.hostStream, null);
+});
+
+test('a lost commit stays unconfirmed; only an identical committed host replay repairs it', async t => {
+  const g = fixture(); t.after(() => g.session.close(false));
+  await g.session.join('UXZ83H', 'Guest'); await g.connect();
+  g.session.browserHostLinksEnabled = true;
+  const offer = {member_id: 'host', media_key: playback.media_key, source_revision: 8, stream: hostLinkStream};
+  const request = {request_id: 'recovery-test-1', party_id: 'room-1', media_key: playback.media_key, host_member_id: 'host'};
+  g.emit('stream', offer);
+  g.emit('browser_source_request', request);
+  assert.equal(g.messages.at(-1).payload.stream, null);
+  g.emit('stream', {...offer, handoff_ready: true});
+  g.emit('browser_source_request', request);
+  assert.deepEqual(g.messages.at(-1).payload.stream, hostLinkStream);
+  g.emit('stream', {...offer, stream: {...hostLinkStream, url: 'https://other.example.test/movie.mp4'}, handoff_ready: true});
+  g.emit('stream_commit', offer);
+  g.emit('browser_source_request', request);
+  assert.equal(g.messages.at(-1).payload.stream, null);
+});
+
+test('reconnect during recovery cancels both old timers and starts a fresh request after role revalidation', async t => {
+  const timers = controlledTimeouts(t), f = await hostFixture(t);
+  f.session.browserHostLinksEnabled = true;
+  f.session.armSourceRecovery();
+  const old = f.session.sourceRecovery;
+  await f.session.reconnect();
+  assert.equal(f.session.diagnostics.recoveryResult, 'channel_lost');
+  assert.equal(timers.has(1750), false);
+  assert.equal(timers.has(3500), false);
+  await f.connect();
+  assert.ok(f.session.sourceRecovery);
+  assert.notEqual(f.session.sourceRecovery.id, old.id);
+  f.emit('browser_source_reply', {request_id: old.id, party_id: 'room-1', host_member_id: 'host',
+    media_key: playback.media_key, member_id: 'guest', source_revision: 1, stream: hostLinkStream});
+  assert.equal(f.session.diagnostics.recoveryReplies, 0);
+});
+
+test('CLOSED on an open socket is recorded before any local removal; stale cleanup cannot close the replacement', async t => {
+  const f = realtimeFixture(); t.after(() => f.session.close(false));
+  f.client.realtime.isConnected = () => true;
+  await f.session.join('UXZ83H', 'Guest'); await f.channels[0].cb('SUBSCRIBED');
+  const old = f.channels[0];
+  await old.cb('CLOSED');
+  assert.deepEqual(f.session.diagnostics.lifecycle.map(e => e.action), ['subscribe', 'closed']);
+  assert.equal(f.session.diagnostics.lifecycle.at(-1).socketConnected, true);
+  assert.equal(f.calls.filter(([name]) => name === 'remove').length, 0);
+  await f.session.reconnect(); await f.channels[1].cb('SUBSCRIBED');
+  await old.cb('CLOSED');
+  assert.equal(f.session.diagnostics.lifecycle.at(-1).reason, 'stale');
+  assert.equal(f.session.diagnostics.connection, 'SUBSCRIBED');
+  assert.equal(f.session.channel, f.channels[1]);
+  assert.equal(f.session.diagnostics.lifecycle.find(e => e.action === 'remove_start').reason, 'reconnect');
+});
+
+test('host-refresh recovery idle with a pending role starts only after the authoritative heartbeat', async t => {
+  const f = await hostFixture(t);
+  f.session.browserHostLinksEnabled = true;
+  f.session.hostOfferDeferred = true;
+  f.session.armSourceRecovery();
+  assert.ok(f.session.sourceRecoveryScope);
+  assert.equal(f.session.diagnostics.recoveryExpected, 0);
+  assert.equal(f.session.diagnostics.recoveryResult, 'idle');
+  assert.ok(!f.messages.some(message => message.event === 'browser_source_request'));
+  let release;
+  const rpc = f.client.rpc;
+  f.client.rpc = name => name === 'watch_party_heartbeat' ? new Promise(resolve => { release = resolve; }) : rpc(name);
+  const refresh = f.session.refresh();
+  assert.equal(f.session.diagnostics.heartbeatResult, 'pending');
+  release({data: {...snapshot(), member_id: 'host'}});
+  await refresh;
+  assert.equal(f.session.hostOfferDeferred, false);
+  assert.equal(f.session.diagnostics.heartbeatResult, 'ok');
+  assert.ok(f.messages.some(message => message.event === 'browser_source_request'));
+});
+
+test('presence loss only requests a snapshot: neither a missing host nor guest elects a host locally', async t => {
+  const timers = controlledTimeouts(t), f = realtimeFixture();
+  t.after(() => f.session.close(false));
+  await f.session.join('UXZ83H', 'Guest'); await f.channels[0].cb('SUBSCRIBED');
+  const ch = f.channels[0], presenceLeft = ch.events.find(event => event.event === 'leave').callback;
+  const previous = f.session.playback;
+  const before = f.calls.filter(([name]) => name === 'watch_party_heartbeat').length;
+  presenceLeft({key: 'host', currentPresences: [{online: true}]}); // Another connection still exists.
+  assert.equal(timers.has(1500), false);
+  presenceLeft({key: 'host', currentPresences: []});
+  presenceLeft({key: 'host', currentPresences: []});
+  assert.equal(f.session.isHost(), false); assert.equal(f.session.playback, previous);
+  const refreshed = new Promise(resolve => { f.session.handlers.room = resolve; });
+  timers.fire(1500); await refreshed;
+  assert.equal(f.calls.filter(([name]) => name === 'watch_party_heartbeat').length, before + 1);
+  assert.equal(f.session.isHost(), false); assert.equal(f.session.playback, previous);
+  assert.equal(f.channels.length, 1);
+  // A later server snapshot, not the hint, promotes this member.
+  const rpc = f.client.rpc;
+  f.client.rpc = (name, args) => name === 'watch_party_heartbeat'
+    ? Promise.resolve({data: {...snapshot(), party: {...snapshot().party, host_member_id: 'guest', host_only: false,
+      playback: {...playback, seq: 0, member_id: 'guest'}}, members: [{id: 'guest'}, {id: 'remaining'}]}})
+    : rpc(name, args);
+  await f.session.refresh();
+  assert.equal(f.session.isHost(), true); assert.equal(f.session.room.info.host_only, false);
+  presenceLeft({key: 'remaining', currentPresences: []});
+  assert.equal(f.session.isHost(), true);
+  const sameRole = new Promise(resolve => { f.session.handlers.room = resolve; });
+  timers.fire(1500); await sameRole;
+  assert.equal(f.session.isHost(), true); assert.equal(f.channels.length, 1);
+});
+
+test('regular leave reaches the backend even while channel removal is pending, and cleanup stays serialized', async t => {
+  const f = await hostFixture(t);
+  let finishRemoval, leaveStarted;
+  const removal = new Promise(resolve => { finishRemoval = resolve; });
+  const departed = new Promise(resolve => { leaveStarted = resolve; });
+  f.client.removeChannel = () => removal;
+  const rpc = f.client.rpc;
   f.client.rpc = (name, args) => {
-    if (name === 'watch_party_leave') order.push('leave RPC');
+    if (name === 'watch_party_leave') leaveStarted();
     return rpc(name, args);
   };
-  f.ch.send = message => { if (message.event === 'member_left') order.push(message.event); return send(message); };
-  f.client.removeChannel = async () => { order.push('remove channel'); };
-  await f.session.close();
-  assert.deepEqual(order, ['leave RPC', 'member_left', 'remove channel']);
-});
-
-test('after reconnect only a committed replay revalidates an offer that could have been revoked', async t => {
-  const f = fixture();
-  t.after(() => f.session.close());
-  await f.session.join('UXZ83H', 'Guest'); await f.connect();
-  const offer = {member_id: 'host', media_key: playback.media_key, source_revision: 1, stream: hostLinkStream};
-  const commit = {member_id: offer.member_id, media_key: offer.media_key, source_revision: offer.source_revision};
-  f.emit('stream', {...offer, handoff_ready: true});
-  await f.disconnect(); await f.connect();
-  f.emit('stream_commit', commit);
-  assert.equal(f.session.receivedBrowserOffer.ready, false);
-  f.emit('stream', {...offer, handoff_ready: true});
-  assert.equal(f.session.receivedBrowserOffer.ready, true);
-  f.emit('stream', {...offer, source_revision: 2, stream: null});
-  f.emit('stream_commit', commit);
-  assert.equal(f.session.receivedBrowserOffer, null);
+  const closing = f.session.close();
+  await departed;
+  assert.equal(f.session.room, null); assert.equal(f.session.closing, closing);
+  finishRemoval(); await closing;
+  assert.equal(f.session.closing, null);
+  assert.equal(f.calls.filter(([name]) => name === 'watch_party_leave').length, 1);
 });

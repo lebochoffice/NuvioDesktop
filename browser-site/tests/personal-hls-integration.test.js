@@ -14,6 +14,7 @@ import {PartySession as ActualPartySession} from '../src/session.js';
 import * as syncPolicy from '../src/sync-policy.js';
 import {loadRoomTitle, resolveRoomMedia, roomMediaForEpisode} from '../src/room-media.js';
 import * as hostShareModule from '../src/host-share.js';
+import {createRealtimeTrace} from '../src/realtime-trace.js';
 
 const privateUrl = 'https://media.example.test/private/master?token=INTEGRATION_PRIVATE_SENTINEL';
 const vod = {live: false, totalduration: 120, fragments: [{start: 0, duration: 120}]};
@@ -82,7 +83,7 @@ async function harness({debug = false, guestControl = false, guestJoin = false, 
     signInAnonymously: async () => { anonymousSignIns.push(1); return {data: {}}; }}};
   const windowEvents = new Map();
   const context = vm.createContext({
-    ...protocol, ...syncPolicy, ...hostShareModule, PersonalHlsSource, personalHlsUrlProblem, Hls: FakeHls, PartySession: FakeSession,
+    ...protocol, ...syncPolicy, ...hostShareModule, createRealtimeTrace, PersonalHlsSource, personalHlsUrlProblem, Hls: FakeHls, PartySession: FakeSession,
     createClient: () => client, callRpc: (_client, name, args) => { if (rpc?.[name]) return rpc[name](args); throw Error('Unexpected RPC'); }, URL, Blob,
     // Family share Worker double: share.handle(action, body, headers) -> {status, body}.
     fetch: async (url, init) => {
@@ -416,9 +417,10 @@ test('seek races and buffering coalesce host jumps and eventually follow the lat
   assert.equal(currentTime, 60);
 });
 
-test('hls.js gap/nudge recovery stays synchronized, but a manual seek even inside the suppression window does not', async () => {
+test('hls.js gap/nudge recovery stays synchronized; in explicit local-control mode a manual seek leaves sync', async () => {
   for (const details of ['bufferSeekOverHole', 'bufferNudgeOnStall']) {
-    const h = await readyGuest(); h.get('resync').fire('click'); h.player.fire('seeked');
+    const h = await readyGuest({guestControl: 'off'}); h.session.room.info.host_only = false;
+    h.get('resync').fire('click'); h.player.fire('seeked');
     h.player.currentTime = 5.2;
     h.source().instance.emit(FakeHls.Events.ERROR, {fatal: false, type: 'mediaError', details, reason: privateUrl});
     h.player.fire('seeking'); assert.equal(h.sync(), true);
@@ -673,12 +675,13 @@ test('hostOnly=false: browser pause, seek and play become server-confirmed party
   assert.equal(c.rpcs.length, 3); assert.equal(c.sends.length, 3); // Applying confirmed states sends nothing.
 });
 
-test('hostOnly=true: browser gestures never send commands and only leave local sync', async () => {
+test('hostOnly=true: a late native gesture sends no command and restores party playback without leaving sync', async () => {
   const h = await playingGuest({guestControl: true}), c = controllable(h); h.session.room.info.host_only = true;
   assert.equal(h.session.canControl(), false);
   assert.throws(() => h.session.prepareControl({paused: true, positionMs: 0}), e => e.code === 'host_only');
   h.player.fire('pointerdown'); h.player.paused = true; h.player.fire('pause'); await settlePlayback();
-  assert.equal(h.sync(), false); assert.equal(c.rpcs.length, 0); assert.equal(c.sends.length, 0);
+  assert.equal(h.sync(), true); assert.equal(h.player.paused, false);
+  assert.equal(c.rpcs.length, 0); assert.equal(c.sends.length, 0);
 });
 
 test('unconfirmed or host-revoked commands are never broadcast and the party state is restored', async () => {
@@ -2375,13 +2378,11 @@ test('a remaining guest keeps its family HLS instance and resumes sync only afte
   assert.equal(h.sync(), false);
   assert.equal(h.player.currentTime, 50);
   h.session.receive('state', {...playback, member_id: 'successor', seq: 0, position_ms: 50000});
-  assert.equal(h.sync(), false); // Playback is not proof that the offered source was committed.
-  h.session.receive('stream', {member_id: 'successor', media_key: playback.media_key, source_revision: 2, stream, handoff_ready: true});
   assert.equal(h.sync(), true);
   assert.equal(h.desktopHls(), instance);
   assert.equal(h.player.loadCount, loads);
   assert.equal(h.player.currentTime, 50);
-  assert.equal(h.run('awaitingHandoff'), false);
+  assert.match(h.get('message').textContent, /Gemeinsam verbunden/);
 });
 
 test('a member joins directly into the player and new sources load independently of the Party drawer', async () => {
@@ -2530,49 +2531,90 @@ test('chat toasts: new messages of others appear on the player, at most five, go
   assert.equal(h.get('chatOverlay').children.length, 0);
 });
 
-test('a stalled handoff times out without restarting video and can be retried explicitly', async () => {
-  const h = await harness({autoHost: true, browserHostShare: true});
-  const room = memberRoom(), stream = sharedMp4();
-  h.session.room = room;
-  h.session.playback = {...playback, paused: false};
-  h.session.handlers.room(room);
-  h.session.handlers.stream(stream);
-  h.metadata(); await settlePlayback();
-  assert.equal(h.sync(), true);
-  const loads = h.player.loadCount;
-
-  room.info.host_member_id = 'successor';
-  h.session.playback = null;
-  h.session.handlers.stream(null, 'host_changed');
-  for (let i = 0; i < 5; i++) h.runTimers();
-  assert.match(h.get('message').textContent, /Synchronisierung nicht wiederhergestellt/);
-  assert.equal(h.sync(), false);
-  assert.equal(h.player.paused, false);
-  assert.equal(h.player.loadCount, loads);
-
-  h.session.receive('stream', {member_id: 'successor', media_key: playback.media_key, source_revision: 1, stream, handoff_ready: true});
-  h.session.receive('state', {...playback, seq: 0, member_id: 'successor'});
-  assert.equal(h.sync(), false);
-  h.get('resync').fire('click');
-  assert.equal(h.sync(), true);
-  assert.equal(h.player.loadCount, loads);
+test('a third viewer receives the replay while an existing HLS viewer keeps its instance and synchronized playback', async () => {
+  const stream = hostShareModule.hostShareStream('https://cdn.example.test/film.m3u8', playback.media_key, true).stream;
+  const offer = {member_id: 'host', media_key: playback.media_key, source_revision: 123, stream, handoff_ready: true};
+  const a = await hostHarness();
+  a.h.session.hostOffer = offer; a.h.session.hostStream = stream;
+  a.h.session.playback = {...playback, paused: false};
+  const b = await harness({autoHost: true, browserHostShare: true});
+  b.session.room = memberRoom(); b.session.playback = a.h.session.playback;
+  b.session.handlers.room(b.session.room);
+  b.session.receive('stream', offer); b.metadata(); await settlePlayback();
+  const instance = b.desktopHls(), loads = b.player.loadCount, position = b.player.currentTime;
+  assert.equal(b.sync(), true); assert.equal(b.player.paused, false);
+  const c = await harness({autoHost: true, browserHostShare: true});
+  c.session.room = {...memberRoom(), memberId: 'third'};
+  c.session.playback = a.h.session.playback; c.session.handlers.room(c.session.room);
+  a.h.session.receive('state_request', {member_id: 'third'});
+  const replay = a.channel.filter(message => message.event === 'stream').at(-1).payload;
+  for (const viewer of [b, c]) viewer.session.receive('stream', replay);
+  c.metadata(); await settlePlayback();
+  assert.equal(c.sync(), true); assert.equal(c.player.paused, false);
+  assert.equal(b.desktopHls(), instance); assert.equal(instance.destroyed, undefined);
+  assert.equal(b.player.loadCount, loads); assert.equal(b.player.currentTime, position);
+  assert.equal(b.sync(), true); assert.equal(b.player.paused, false);
 });
 
-test('a promoted browser does not re-offer a previously committed source after media failure', async () => {
-  const h = await harness({autoHost: true, browserHostShare: true}), sent = [];
-  const room = memberRoom(), stream = sharedMp4();
-  h.session.room = room;
-  h.session.channel = {send: async message => { sent.push(message); return 'ok'; }};
-  h.session.handlers.room(room);
-  h.session.handlers.stream(stream);
-  h.metadata(); await settlePlayback();
-  h.player.error = {code: 4};
-  h.player.fire('error');
-  room.info.host_member_id = room.memberId;
-  h.session.playback = null;
-  h.session.handlers.stream(null, 'host_changed');
-  h.session.handlers.promoted({stream, playback});
-  await settlePlayback();
-  assert.ok(!sent.some(message => message.event === 'stream'));
-  assert.match(h.get('message').textContent, /gültigen Videolink/);
+test('recovery failures explain missing or conflicting confirmation and offer manual sharing', async () => {
+  const {h} = await hostHarness();
+  for (const [reason, message] of [['timeout', /Nicht alle Mitglieder/], ['conflict', /unterschiedliche/],
+    ['unconfirmed', /nicht durch alle/], ['channel_lost', /nicht übertragen/]]) {
+    h.session.handlers.sourceRecoveryUnavailable(reason);
+    assert.match(h.get('roomShareStatus').textContent, message);
+    assert.match(h.get('roomShareStatus').textContent, /Link erneut freigeben/);
+    assert.equal(h.desktopHls(), null);
+  }
+});
+
+test('local recovery diagnosis exposes counts and socket state, never channel topics or stream payloads', async () => {
+  const h = await harness({debug: true});
+  h.session.client.getChannels = () => [{state: 'joined', topic: 'PRIVATE_TOPIC_SENTINEL'}, {state: 'closed'}];
+  h.session.client.realtime = {isConnected: () => true};
+  Object.assign(h.session.diagnostics, {lastHeartbeatAt: 1234, recoveryExpected: 2, recoveryReplies: 1,
+    recoveryResult: 'timeout', privatePayload: privateUrl});
+  const data = debugData(h);
+  assert.equal(data.registeredChannels, 2); assert.equal(data.joinedChannels, 1);
+  assert.equal(data.socketConnected, true); assert.equal(data.lastHeartbeatAt, 1234);
+  assert.equal(data.recoveryExpected, 2); assert.equal(data.recoveryReplies, 1);
+  assert.equal(data.recoveryResult, 'timeout');
+  assert.ok(!JSON.stringify(data).includes('PRIVATE_TOPIC_SENTINEL'));
+  assert.ok(!JSON.stringify(data).includes('INTEGRATION_PRIVATE_SENTINEL'));
+});
+
+test('after host change pending role validation blocks gestures before mutation; confirmed guest control resumes for all', async () => {
+  const h = await playingGuest({debug: true}), c = controllable(h);
+  const source = h.source().instance;
+  h.session.room.info.host_member_id = 'successor';
+  h.session.waitingForHostState = true;
+  h.session.hostOfferDeferred = true;
+  h.session.receive('state', {...playback, seq: 3, member_id: 'successor', paused: true});
+  h.player.fire('seeked'); await settlePlayback();
+  const before = h.player.currentTime;
+  let playCalls = 0;
+  h.player.play = function () { playCalls++; this.paused = false; this.fire('play'); return Promise.resolve(); };
+  h.get('ctlPlay').fire('click'); h.get('ctlFwd10').fire('click');
+  h.get('ctlSeek').value = '500'; h.get('ctlSeek').fire('change');
+  h.mediaActions.get('play')();
+  assert.equal(playCalls, 0); assert.equal(h.player.paused, true);
+  assert.equal(h.player.currentTime, before); assert.equal(h.sync(), true);
+  assert.equal(c.sends.length, 0); assert.equal(c.rpcs.length, 0);
+  assert.match(h.get('message').textContent, /noch bestätigt/);
+  assert.equal(debugData(h).controlBlockedReason, 'role_pending');
+  h.session.hostOfferDeferred = false;
+  h.session.handlers.room(h.session.room);
+  h.get('ctlPlay').fire('click'); await settlePlayback();
+  assert.equal(c.sends.at(-1).payload.paused, false); assert.equal(h.sync(), true);
+  h.get('ctlPlay').fire('click'); await settlePlayback();
+  assert.equal(c.sends.at(-1).payload.paused, true); assert.equal(h.sync(), true);
+  h.get('ctlFwd10').fire('click'); h.player.fire('seeked'); await settlePlayback();
+  assert.equal(c.sends.at(-1).payload.position_ms, Math.round((before + 10) * 1000));
+  assert.equal(h.sync(), true); assert.equal(h.source().instance, source);
+  h.session.room.info.host_only = true;
+  const sent = c.sends.length;
+  h.get('ctlPlay').fire('click');
+  assert.equal(c.sends.length, sent); assert.equal(h.sync(), true);
+  h.get('ctlSolo').fire('click'); h.get('ctlPlay').fire('click'); await settlePlayback();
+  assert.equal(h.player.paused, false); assert.equal(h.sync(), false);
+  assert.equal(c.sends.length, sent);
 });

@@ -3,6 +3,7 @@ import Hls from 'hls.js';
 import './style.css';
 import {normalizeCode, validCode, partyCodeFromPath, mediaKey, expectedPositionMs, isNewerPlayback, streamProblem, streamIsHls, browserPartyStream, publicConfigProblem, memberSync, memberSyncLabel, shareWorkerOrigin, withFamilyToken} from './protocol.js';
 import {PartySession, callRpc} from './session.js';
+import {createRealtimeTrace} from './realtime-trace.js';
 import {PersonalHlsSource, personalHlsUrlProblem} from './personal-hls.js';
 import {loadRoomTitle, resolveRoomMedia, roomMediaForEpisode, searchRoomMedia} from './room-media.js';
 import {classifyShareLink, familyHlsRequest, hostShareStream, proposalFrom} from './host-share.js';
@@ -34,11 +35,15 @@ let familyGrant = null, familyRequest = 0, familyStream = null;
 let countdownRun = 0;
 let hostCountdownBusy = false;
 let hostSyncBusy = false;
+let debugEnabled = false;
+try { debugEnabled = sessionStorage.getItem('nuvio-party-debug') === '1'; } catch { /* Local opt-in unavailable. */ }
+const realtimeTrace = createRealtimeTrace();
+const transportTraceEnabled = debugEnabled;
 const configProblem = publicConfigProblem(url, key);
 const client = configProblem ? null : createClient(url, key, {
   auth: {autoRefreshToken: true, persistSession: true, detectSessionInUrl: false},
   // Keep the JSON Phoenix protocol usable by existing Nuvio Realtime servers.
-  realtime: {vsn: '1.0.0', params: {nuvio_realtime: '1'}},
+  realtime: {vsn: '1.0.0', params: {nuvio_realtime: '1'}, ...(transportTraceEnabled ? {logger: realtimeTrace.logger} : {})},
 });
 // A tab owns one membership. Separate guest tabs must not evict one another.
 let deviceId;
@@ -66,8 +71,7 @@ let bufferingEvents = 0, segmentStats = {loadMs: null, durationS: null};
 // Guest control: optimistic command until the server confirms or rejects it.
 let pendingCommand = null, queuedCommand = null, userSeekPending = false;
 let expectedPauses = 0, mediaPointerDown = false, mediaGestureUntil = -1;
-let lastPlaybackError = 'none', debugOutput = null, debugEnabled = false;
-try { debugEnabled = sessionStorage.getItem('nuvio-party-debug') === '1'; } catch { /* Local opt-in unavailable. */ }
+let lastPlaybackError = 'none', debugOutput = null;
 let personalReadinessMessage = '';
 // Personal link: follow the party time automatically once the VOD is ready.
 // Bounded retries; never while watching alone, never after the user left sync.
@@ -111,13 +115,12 @@ const session = client ? new PartySession(client, deviceId, {
     renderPlayerUi();
     if (['CHANNEL_ERROR', 'TIMED_OUT', 'CLOSED'].includes(state)) {
       if (syncEnabled) resumeAfterReconnect = true;
-      if (awaitingHandoff || handoffFailed) handoffSourceReady = false;
       syncEnabled = false;
-      if (!soloMode && !awaitingHandoff && !handoffFailed) pauseLocally();
-      status('Realtime-Verbindung unterbrochen. Sie wird automatisch neu aufgebaut; danach folgt die Wiedergabe wieder der Party-Zeit.', true);
+      if (!soloMode) pauseLocally(); // Watching alone does not depend on the party.
+      status(session.reconnectCooldownMs() > 0
+        ? 'Der Realtime-Server hat ein Limit gemeldet. Die Party verbindet sich nach einer Wartezeit automatisch neu.'
+        : 'Realtime-Verbindung unterbrochen. Sie wird automatisch neu aufgebaut; danach folgt die Wiedergabe wieder der Party-Zeit.', true);
     } else if (state === 'SUBSCRIBED' && awaitingHandoff) {
-      if (session.isHost() && hostShared && session.hostStream === hostShared &&
-          browserPartyStream(hostShared)?.url === loadedStream?.url) handoffSourceReady = true;
       finishBrowserHandoff();
     } else if (state === 'SUBSCRIBED' && resumeAfterReconnect) {
       // Reconnect restores the authoritative party state (state_request + snapshot).
@@ -149,9 +152,13 @@ const session = client ? new PartySession(client, deviceId, {
     recoveringSource = null;
     resetVideo();
   },
-  sourceRecoveryUnavailable: () => {
+  sourceRecoveryUnavailable: reason => {
     if (!session.isHost() || session.hostOffer) return;
-    $('roomShareStatus').textContent = 'Keine eindeutig aktive Videoquelle gefunden. Bitte den Link erneut freigeben.';
+    const explanation = {timeout: 'Nicht alle Mitglieder haben die Videoquelle rechtzeitig bestätigt.',
+      conflict: 'Die Mitglieder melden unterschiedliche Videoquellen oder Quellenstände.',
+      unconfirmed: 'Die bisherige Videoquelle ist nicht durch alle Mitglieder bestätigt.',
+      channel_lost: 'Die Anfrage zur Videoquelle konnte nicht übertragen werden.'}[reason];
+    $('roomShareStatus').textContent = (explanation || 'Keine eindeutig aktive Videoquelle gefunden.') + ' Bitte den Link erneut freigeben.';
     status($('roomShareStatus').textContent);
   },
   command: entry => commandSettled(entry),
@@ -180,17 +187,13 @@ const session = client ? new PartySession(client, deviceId, {
     const link = classifyShareLink(source?.url, browserHostShareEnabled);
     // Family links were explicitly shared with this party. Other signed URLs
     // and Desktop grants still need an explicit new share.
-    if (!inherited?.playback || soloMode || link.problem || streamProblem(source) ||
-        loadedStream?.url !== source.url || player.readyState < 1 || player.error ||
+    if (!inherited?.playback || soloMode || link.problem ||
         (new URL(link.url).search && !(link.family && source.family_beta))) {
       selectDrawerTab('Party');
       status('Du bist jetzt Host. Gib einen gültigen Videolink für die Party frei.');
       return;
     }
     shareHostVideo(link.url, undefined, inherited.playback);
-  },
-  streamConfirmed: stream => {
-    if (awaitingHandoff || handoffFailed) session.handlers.stream(stream);
   },
   stream: (stream, reason) => {
     // A host change is no revocation by the sharing host: an already loaded
@@ -201,24 +204,21 @@ const session = client ? new PartySession(client, deviceId, {
       proposals.length = 0;
       pendingCommand = queuedCommand = null;
       lastHostStreamEvent = undefined;
-      familyRequest++; familyGrant = null;
-      const follow = !soloMode && (syncEnabled || resumeAfterReconnect || awaitingHandoff || handoffFailed) && !!loadedStream && !personalHls.active;
-      clearBrowserHandoff();
+      awaitingHandoff = !soloMode && (syncEnabled || resumeAfterReconnect || awaitingHandoff) && !!loadedStream && !personalHls.active;
+      handoffSourceReady = false;
       awaitingPartyState = false;
       resumeAfterReconnect = false;
-      if (follow) {
+      if (awaitingHandoff) {
         syncEnabled = false; pendingPlay = pendingSeek = null;
         player.playbackRate = 1;
-        startBrowserHandoff();
-        presence(); renderPlayerUi(); renderSyncDebug();
+        presence(); renderPlayerUi();
+        status('Synchronisierung wird übernommen …');
       } else if (loadedStream && !personalHls.active) {
         continueLocally('Der Host hat gewechselt. Die bisherige Quelle läuft lokal weiter.');
       } else if (!personalHls.active) resetVideo();
       return;
     }
     if (session?.isHost?.()) return;
-    if ((awaitingHandoff || handoffFailed) && stream && session.receivedBrowserOffer?.stream === stream &&
-        !session.receivedBrowserOffer.ready) return;
     if (stream?.browser_hls?.family_beta_url &&
         (!browserHostShareEnabled || !classifyShareLink(stream.browser_hls.family_beta_url, true).family)) return;
     // Includes revocations, incompatible URLs and host source changes. Only an
@@ -256,12 +256,13 @@ const session = client ? new PartySession(client, deviceId, {
     if (stream.media_key !== mediaKey(session.room?.info.media)) return;
     const identity = JSON.stringify(stream);
     if (identity === JSON.stringify(selectedStream)) {
-      if ((awaitingHandoff || handoffFailed) && !soloMode) {
-        handoffSourceReady = !!loadedStream && !streamProblem(stream);
+      if (awaitingHandoff && !soloMode) {
+        handoffSourceReady = !!loadedStream;
         finishBrowserHandoff();
       }
       return;
     }
+    awaitingHandoff = false;
     // Watching alone: a renewed source continues locally where it was.
     soloResume = soloMode && loadedStream ? {seconds: player.currentTime, playing: !player.paused} : null;
     // Do not keep playing a revoked or superseded source until the next user click.
@@ -315,7 +316,7 @@ const session = client ? new PartySession(client, deviceId, {
   closed: reason => {
     lastHostStreamEvent = undefined; familyGrant = null; familyStream = null; familyRequest++;
     // A closed party has no shared source, open proposals or waiting room.
-    hostShared = null; hostMenuRoom = null; clearBrowserHandoff(); proposals.length = 0; renderPartyRoom();
+    hostShared = null; hostMenuRoom = null; awaitingHandoff = false; proposals.length = 0; renderPartyRoom();
     $('roomShareUrl').value = ''; $('proposalUrl').value = '';
     $('roomShareStatus').textContent = ''; $('suggestStatus').textContent = '';
     $('roomProposalList').replaceChildren();
@@ -418,9 +419,6 @@ function renderAvatar(element, member) {
 // page the link has to be shared again.
 let hostShared = null, hostMenuRoom = null, awaitingHandoff = false, handoffSourceReady = false, shareBusy = false;
 let recoveringSource = null;
-let handoffTimer = null, handoffFailed = false;
-const HANDOFF_RETRY_MS = 3000;
-const HANDOFF_REQUESTS = 4;
 
 function finishSourceRecovery() {
   const recovery = recoveringSource;
@@ -435,43 +433,13 @@ function finishSourceRecovery() {
   status('Video wiederhergestellt – gemeinsam verbunden');
 }
 
-function clearBrowserHandoff() {
-  clearTimeout(handoffTimer);
-  handoffTimer = null;
-  awaitingHandoff = handoffSourceReady = handoffFailed = false;
-}
-
-function startBrowserHandoff() {
-  if (awaitingHandoff) return;
-  const room = session.room, host = room.info.host_member_id;
-  awaitingHandoff = true;
-  handoffFailed = false;
-  let remaining = HANDOFF_REQUESTS;
-  status('Synchronisierung wird übernommen …');
-  const retry = () => {
-    if (!awaitingHandoff || session.room !== room || room.info.host_member_id !== host) return;
-    if (!remaining--) {
-      awaitingHandoff = false;
-      handoffFailed = true;
-      handoffTimer = null;
-      const message = 'Synchronisierung nicht wiederhergestellt. Das Video läuft gegebenenfalls lokal weiter. Erneut synchronisieren oder den Host um eine neue Freigabe bitten.';
-      if (session.isHost()) $('roomShareStatus').textContent = 'Bitte einen gültigen Videolink erneut freigeben.';
-      status(message, true);
-      renderPlayerUi(); renderSyncDebug();
-      return;
-    }
-    if (!connectionLost) session.requestState().catch(() => {});
-    handoffTimer = setTimeout(retry, HANDOFF_RETRY_MS);
-  };
-  retry();
-}
-
 function finishBrowserHandoff() {
   const state = session?.playback, room = session?.room;
-  if (!awaitingHandoff || !handoffSourceReady || !loadedStream || player.readyState < 1 || soloMode || connectionLost ||
+  if (!awaitingHandoff || !handoffSourceReady || !loadedStream || soloMode || connectionLost ||
       !room || !state || state.member_id !== room.info.host_member_id) return;
-  clearBrowserHandoff();
+  awaitingHandoff = handoffSourceReady = false;
   resyncNow();
+  if (syncEnabled) status('Gemeinsam verbunden.');
 }
 const proposals = [];
 let proposalSeq = 0;
@@ -483,7 +451,7 @@ function renderPartyRoom() {
   $('hostSyncAll').hidden = !host;
   if (!room) {
     $('roomOverview').hidden = true;
-    hostShared = null; hostMenuRoom = null; clearBrowserHandoff(); proposals.length = 0;
+    hostShared = null; hostMenuRoom = null; awaitingHandoff = false; proposals.length = 0;
     return;
   }
   if (!host) {
@@ -683,14 +651,11 @@ async function shareHostVideo(input, canShare, inheritedPlayback) {
   $('streamInfo').textContent = 'Du teilst einen Video-Link mit allen Mitgliedern.';
   renderPartyRoom();
   if (reusePlayer) {
-    if (awaitingHandoff || handoffFailed) {
-      handoffSourceReady = true;
-      if (!awaitingHandoff) startBrowserHandoff();
-      finishBrowserHandoff();
-    } else if (!soloMode) resyncNow();
+    if (awaitingHandoff) { handoffSourceReady = true; finishBrowserHandoff(); }
+    else if (!soloMode) resyncNow();
   }
   else startStream();
-  if (!inheritedPlayback) status('Videoangebot gesendet. Starte mit ▶.');
+  status(inheritedPlayback ? 'Bisherige Quelle für die Party übernommen.' : 'Videoangebot gesendet. Starte mit ▶.');
   return true;
 }
 $('roomShareForm').addEventListener('submit', e => { e.preventDefault(); shareHostVideo($('roomShareUrl').value); });
@@ -818,7 +783,7 @@ function resetVideo(reason = 'Persönliche Quelle entfernt. Für diesen Film kan
     recoveringSource = null;
     session?.cancelSourceRecovery();
   }
-  clearBrowserHandoff();
+  awaitingHandoff = handoffSourceReady = false;
   cancelPersonalAutoSync();
   pendingSeek = internalHlsSeek = pendingPlay = ownSeek = null;
   waitingForTarget = false;
@@ -1028,7 +993,6 @@ function applySync(forcePlay = false) {
   }
 }
 function failVideo(message, errorCode = 'media_error') {
-  clearBrowserHandoff();
   if (recoveringSource) {
     session.failSourceRecovery();
     status('Die bisherige Videoquelle ist nicht abspielbar. Bitte einen gültigen Link erneut freigeben.', true);
@@ -1200,6 +1164,8 @@ function controlBlockedReason() {
   if (room.info.host_only === true) return 'host_only';
   if (room.info.host_only !== false) return 'host_only_missing';
   if (!session.channel) return 'no_channel';
+  if (session.hostOfferDeferred) return 'role_pending';
+  if (session.waitingForHostState) return 'host_state_pending';
   return 'allowed';
 }
 function renderControlInfo() {
@@ -1210,8 +1176,10 @@ function renderControlInfo() {
     : allowed ? (guestControlMode === 'confirmed'
       ? 'Steuerung: Play, Pause und Springen im Player gelten für alle (vom Host erlaubt). Jeder Befehl wird zuerst vom Backend bestätigt.'
       : 'Steuerung: Play, Pause und Springen im Player gelten für alle (vom Host erlaubt), wie bei Desktop-Gästen.')
-    : info.host_only === false ? 'Steuerung: Gaststeuerung erlaubt, Realtime-Kanal aber noch nicht verbunden.'
-    : 'Steuerung: nur der Host. Lokale Bedienung trennt dich von der Party-Zeit.';
+    : info.host_only === false ? (session.hostOfferDeferred ? 'Steuerung: Gaststeuerung erlaubt. Die Party-Rolle wird noch vom Backend bestätigt.'
+      : session.waitingForHostState ? 'Steuerung: Gaststeuerung erlaubt. Warte auf den aktuellen Zustand des neuen Hosts.'
+      : 'Steuerung: Gaststeuerung erlaubt, Realtime-Kanal aber noch nicht verbunden.')
+    : 'Steuerung: nur der Host. Für lokale Bedienung ausdrücklich „Allein schauen“ wählen.';
   renderPlayerUi();
 }
 
@@ -1273,10 +1241,14 @@ function playLocally() {
 let hostOnlyNoticeAt = -Infinity;
 function blocksHostOnlyControl() {
   const room = session?.room;
-  if (!syncEnabled || soloMode || !room || room.memberId === room.info.host_member_id || room.info.host_only !== true) return false;
+  if (!syncEnabled || soloMode || !room) return false;
+  const hostOnly = room.memberId !== room.info.host_member_id && room.info.host_only === true;
+  const pending = (guestControlEnabled || session.isHost()) && !session.canControl();
+  if (!hostOnly && !pending) return false;
   if (performance.now() - hostOnlyNoticeAt >= 3000) {
     hostOnlyNoticeAt = performance.now();
-    status('Der Host steuert die Wiedergabe. Wenn du selbst pausieren oder spulen möchtest, klicke unten rechts auf „Allein schauen“.');
+    status(hostOnly ? 'Der Host steuert die Wiedergabe. Wenn du selbst pausieren oder spulen möchtest, klicke unten rechts auf „Allein schauen“.'
+      : 'Party-Steuerung wird noch bestätigt. Bitte kurz warten. Für lokale Wiedergabe „Allein schauen“ wählen.');
   }
   return true;
 }
@@ -1318,7 +1290,7 @@ function enterSolo() {
   if (!session?.room || !loadedStream) return;
   cancelPersonalAutoSync();
   soloMode = true; syncEnabled = false; resumeAfterReconnect = false;
-  clearBrowserHandoff();
+  awaitingHandoff = handoffSourceReady = false;
   pendingPlay = null; pendingSeek = ownSeek = null; userSeekPending = false;
   if (player.playbackRate !== 1) player.playbackRate = 1; // No party nudging any more.
   status('Du schaust allein weiter. Play, Pause und Springen gelten nur für dich. „Zur Party“ übernimmt wieder die Party-Zeit.');
@@ -2001,19 +1973,21 @@ $('loadStream').addEventListener('click', startStream);
 function resyncNow() {
   // After a party end there is no party time to return to.
   if (!session?.room && soloMode) { status('Die Party ist beendet. Für eine neue Party den Einladungslink öffnen.'); return; }
+  if (awaitingHandoff) {
+    status('Synchronisierung wird übernommen …');
+    session?.requestState().catch(() => {});
+    return;
+  }
   // Back to the party time always ends "Allein schauen".
   if (soloMode) { soloMode = false; renderSoloUi(); }
   // A lost subscription is not repaired by requestState/applySync: rebuild it
   // first; the party time is applied once it is SUBSCRIBED again.
   if (connectionLost && session?.room) {
     resumeAfterReconnect = true;
-    status('Party-Verbindung wird neu aufgebaut …');
+    status(session.reconnectCooldownMs() > 0
+      ? 'Der Realtime-Server hat ein Limit gemeldet. Die Party verbindet sich nach einer Wartezeit automatisch neu.'
+      : 'Party-Verbindung wird neu aufgebaut …');
     session.reconnect().catch?.(() => {});
-    return;
-  }
-  if (awaitingHandoff || handoffFailed) {
-    if (!awaitingHandoff) startBrowserHandoff();
-    finishBrowserHandoff();
     return;
   }
   if (!session?.playback) {
@@ -2051,7 +2025,6 @@ player.addEventListener('loadedmetadata', () => {
   // Started via the big play button or automatically: follow the party at
   // once. A blocked autoplay falls back to muted playback (see applySync).
   if (startAfterLoad) { startAfterLoad = false; autoStarting = true; resyncNow(); }
-  else finishBrowserHandoff();
 });
 // Native controls do not identify the origin of a seeking event. Track actual
 // control gestures rather than assuming every hls.js currentTime write is a user seek.
@@ -2080,6 +2053,7 @@ for (const event of ['pause', 'seeking', 'ratechange']) player.addEventListener(
   else if (!userControl && !hlsPlayback && performance.now() <= suppressUntil) return;
   // Rate correction is applied by us on every sync tick.
   if (event === 'ratechange') return;
+  if (userControl && blocksHostOnlyControl()) { applySync(); return; }
   // Host allowed guest control: a real gesture becomes a shared command
   // instead of leaving the party. Programmatic pauses/seeks never reach here.
   if (userControl && guestControl()) {
@@ -2109,6 +2083,7 @@ player.addEventListener('play', () => {
   if (!syncEnabled || pendingPlay) return;
   const userControl = mediaPointerDown || performance.now() <= mediaGestureUntil;
   if (!userControl || !effectivePlayback()?.paused) return;
+  if (blocksHostOnlyControl()) { applySync(); return; }
   if (sendControl(false, player.currentTime)) return;
   // Shared control not available: playing locally is allowed, but honestly
   // marked as "Nicht synchron" instead of pretending the party started.
@@ -2137,10 +2112,33 @@ function renderSyncDebug() {
   const number = value => Number.isFinite(value) ? value : null;
   const choice = (value, allowed) => allowed.includes(value) ? value : null;
   const hostPosition = p ? expectedPositionMs(p, session.now()) / 1000 : null;
+  const channels = client?.getChannels?.();
   debugOutput.textContent = JSON.stringify({
     realtime: choice(d.connection, ['SUBSCRIBED', 'CHANNEL_ERROR', 'TIMED_OUT', 'CLOSED', 'CONNECTING']),
     // Status changes with timestamps and fixed reason categories only.
     realtimeReconnects: number(d.reconnects),
+    registeredChannels: Array.isArray(channels) ? channels.length : null,
+    joinedChannels: Array.isArray(channels) ? channels.filter(channel => channel.state === 'joined').length : null,
+    socketConnected: client?.realtime?.isConnected?.() ?? null,
+    rolePending: session?.hostOfferDeferred === true,
+    isHost: session?.isHost() === true,
+    waitingForHostState: session?.waitingForHostState === true,
+    recoveryArmed: !!session?.sourceRecoveryScope,
+    heartbeatStartedAt: number(d.heartbeatStartedAt),
+    heartbeatResult: choice(d.heartbeatResult, ['idle', 'pending', 'ok', 'stale', 'failed']),
+    heartbeatFailure: choice(d.heartbeatFailure, ['auth_token', 'not_authorized', 'rate_limited', 'timeout', 'network', 'other']),
+    lifecycle: (d.lifecycle || []).slice(-20).map(e => ({at: number(e.at),
+      action: choice(e.action, ['subscribe', 'closed', 'remove_start', 'remove_end']),
+      reason: choice(e.reason, ['current', 'stale', 'reconnect', 'leave', 'cleanup', 'rate_limit']),
+      channel: number(e.channel), socketConnected: typeof e.socketConnected === 'boolean' ? e.socketConnected : null})),
+    transportTraceEnabled, transportTrace: realtimeTrace.events,
+    realtimeServerError: d.serverError ?? null,
+    realtimeReconnectCooldownMs: session?.reconnectCooldownMs() ?? null,
+    presenceTracks: number(d.presenceTracks), lastPresenceTrackAt: number(d.lastPresenceTrackAt),
+    presenceResult: choice(d.presenceResult, ['idle', 'pending', 'ok', 'timeout', 'error']),
+    lastHeartbeatAt: number(d.lastHeartbeatAt),
+    recoveryExpected: number(d.recoveryExpected), recoveryReplies: number(d.recoveryReplies),
+    recoveryResult: choice(d.recoveryResult, ['idle', 'waiting', 'loading', 'timeout', 'conflict', 'unconfirmed', 'channel_lost', 'recovered']),
     realtimeLog: (d.connectionLog || []).slice(-10).map(e => ({at: e.at, state: choice(e.state, ['SUBSCRIBED', 'CHANNEL_ERROR', 'TIMED_OUT', 'CLOSED', 'CONNECTING']),
       reason: choice(e.reason, ['auth_token', 'not_authorized', 'rate_limited', 'timeout', 'network', 'other'])})),
     // Distinguishes "connected but no playback received" from a lost channel.
@@ -2155,9 +2153,6 @@ function renderSyncDebug() {
     hostPaused: typeof p?.paused === 'boolean' ? p.paused : null, hostWaiting: p?.waiting === true,
     hostPositionSeconds: number(hostPosition), browserPositionSeconds: number(player.currentTime),
     driftSeconds: p ? number(player.currentTime - hostPosition) : null,
-    handoff: awaitingHandoff ? 'waiting' : handoffFailed ? 'failed' : 'idle',
-    waitingForHostState: session?.waitingForHostState === true,
-    realtimeRolePending: session?.hostOfferDeferred === true,
     syncActive: syncEnabled, buffering, waitingForTarget, seeking: player.seeking === true,
     browserPaused: player.paused === true, playPending: !!pendingPlay,
     lastPlaybackError: choice(lastPlaybackError, ['none', 'AbortError', 'NotAllowedError', 'NotSupportedError', 'play_failed', 'seek_failed', 'hls_error', 'media_error']),
