@@ -37,6 +37,7 @@ import nuvio.composeapp.generated.resources.*
 import org.jetbrains.compose.resources.StringResource
 import org.jetbrains.compose.resources.getString
 
+@OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
 object TraktAuthRepository : TrackingAuthProvider {
     private const val BASE_URL = "https://api.trakt.tv"
     private const val AUTHORIZE_URL = "https://trakt.tv/oauth/authorize"
@@ -122,7 +123,7 @@ object TraktAuthRepository : TrackingAuthProvider {
     }
 
     fun hasRequiredCredentials(): Boolean =
-        TraktConfig.CLIENT_ID.isNotBlank() && TraktConfig.CLIENT_SECRET.isNotBlank()
+        traktCredentialsConfigured(TraktConfig.CLIENT_ID, isDesktop, traktLegacyClientSecret)
 
     fun onConnectRequested(profileId: Int = ProfileRepository.activeProfileId): String? {
         ensureLoaded(profileId)
@@ -226,7 +227,7 @@ object TraktAuthRepository : TrackingAuthProvider {
             )
         }.onFailure { error ->
             if (error is CancellationException) throw error
-            log.w { "Failed to fetch Trakt user settings: ${error.message}" }
+            log.w { "Failed to fetch Trakt user settings: [details omitted]" }
         }.getOrNull() ?: return null
 
         val parsed = runCatching {
@@ -289,7 +290,7 @@ object TraktAuthRepository : TrackingAuthProvider {
             )
         }.onFailure { error ->
             if (error is CancellationException) throw error
-            log.w { "Failed to start Trakt device authorization: ${error.message}" }
+            log.w { "Failed to start Trakt device authorization: [details omitted]" }
         }.getOrNull()
         if (currentProfileId != profileId || profileGeneration != generation) return
 
@@ -378,16 +379,22 @@ object TraktAuthRepository : TrackingAuthProvider {
             }
 
             delay(intervalSeconds.coerceAtLeast(1) * 1_000L)
+            // A slow poll must not redeem a cancelled, expired or replaced login.
+            if (currentProfileId != profileId || profileGeneration != generation ||
+                authState.pendingDeviceCode != deviceCode) return
+            if (isDeviceAuthorizationExpired(authState)) continue
 
             val result = try {
                 redeemDeviceAuthorization(deviceCode)
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
-                log.w { "Failed to poll Trakt device authorization: ${error.message}" }
+                log.w { "Failed to poll Trakt device authorization: [details omitted]" }
                 TraktDeviceTokenResult.Failed(null)
             }
 
+            if (currentProfileId != profileId || profileGeneration != generation ||
+                authState.pendingDeviceCode != deviceCode) return
             when (result) {
                 is TraktDeviceTokenResult.Authorized -> {
                     publish(isLoading = true, errorMessage = null)
@@ -454,30 +461,14 @@ object TraktAuthRepository : TrackingAuthProvider {
             TraktDeviceTokenRequest(
                 code = deviceCode,
                 clientId = TraktConfig.CLIENT_ID,
-                clientSecret = TraktConfig.CLIENT_SECRET,
+                clientSecret = traktLegacyClientSecret,
             ),
         )
         val response = postTraktJson<TraktTokenResponse>(
             url = "$BASE_URL/oauth/device/token",
             body = body,
         )
-        response.body?.takeIf { response.isSuccessful }?.let { token ->
-            return TraktDeviceTokenResult.Authorized(token)
-        }
-
-        return when (response.status) {
-            400 -> TraktDeviceTokenResult.Pending
-            410 -> TraktDeviceTokenResult.Expired
-            418 -> TraktDeviceTokenResult.Denied
-            429 -> TraktDeviceTokenResult.SlowDown
-            else -> {
-                val error = decodeTraktBody<TraktOAuthErrorResponse>(response.rawBody)
-                TraktDeviceTokenResult.Failed(
-                    error?.errorDescription?.takeIf { it.isNotBlank() }
-                        ?: error?.error?.takeIf { it.isNotBlank() },
-                )
-            }
-        }
+        return decodeTraktDeviceTokenResult(response.status, response.rawBody)
     }
 
     private suspend fun completeAuthorizationFromCallback(
@@ -488,7 +479,7 @@ object TraktAuthRepository : TrackingAuthProvider {
 
         val parsedUrl = runCatching { Url(callbackUrl) }
             .onFailure {
-                log.w { "Invalid Trakt callback URL: ${it.message}" }
+                log.w { "Invalid Trakt callback URL: [details omitted]" }
             }
             .getOrNull()
 
@@ -549,7 +540,7 @@ object TraktAuthRepository : TrackingAuthProvider {
             TraktAuthorizationCodeRequest(
                 code = code,
                 clientId = TraktConfig.CLIENT_ID,
-                clientSecret = TraktConfig.CLIENT_SECRET,
+                clientSecret = traktLegacyClientSecret,
                 redirectUri = TraktConfig.REDIRECT_URI,
             ),
         )
@@ -562,7 +553,7 @@ object TraktAuthRepository : TrackingAuthProvider {
             )
         }.onFailure { error ->
             if (error is CancellationException) throw error
-            log.w { "Failed to exchange Trakt auth code: ${error.message}" }
+            log.w { "Failed to exchange Trakt auth code: [details omitted]" }
         }.getOrNull()
 
         if (response == null) {
@@ -618,7 +609,7 @@ object TraktAuthRepository : TrackingAuthProvider {
                 TraktRevokeRequest(
                     token = token,
                     clientId = TraktConfig.CLIENT_ID,
-                    clientSecret = TraktConfig.CLIENT_SECRET,
+                    clientSecret = traktLegacyClientSecret,
                 ),
             )
             runCatching {
@@ -629,7 +620,7 @@ object TraktAuthRepository : TrackingAuthProvider {
                 )
             }.onFailure { error ->
                 if (error is CancellationException) throw error
-                log.w { "Failed to revoke Trakt token: ${error.message}" }
+                log.w { "Failed to revoke Trakt token: [details omitted]" }
             }
         }
 
@@ -658,7 +649,7 @@ object TraktAuthRepository : TrackingAuthProvider {
             TraktRefreshTokenRequest(
                 refreshToken = refreshToken,
                 clientId = TraktConfig.CLIENT_ID,
-                clientSecret = TraktConfig.CLIENT_SECRET,
+                clientSecret = traktLegacyClientSecret,
                 redirectUri = TraktConfig.REDIRECT_URI,
             ),
         )
@@ -675,7 +666,7 @@ object TraktAuthRepository : TrackingAuthProvider {
             )
         }.onFailure { error ->
             if (error is CancellationException) throw error
-            log.w { "Trakt token refresh transport failure: ${error.message}" }
+            log.w { "Trakt token refresh transport failure: [details omitted]" }
         }.getOrNull() ?: return@withLock false
 
         if (ProfileRepository.activeProfileId != profileId || authState.refreshToken != refreshToken) {
@@ -734,7 +725,7 @@ object TraktAuthRepository : TrackingAuthProvider {
         } else {
             runCatching { json.decodeFromString<TraktAuthState>(payload) }
                 .getOrElse {
-                    log.w { "Failed to parse Trakt auth payload: ${it.message}" }
+                    log.w { "Failed to parse Trakt auth payload: [details omitted]" }
                     TraktAuthState()
                 }
         }
@@ -876,7 +867,7 @@ private data class TraktApiResponse<T>(
         get() = status in 200..299
 }
 
-private sealed interface TraktDeviceTokenResult {
+internal sealed interface TraktDeviceTokenResult {
     data class Authorized(val token: TraktTokenResponse) : TraktDeviceTokenResult
     data object Pending : TraktDeviceTokenResult
     data object SlowDown : TraktDeviceTokenResult
@@ -885,11 +876,33 @@ private sealed interface TraktDeviceTokenResult {
     data class Failed(val message: String?) : TraktDeviceTokenResult
 }
 
+internal fun decodeTraktDeviceTokenResult(status: Int, body: String): TraktDeviceTokenResult {
+    val parser = Json { ignoreUnknownKeys = true }
+    if (status in 200..299) {
+        val token = runCatching { parser.decodeFromString<TraktTokenResponse>(body) }.getOrNull()
+        return if (token != null && token.accessToken.isNotBlank() && token.refreshToken.isNotBlank() &&
+            token.expiresIn > 0 && token.createdAt >= 0) TraktDeviceTokenResult.Authorized(token)
+        else TraktDeviceTokenResult.Failed(null)
+    }
+    // Provider descriptions may contain request data. Use existing localized UI
+    // errors, and never show a raw OAuth response or treat invalid_client as pending.
+    val error = runCatching { parser.decodeFromString<TraktOAuthErrorResponse>(body).error }.getOrNull()
+    return when {
+        error == "access_denied" || status == 418 -> TraktDeviceTokenResult.Denied
+        error == "expired_token" || status == 410 -> TraktDeviceTokenResult.Expired
+        error == "slow_down" || status == 429 -> TraktDeviceTokenResult.SlowDown
+        error == "authorization_pending" || (status == 400 && error == null) -> TraktDeviceTokenResult.Pending
+        else -> TraktDeviceTokenResult.Failed(null)
+    }
+}
+
+@OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
 @Serializable
 private data class TraktAuthorizationCodeRequest(
     @SerialName("code") val code: String,
     @SerialName("client_id") val clientId: String,
-    @SerialName("client_secret") val clientSecret: String,
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    @SerialName("client_secret") val clientSecret: String? = null,
     @SerialName("redirect_uri") val redirectUri: String,
     @SerialName("grant_type") val grantType: String = "authorization_code",
 )
@@ -909,11 +922,13 @@ private data class TraktDeviceCodeResponse(
     val interval: Int? = null,
 )
 
+@OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
 @Serializable
-private data class TraktDeviceTokenRequest(
+internal data class TraktDeviceTokenRequest(
     val code: String,
     @SerialName("client_id") val clientId: String,
-    @SerialName("client_secret") val clientSecret: String,
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    @SerialName("client_secret") val clientSecret: String? = null,
 )
 
 @Serializable
@@ -922,24 +937,28 @@ private data class TraktOAuthErrorResponse(
     @SerialName("error_description") val errorDescription: String? = null,
 )
 
+@OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
 @Serializable
-private data class TraktRefreshTokenRequest(
+internal data class TraktRefreshTokenRequest(
     @SerialName("refresh_token") val refreshToken: String,
     @SerialName("client_id") val clientId: String,
-    @SerialName("client_secret") val clientSecret: String,
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    @SerialName("client_secret") val clientSecret: String? = null,
     @SerialName("redirect_uri") val redirectUri: String,
     @SerialName("grant_type") val grantType: String = "refresh_token",
 )
 
+@OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
 @Serializable
-private data class TraktRevokeRequest(
+internal data class TraktRevokeRequest(
     @SerialName("token") val token: String,
     @SerialName("client_id") val clientId: String,
-    @SerialName("client_secret") val clientSecret: String,
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    @SerialName("client_secret") val clientSecret: String? = null,
 )
 
 @Serializable
-private data class TraktTokenResponse(
+internal data class TraktTokenResponse(
     @SerialName("access_token") val accessToken: String,
     @SerialName("refresh_token") val refreshToken: String,
     @SerialName("token_type") val tokenType: String,

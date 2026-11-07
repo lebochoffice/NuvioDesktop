@@ -488,7 +488,7 @@ internal fun TrackingProviderCard(
                     TrackingBrandPrimaryButton(
                         label = connectLabel,
                         loading = isLoading,
-                        enabled = credentialsConfigured && !isLoading,
+                        enabled = trackingConnectEnabled(credentialsConfigured, isLoading),
                         onClick = {
                             actionScope.launch { openUrl(onConnectRequested()) }
                         },

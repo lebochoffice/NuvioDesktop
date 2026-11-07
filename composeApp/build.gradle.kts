@@ -77,7 +77,7 @@ abstract class GenerateRuntimeConfigsTask : DefaultTask() {
         val props = Properties()
         localPropertiesFile.asFile.orNull?.takeIf { it.exists() }?.inputStream()?.use { props.load(it) }
 
-        val outDir = outputDir.get().asFile
+        val outDir = outputDir.get().asFile.resolve("common")
         outDir.resolve("com/nuvio/app/core/network").apply {
             mkdirs()
             resolve("SupabaseConfig.kt").writeText(
@@ -129,10 +129,28 @@ abstract class GenerateRuntimeConfigsTask : DefaultTask() {
                 |
                 |object TraktConfig {
                 |    const val CLIENT_ID = "${props.getProperty("TRAKT_CLIENT_ID", "")}" 
-                |    const val CLIENT_SECRET = "${props.getProperty("TRAKT_CLIENT_SECRET", "")}" 
                 |    const val REDIRECT_URI = "${props.getProperty("TRAKT_REDIRECT_URI", "nuvio://auth/trakt")}" 
                 |}
                 """.trimMargin()
+            )
+        }
+
+        // Keep the legacy mobile authorization code flow separate from the
+        // Desktop artifact, even when a local legacy secret is configured.
+        outputDir.get().asFile.resolve("mobile/com/nuvio/app/features/trakt").apply {
+            mkdirs()
+            val secret = props.getProperty("TRAKT_CLIENT_SECRET", "").trim()
+            val literal = buildString {
+                append('"')
+                for (char in secret) {
+                    append("\\u")
+                    append(char.code.toString(16).padStart(4, '0'))
+                }
+                append('"')
+            }
+            resolve("TraktLegacyClientSecret.kt").writeText(
+                "package com.nuvio.app.features.trakt\n\n" +
+                    "internal actual val traktLegacyClientSecret: String? = $literal.takeIf { it.isNotBlank() }\n",
             )
         }
 
@@ -1140,6 +1158,7 @@ kotlin {
                 defaultSourceSet.kotlin.srcDir(fullCommonSourceDir)
             }
             defaultSourceSet.kotlin.srcDir(project.file(iosDistributionSourceDir))
+            defaultSourceSet.kotlin.srcDir(generatedRuntimeConfigDir.map { it.dir("mobile") })
             defaultSourceSet.dependencies {
                 implementation(libs.ktor.client.darwin)
                 if (iosDistribution == "full") {
@@ -1174,9 +1193,10 @@ kotlin {
     
     sourceSets {
         val commonMain by getting {
-            kotlin.srcDir(generatedRuntimeConfigDir)
+            kotlin.srcDir(generatedRuntimeConfigDir.map { it.dir("common") })
         }
         androidMain {
+            kotlin.srcDir(generatedRuntimeConfigDir.map { it.dir("mobile") })
             kotlin.srcDir(project.file(androidDistributionSourceDir))
             if (androidDistribution == "full") {
                 kotlin.srcDir(fullCommonSourceDir)
