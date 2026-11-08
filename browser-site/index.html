@@ -2,42 +2,251 @@
 <html lang="de">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#000000">
   <meta name="referrer" content="no-referrer">
-  <title>Nuvio Watch Party – Browser Bridge (Prototyp)</title>
+  <link rel="icon" href="/favicon.ico">
+  <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
+  <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
+  <title>Nuvio Watch Party</title>
 </head>
 <body>
-  <main class="shell">
-    <header class="top"><div><div class="eyebrow">INOFFIZIELLER PROTOTYP</div><h1>Nuvio <em>Watch Party</em></h1></div><span id="connection" class="state">Nicht verbunden</span></header>
-    <p id="message" class="message" role="status" aria-live="polite">Öffne eine Party-Einladung und melde dich mit deinem Nuvio-Konto an.</p>
+  <header id="brandbar" class="brandbar">
+    <a class="brand" href="/" aria-label="Nuvio Watch Party – Startseite"><span class="brand-mark" aria-hidden="true"></span><span>nuvio</span><span class="brand-sub">Watch Party</span></a>
+    <span id="connection" class="pill" role="status">Nicht verbunden</span>
+  </header>
 
-    <section id="authSection" class="panel">
-      <h2>Bei Nuvio anmelden</h2>
-      <p class="muted">Melde dich nur auf einer Browser-Seite an, deren Betreiber du vertraust. Die Anmeldung geht direkt an das konfigurierte Backend. Der Seitencode verarbeitet dein Passwort; deine Sitzung wird in diesem Browser gespeichert.</p>
-      <form id="loginForm"><label>E-Mail<input required autocomplete="email" id="email" type="email" placeholder="name@example.com"></label>
-        <label>Passwort<input required autocomplete="current-password" id="password" type="password"></label>
-        <button id="loginButton" type="submit">Anmelden</button></form>
+  <!-- Transient status toast (no permanent banner). -->
+  <p id="message" class="toast" role="status" aria-live="polite" hidden></p>
+
+  <main id="partyApp" class="app">
+    <!-- Invitation: before joining. -->
+    <section id="inviteView" class="invite">
+      <article class="invite-card" aria-labelledby="inviteTitle">
+        <div class="invite-media">
+          <img id="inviteBackdrop" class="invite-backdrop" alt="" hidden>
+          <div class="invite-fallback" aria-hidden="true"></div>
+          <div class="invite-shade" aria-hidden="true"></div>
+          <button id="invitePlay" class="play-orb" type="button" aria-label="Jetzt ansehen"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l10.5-6.5z"/></svg></button>
+          <div class="invite-titles">
+            <p id="inviteHostLine" class="invite-hostline" hidden></p>
+            <img id="inviteLogo" class="invite-logo" alt="" hidden>
+            <h1 id="inviteTitle" class="invite-title">Watch Party</h1>
+            <p id="inviteEpisode" class="invite-episode" hidden></p>
+          </div>
+        </div>
+        <div class="invite-body">
+          <p id="inviteDescription" class="invite-description" hidden></p>
+          <div class="invite-facts">
+            <div><span class="label">Host</span><span class="host"><span id="inviteHostAvatar" class="avatar" aria-hidden="true">?</span><span id="inviteHost">–</span></span></div>
+            <div><span class="label">Plätze</span><span class="seats"><span id="inviteSeatDots" class="seat-dots" aria-hidden="true"></span><span id="inviteSeats">–</span></span></div>
+          </div>
+          <p id="preview" class="notice" role="status"></p>
+
+          <div id="joinSection" class="step">
+            <details id="createRoomOptions" class="advanced">
+              <summary class="btn primary large room-create-action">Party erstellen</summary>
+              <p>Wähle einen Titel aus dem Cinemeta-Katalog. Für die Erstellung brauchst du keinen Videolink.</p>
+              <label class="field"><span>Film oder Serie suchen</span><input id="roomSearch" type="search" maxlength="120" autocomplete="off"></label>
+              <p id="roomSearchStatus" class="notice" role="status"></p>
+              <ul id="roomSearchResults" class="room-results" aria-label="Suchergebnisse"></ul>
+              <div id="roomEpisodePicker" hidden>
+                <label class="field"><span>Staffel</span><select id="roomSearchSeason"></select></label>
+                <label class="field"><span>Episode</span><select id="roomSearchEpisode"></select></label>
+              </div>
+              <button id="createRoomButton" type="button" class="btn primary" disabled>Party erstellen</button>
+              <details class="advanced">
+                <summary>IMDb-Link manuell eingeben</summary>
+                <label class="field"><span>Medientyp</span><select id="roomMediaType"><option value="movie">Film</option><option value="series">Serie</option></select></label>
+                <label class="field"><span>IMDb-Link oder IMDb-ID</span><input id="roomMediaId" autocomplete="off" spellcheck="false"></label>
+                <label class="field"><span>Staffel (nur Serie)</span><input id="roomSeason" type="number" min="0" step="1"></label>
+                <label class="field"><span>Episode (nur Serie)</span><input id="roomEpisode" type="number" min="1" step="1"></label>
+                <button id="createRoomManual" type="button" class="btn">Mit IMDb-Titel erstellen</button>
+              </details>
+            </details>
+            <!-- One flow: Nuvio sign-in (only without a valid session) + join. -->
+            <form id="joinForm" class="join-form" autocomplete="on">
+              <div id="credentials" class="credentials">
+                <label class="field"><span>E-Mail (Nuvio-Konto)</span><input id="email" type="email" autocomplete="username" inputmode="email" placeholder="name@example.com"></label>
+                <label class="field"><span>Passwort</span><span class="password-wrap"><input id="password" type="password" autocomplete="current-password"><button id="passwordToggle" type="button" class="pw-toggle" aria-label="Passwort anzeigen" aria-pressed="false">Anzeigen</button></span></label>
+                <p id="signupLine" class="signup-line">Noch kein Nuvio-Konto? <a id="signupLink" href="https://nuvio.tv/account/signup" target="_blank" rel="noopener noreferrer">Account erstellen</a></p>
+              </div>
+              <p id="accountLine" class="account-line" hidden>Angemeldet mit deinem Nuvio-Konto. <button type="button" id="logoutButton" class="linklike">Abmelden</button></p>
+              <button type="submit" id="joinButton" class="btn primary large">Jetzt ansehen</button>
+              <!-- The code comes from the invitation link; manual entry only as fallback. -->
+              <label id="codeFallback" class="field" hidden><span>Party-Code</span><input id="partyCode" maxlength="7" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="z. B. UXZ83H"></label>
+              <details class="advanced"><summary>Erweitert</summary><label class="field"><span>Nuvio-Profilindex (optional)</span><input id="profileIndex" type="number" min="0" max="20" placeholder="z. B. 0"></label></details>
+            </form>
+          </div>
+          <p class="foot-links"><a id="openInNuvio" href="https://nuvio.tv" rel="noopener noreferrer" target="_blank" hidden>In Nuvio öffnen</a></p>
+        </div>
+      </article>
     </section>
 
-    <section id="joinSection" class="panel" hidden>
-      <div class="row"><h2>Party beitreten</h2><button type="button" id="logoutButton" class="secondary small">Abmelden</button></div>
-      <form id="joinForm"><label>Party-Code<input required id="partyCode" maxlength="7" autocomplete="off" placeholder="UXZ83H"></label>
-        <label>Anzeigename<input required id="displayName" maxlength="36" value="Browser-Gast"></label>
-        <details><summary>Erweitert: Nuvio-Profilindex</summary><label>Profilindex (optional)<input id="profileIndex" type="number" min="0" max="20" placeholder="z. B. 0"></label><p class="muted">Falls dein Backend für die Party einen bestimmten Profilindex verlangt.</p></details>
-        <button type="submit" id="joinButton">Party beitreten</button></form>
-      <div id="preview" class="muted"></div>
-    </section>
+    <!-- Cinema player: after joining. -->
+    <section id="watchSection" class="watch" hidden>
+      <div id="playerWrap" class="player-wrap" tabindex="-1">
+        <video id="player" controls playsinline preload="metadata" crossorigin="anonymous"></video>
+        <div id="noStream" class="player-state">Warte auf Video vom Host …</div>
+        <div id="chatOverlay" class="chat-overlay" aria-live="polite"></div>
+        <button id="autoplayStart" class="btn primary large autoplay-start" type="button" hidden>▶ Wiedergabe starten</button>
+        <button id="loadStream" type="button" class="play-orb center" aria-label="Abspielen" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l10.5-6.5z"/></svg></button>
 
-    <section id="watchSection" class="panel" hidden>
-      <div class="row"><div><span class="eyebrow" id="partyLabel">WATCH PARTY</span><h2 id="movieTitle">Film</h2><p class="muted" id="movieInfo"></p></div><button id="leaveButton" type="button" class="secondary small">Verlassen</button></div>
-      <div class="playerWrap"><video id="player" controls playsinline preload="metadata" crossorigin="anonymous"></video><div id="noStream" class="waiting">Warte auf eine freigegebene Streamquelle des Hosts …</div></div>
-      <div class="row controls"><button id="loadStream" type="button" hidden>Freigegebenen Stream laden</button><button id="resync" type="button" class="secondary" disabled>Wiedergabe synchronisieren</button></div>
-      <p id="streamInfo" class="muted">Der Host muss „Share my stream“ aktivieren. Direkte Stream-URLs müssen browserkompatibel sein.</p>
-      <details><summary>Chat</summary><div id="chatLog" class="chat" aria-live="polite"></div><form id="chatForm" class="row"><input id="chatText" maxlength="500" placeholder="Nachricht" aria-label="Chatnachricht" required><button type="submit">Senden</button></form></details>
+        <div class="player-top">
+          <button id="ctlBack" class="icon-btn" type="button" aria-label="Zurück zur Einladung"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 12H6m6-6-6 6 6 6"/></svg></button>
+          <!-- Compact participants badge (top right): inside the player, never shrinks it. -->
+          <button id="membersButton" class="members-badge" type="button" aria-haspopup="dialog" aria-controls="infoDrawer" aria-expanded="false"><span id="memberAvatars" class="avatar-stack" aria-hidden="true"></span><span id="memberCount">Teilnehmer</span></button>
+        </div>
+
+        <div id="controlsBar" class="controls-bar">
+          <div class="seek-row">
+            <input id="ctlSeek" class="seek" type="range" min="0" max="1000" step="1" value="0" aria-label="Wiedergabeposition">
+            <span id="ctlRemaining" class="time">0:00</span>
+          </div>
+          <div class="controls-row">
+            <div class="group">
+              <button id="ctlPlay" class="icon-btn" type="button" aria-label="Abspielen"><svg class="i-play" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4.5v15l12-7.5z"/></svg><svg class="i-pause" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4.5h3.5v15H7zm6.5 0H17v15h-3.5z"/></svg></button>
+              <button id="ctlBack10" class="icon-btn" type="button" aria-label="10 Sekunden zurück"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4.5 12a7.5 7.5 0 1 0 2.2-5.3M4.5 4v4h4"/><text x="12" y="15.6" text-anchor="middle">10</text></svg></button>
+              <button id="ctlFwd10" class="icon-btn" type="button" aria-label="10 Sekunden vor"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3M19.5 4v4h-4"/><text x="12" y="15.6" text-anchor="middle">10</text></svg></button>
+              <div class="volume-group">
+                <button id="ctlMute" class="icon-btn" type="button" aria-label="Ton aus"><svg class="i-vol" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4zM15.5 9a4 4 0 0 1 0 6M18 6.5a7.5 7.5 0 0 1 0 11"/></svg><svg class="i-mute" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4zM16 9.5l5 5m0-5-5 5"/></svg></button>
+                <input id="ctlVolume" class="volume" type="range" min="0" max="1" step="0.05" value="1" aria-label="Lautstärke">
+              </div>
+            </div>
+            <h2 id="movieTitle" class="player-title">Film</h2>
+            <div class="group right">
+              <span id="syncChip" class="sync-chip" hidden>Synchron</span>
+              <button id="resync" type="button" class="icon-btn resync-btn" aria-label="Party-Zeit aktualisieren" title="Party-Zeit aktualisieren" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.35-5.65M20 4v4.5h-4.5"/></svg></button>
+              <label id="qualityWrap" class="quality" hidden><span class="sr-only">Qualität</span><select id="quality" aria-label="Videoqualität"></select></label>
+              <button id="ctlSolo" class="solo-btn" type="button" aria-pressed="false" title="Lokal ohne Party-Synchronisierung weiterschauen">Allein schauen</button>
+              <div class="cc-group">
+                <button id="ctlSubtitles" class="icon-btn" type="button" aria-label="Untertitel" aria-haspopup="menu" aria-expanded="false" aria-controls="subtitleMenu"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="5.5" width="17" height="13" rx="2.5"/><path d="M10.5 10.2a2.2 2.2 0 1 0 0 3.6M16.5 10.2a2.2 2.2 0 1 0 0 3.6"/></svg></button>
+                <div id="subtitleMenu" class="menu" role="menu" aria-label="Untertitel" hidden></div>
+                <input id="subtitleFile" type="file" accept=".vtt,.srt,text/vtt" hidden>
+              </div>
+              <button id="ctlSettings" class="icon-btn" type="button" aria-label="Einstellungen" aria-haspopup="dialog" aria-expanded="false" aria-controls="infoDrawer"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m10 3-.6 2.6-2 .9L5 5.4 3 8.8l1.9 1.8v2.8L3 15.2l2 3.4 2.4-1.1 2 .9L10 21h4l.6-2.6 2-.9 2.4 1.1 2-3.4-1.9-1.8v-2.8L21 8.8l-2-3.4-2.4 1.1-2-.9L14 3z"/><circle cx="12" cy="12" r="3"/></svg></button>
+              <button id="ctlFullscreen" class="icon-btn" type="button" aria-label="Vollbild"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/></svg></button>
+            </div>
+          </div>
+        </div>
+      </div>
     </section>
-    <footer>Nur für Inhalte, zu deren Wiedergabe und Freigabe du berechtigt bist. Keine Umgehung von DRM oder Streaming-Anbieter-Schutz. Debrid-Links und Tokens können beim Teilen offengelegt werden.</footer>
   </main>
+
+  <!-- Info drawer: right on desktop, bottom sheet on phones. -->
+  <div id="drawerScrim" class="scrim" hidden></div>
+  <aside id="infoDrawer" class="drawer" role="dialog" aria-modal="true" aria-labelledby="drawerTitle" hidden>
+    <div class="drawer-head"><h3 id="drawerTitle">Party</h3><button id="drawerClose" class="icon-btn" type="button" aria-label="Schließen"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg></button></div>
+    <section id="settingsView" class="drawer-stack">
+      <div id="settingsTabs" class="settings-tabs" role="tablist" aria-label="Party">
+        <button id="tabParty" role="tab" type="button" aria-controls="panelParty" aria-selected="true">Party</button>
+        <button id="tabPeople" role="tab" type="button" aria-controls="panelPeople" aria-selected="false" tabindex="-1">Teilnehmer</button>
+        <button id="tabAdvanced" role="tab" type="button" aria-controls="panelAdvanced" aria-selected="false" tabindex="-1">Erweitert</button>
+        <button id="tabHost" role="tab" type="button" aria-controls="panelHost" aria-selected="false" tabindex="-1" hidden>Host</button>
+      </div>
+      <section id="panelParty" class="settings-panel party-panel" role="tabpanel" aria-labelledby="tabParty" tabindex="0">
+        <p id="controlInfo" class="sr-only"></p>
+        <article id="roomOverview" class="party-room" hidden>
+          <div class="room-hero">
+            <img id="roomPoster" class="room-poster" alt="" hidden>
+            <div class="room-heading">
+              <p id="roomKicker" class="room-kicker">Dein Party-Room</p>
+              <h2 id="roomTitle"></h2>
+              <p id="roomSubtitle" class="room-subtitle"></p>
+              <p id="movieInfo" class="room-host"></p>
+              <div class="room-meta">
+                <button id="copyPartyCode" type="button" class="code-chip" aria-label="Party-Code kopieren"><span>Code</span><strong id="drawerCode">–</strong></button>
+                <span id="roomConnection" class="status-chip" role="status">Verbinde …</span>
+              </div>
+            </div>
+          </div>
+          <div class="room-quick">
+            <button id="roomCopyInvite" type="button" class="btn small invite-copy">Einladungslink kopieren</button>
+          </div>
+          <p id="roomWaiting" class="room-waiting" role="status"></p>
+          <form id="roomShareForm" class="room-share" autocomplete="off" novalidate>
+            <label class="sr-only" for="roomShareUrl">Direkter Videolink (HLS, MP4 oder WebM über HTTPS)</label>
+            <div class="room-share-row">
+              <input id="roomShareUrl" type="url" inputmode="url" spellcheck="false" maxlength="4096" placeholder="Videolink (HLS, MP4, WebM)">
+              <button id="roomShareButton" class="btn primary small" type="submit">Video für alle freigeben</button>
+            </div>
+            <p id="roomShareStatus" class="room-share-status" role="status"></p>
+            <p id="roomShareLocked" class="room-share-locked">Die Videofreigabe im Browser ist noch gesperrt: Das Backend kann bisher nicht bestätigen, dass ein Streamangebot wirklich vom Host stammt. Eine Desktop-Party mit „Share my stream“ funktioniert wie gewohnt.</p>
+          </form>
+          <div id="roomProposals" class="room-proposals" role="region" aria-labelledby="roomProposalsTitle" hidden>
+            <h3 id="roomProposalsTitle">Vorschläge</h3>
+            <ul id="roomProposalList"></ul>
+          </div>
+          <!-- Members only (never the host); shown only when sharing is enabled. -->
+          <div id="proposalSection" class="room-propose" hidden>
+            <form id="proposalForm" class="room-share" autocomplete="off" novalidate>
+              <label class="sr-only" for="proposalUrl">Direkter Videolink für die Party</label>
+              <div class="room-share-row">
+                <input id="proposalUrl" type="url" inputmode="url" autocomplete="off" spellcheck="false" maxlength="4096" placeholder="Video vorschlagen (HLS, MP4, WebM)">
+                <button id="proposalSend" class="btn small" type="submit">Vorschlagen</button>
+              </div>
+              <p class="room-share-note">Für alle Mitglieder lesbar – nur Links ohne Zugangsdaten. Der Host entscheidet.</p>
+            </form>
+          </div>
+          <p id="suggestStatus" class="room-share-note" role="status"></p>
+        </article>
+        <div class="party-footer">
+          <div class="party-sync-actions">
+            <button id="drawerResync" type="button" class="btn small ghost" disabled>Mich synchronisieren</button>
+            <button id="hostSyncAll" type="button" class="btn small ghost" hidden disabled>Alle synchronisieren</button>
+          </div>
+          <button id="leaveButton" type="button" class="btn small ghost leave">Party verlassen</button>
+        </div>
+      </section>
+      <section id="panelPeople" class="settings-panel people-panel" role="tabpanel" aria-labelledby="tabPeople" tabindex="0" hidden>
+        <p id="participantCount" class="muted small"></p>
+        <ul id="memberList" class="members"></ul>
+      </section>
+      <section id="panelAdvanced" class="settings-panel" role="tabpanel" aria-labelledby="tabAdvanced" tabindex="0" hidden>
+        <div class="setting-row" title="Beim Laden sieht der Medienanbieter deine IP. Eine neue Host-Quelle kann deinen lokalen Link ersetzen.">
+          <label class="setting-text" for="autoHostStream"><span class="setting-title">Host-Stream automatisch verwenden</span><span class="setting-desc">Neue Streams automatisch laden</span></label>
+          <span class="switch"><input id="autoHostStream" type="checkbox" role="switch"><span class="switch-track" aria-hidden="true"></span></span>
+        </div>
+        <h4>Chat</h4>
+        <div id="chatLog" class="chat" role="log" aria-live="polite"></div>
+        <form id="chatForm" class="chat-form"><input id="chatText" maxlength="500" placeholder="Nachricht schreiben …" aria-label="Chatnachricht" required><button type="submit" class="btn primary small">Senden</button></form>
+        <div id="previewLogoutRow" hidden><button type="button" id="previewLogout" class="btn ghost small">Preview abmelden</button></div>
+        <details class="debug-box">
+          <summary>Debug</summary>
+          <button id="showDiagnostics" class="btn ghost small" type="button">Sync-Diagnose anzeigen</button>
+          <div id="diagnosticsPanel"></div>
+        </details>
+      </section>
+      <!-- Only for the server-confirmed host (session.isHost). -->
+      <section id="panelHost" class="settings-panel" role="tabpanel" aria-labelledby="tabHost" tabindex="0" hidden>
+        <div class="setting-row">
+          <label class="setting-text" for="roomHostOnly"><span class="setting-title">Nur Host darf steuern</span><span class="setting-desc">Mitglieder folgen; eigenes Pausieren nur über „Allein schauen“</span></label>
+          <span class="switch"><input id="roomHostOnly" type="checkbox" role="switch"><span class="switch-track" aria-hidden="true"></span></span>
+        </div>
+        <div class="room-actions">
+          <button id="hostCountdown" type="button" class="btn small primary" disabled>3-Sekunden-Countdown</button>
+        </div>
+        <h4>Mitglieder verwalten</h4>
+        <ul id="roomMembers" class="room-member-list"></ul>
+        <button id="roomShowOverview" type="button" class="btn small ghost">Party-Room öffnen</button>
+        <button id="roomStopShare" type="button" class="btn small ghost" hidden>Videofreigabe beenden</button>
+        <button id="roomEnd" type="button" class="btn small ghost leave">Party beenden</button>
+      </section>
+      <!-- Former "Stream" tab: no longer offered in the UI. The elements stay
+           (hidden) because the sync/source code still writes its status here. -->
+      <div id="streamLegacy" hidden>
+        <form id="personalHlsForm" autocomplete="off">
+          <input id="personalHlsUrl" type="url" aria-label="Video-Link (HTTPS-HLS-Playlist)" tabindex="-1">
+          <button id="loadPersonalHls" type="submit" tabindex="-1">Nur lokal laden</button>
+        </form>
+        <p id="personalHlsStatus" role="status"></p>
+        <button id="useDesktopStream" type="button" tabindex="-1" hidden>Zur Host-Quelle zurück</button>
+        <p id="streamInfo">Warte auf Video vom Host.</p>
+        <p id="qualityNote" hidden></p>
+      </div>
+    </section>
+  </aside>
   <script type="module" src="/src/main.js"></script>
 </body>
 </html>

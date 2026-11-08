@@ -8,7 +8,8 @@ fi
 if [[ -z "${GH_TOKEN:-}" ]]; then echo 'A repository-scoped Actions token is required.' >&2; exit 1; fi
 
 upstream='https://github.com/NuvioMedia/NuvioDesktop.git'
-branch='updates/nuvio-dev'
+branch='updates/nuvio-dev'               # official tip, for reference/conflict review
+integration='updates/nuvio-integration'  # fork Dev + official tip, checked
 git fetch --no-tags origin 'refs/heads/Dev:refs/remotes/origin/Dev'
 git fetch --no-tags "$upstream" 'refs/heads/Dev:refs/remotes/nuvio-upstream/Dev'
 tip="$(git rev-parse refs/remotes/nuvio-upstream/Dev)"
@@ -20,21 +21,32 @@ if git merge-base --is-ancestor "$tip" "$base"; then
   exit 0
 fi
 
-# Push only an upstream-tip branch inside the fork. Never touch Dev, merge,
-# force-push, execute fetched code, approve PRs, or create tags/releases.
+# Never touch Dev, force-push Dev, execute fetched code, approve PRs, or
+# create tags/releases. The invariant checker is taken from the fork's Dev
+# (not from the merged tree) and only greps files.
+checker="$(mktemp)"; body="$(mktemp)"
+trap 'rm -f "$checker" "$body"' EXIT
+git show "$base:fork-maintenance/check-fork-invariants.sh" > "$checker" 2>/dev/null \
+  || { echo "fork-maintenance/check-fork-invariants.sh is not on Dev yet; merge the fork automation first." >&2; exit 1; }
+
 git push origin "$tip:refs/heads/$branch"
-existing="$(gh pr list --repo "$GITHUB_REPOSITORY" --base Dev --head "$branch" --state open --json url --jq '.[0].url // empty')"
-if [[ -n "$existing" ]]; then
-  echo "Review PR updated by fast-forward only: $existing"
-  exit 0
+git config user.name 'nuvio-fork-sync'
+git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+git checkout -q -B "$integration" "$base"
+status='clean'
+if git merge --no-ff --no-edit -m "Merge official NuvioDesktop Dev ${tip:0:12} into fork" "$tip"; then
+  bash "$checker" || status='invariants'
+else
+  git merge --abort || true
+  status='conflict'
 fi
 
-body="$(mktemp)"
-trap 'rm -f "$body"' EXIT
-cat > "$body" <<EOF
+write_body() {
+  local kind="$1" detail="$2"
+  cat > "$body" <<EOF
 ## Summary
 
-Propose the official NuvioDesktop Dev tip for this personal fork. Implementation changes are unapproved until reviewed.
+$kind official NuvioDesktop Dev update for this personal fork ($detail).
 
 ## PR type
 
@@ -42,7 +54,7 @@ Propose the official NuvioDesktop Dev tip for this personal fork. Implementation
 
 ## Why
 
-Keep the personal fork current while preserving its own Watch in Browser integration.
+Keep the personal fork current while preserving its own features: browser watch party (browser-site), TorBox HLS, Cloudflare invitation link, intro-skip configuration guard, browser sync, fork updater and the original desktop player.
 
 ## Desktop scope
 
@@ -50,7 +62,7 @@ Desktop upstream commits; inspect the complete diff for platform/shared-code eff
 
 ## Issue or approval
 
-The owner requested update proposals, not automatic approval of their contents. No approval or merge is implied.
+Automated proposal. No approval or merge is implied unless the owner enabled auto-merge for clean, fully checked integrations.
 
 ## UI / behavior impact
 
@@ -59,26 +71,21 @@ The owner requested update proposals, not automatic approval of their contents. 
 ## Policy check
 
 - [x] This automation only proposes changes inside the personal fork.
-- [x] No merge, approval, deployment, tag or release was performed.
+- [x] No force-push to Dev, approval, deployment, tag or release was performed.
 
 ## Scope boundaries
 
 Upstream: https://github.com/NuvioMedia/NuvioDesktop/commit/$tip
-Fork base when proposed: $base
-
-Review the diff, resolve any conflicts, and retain Watch in Browser, browser-site,
-fork-maintenance, and the fork-only workflows. This PR remains for a human.
+Fork base: $base
+Integration status: $status
 
 ## Testing
 
-No application test is claimed by the update proposal. Review the separate Fork - Windows MSI PR checks.
-
-After your review and manual merge into Dev, run **Fork - Windows MSI** manually
-on Dev to build a downloadable artifact. This draft does not authorize a release.
+The Fork - Windows MSI workflow runs browser tests, fork invariants and desktop tests on this PR. Failing checks block the merge. Releases are only created by the separate, manually approved Fork - Release workflow.
 
 ## Screenshots / Video
 
-No upstream UI verification is claimed. Inspect UI-affecting changes before accepting this proposal.
+No upstream UI verification is claimed.
 
 ## Breaking changes
 
@@ -86,7 +93,41 @@ Unknown until reviewed; inspect upstream migrations, build settings and protocol
 
 ## Linked issues
 
-No issue is created automatically. Consult the linked upstream commit and its referenced PRs.
+No issue is created automatically. Consult the linked upstream commit.
 EOF
-gh pr create --repo "$GITHUB_REPOSITORY" --base Dev --head "$branch" --draft \
-  --title 'Review Nuvio Desktop Dev updates' --body-file "$body"
+}
+
+if [[ "$status" == 'clean' ]]; then
+  # The integration branch is fork-owned scratch space; it is rebuilt from Dev
+  # each run, so --force-with-lease applies to it only, never to Dev.
+  git push --force-with-lease origin "HEAD:refs/heads/$integration"
+  write_body 'Integrate the' 'merged without conflicts; fork invariants intact'
+  pr="$(gh pr list --repo "$GITHUB_REPOSITORY" --base Dev --head "$integration" --state open --json url --jq '.[0].url // empty')"
+  if [[ -z "$pr" ]]; then
+    pr="$(gh pr create --repo "$GITHUB_REPOSITORY" --base Dev --head "$integration" --draft \
+      --title 'Integrate Nuvio Desktop Dev updates (checked)' --body-file "$body")"
+  else
+    gh pr edit "$pr" --body-file "$body"
+  fi
+  echo "Integration PR: $pr"
+  # Optional, off by default: merge automatically only after all required
+  # checks pass (needs branch protection with required checks on Dev).
+  if [[ "${FORK_AUTO_MERGE:-false}" == 'true' ]]; then
+    gh pr ready "$pr" || true
+    gh pr merge "$pr" --auto --merge
+  fi
+  exit 0
+fi
+
+detail="$([[ "$status" == 'conflict' ]] && echo 'merge conflicts; manual resolution required' || echo 'merged, but a fork feature was removed or reverted; see the Fork invariants log')"
+write_body 'Review the' "$detail"
+existing="$(gh pr list --repo "$GITHUB_REPOSITORY" --base Dev --head "$branch" --state open --json url --jq '.[0].url // empty')"
+if [[ -n "$existing" ]]; then
+  gh pr edit "$existing" --body-file "$body"
+  echo "Review PR updated ($status): $existing"
+else
+  gh pr create --repo "$GITHUB_REPOSITORY" --base Dev --head "$branch" --draft \
+    --title "Review Nuvio Desktop Dev updates ($status)" --body-file "$body"
+fi
+# A blocked update is a failed run, so it is visible in the Actions tab.
+exit 1

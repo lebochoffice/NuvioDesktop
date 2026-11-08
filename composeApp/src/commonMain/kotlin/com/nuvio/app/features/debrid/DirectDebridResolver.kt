@@ -181,6 +181,7 @@ sealed class DirectDebridResolveResult {
         val url: String,
         val filename: String?,
         val videoSize: Long?,
+        val torboxPartyFile: TorboxPartyFile? = null,
     ) : DirectDebridResolveResult()
 
     data object MissingApiKey : DirectDebridResolveResult()
@@ -279,6 +280,7 @@ private class LocalDebridAddonStreamResolver(
                 filename = file.displayName().takeIf { it.isNotBlank() }
                     ?: stream.behaviorHints.filename?.takeIf { it.isNotBlank() },
                 videoSize = file.size ?: stream.behaviorHints.videoSize,
+                torboxPartyFile = TorboxPartyFile(torrentId, fileId, torboxAccountFingerprint(apiKey)),
             )
         } catch (error: Exception) {
             if (error is CancellationException) throw error
@@ -363,6 +365,7 @@ private fun String.stableFingerprint(): String {
 
 private fun StreamItem.withResolvedDebridUrl(result: DirectDebridResolveResult.Success): StreamItem =
     copy(
+        torboxPartyFile = result.torboxPartyFile,
         url = result.url,
         externalUrl = null,
         behaviorHints = behaviorHints.mergeResolvedDebridHints(result),

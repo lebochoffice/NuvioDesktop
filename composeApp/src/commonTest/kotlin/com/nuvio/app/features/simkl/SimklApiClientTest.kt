@@ -1,6 +1,7 @@
 package com.nuvio.app.features.simkl
 
 import com.nuvio.app.features.addons.RawHttpResponse
+import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -9,6 +10,71 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class SimklApiClientTest {
+    @Test
+    fun `concurrent reads share the rotated token after a single 401`() = runBlocking {
+        val engine = RecordingEngine(response(401), response(200), response(200))
+        var token = "old"
+        var recoveries = 0
+        val client = SimklApiClient(
+            engine, accessToken = { token }, onUnauthorized = { error("legacy callback") },
+            nowEpochMs = { 0 }, sleep = {},
+            recoverUnauthorized = { rejected ->
+                assertEquals("old", rejected)
+                recoveries++
+                token = "rotated"
+                token
+            },
+        )
+        val request = SimklApiRequest(SimklHttpMethod.GET, "/sync/activities", retryPolicy = SimklRetryPolicy.NEVER)
+        val first = async { client.execute(request) }
+        val second = async { client.execute(request) }
+        assertEquals(200, first.await().status)
+        assertEquals(200, second.await().status)
+        assertEquals(1, recoveries)
+        assertEquals(listOf("Bearer old", "Bearer rotated", "Bearer rotated"),
+            engine.requests.map { it.headers["Authorization"] })
+    }
+
+    @Test
+    fun `profile changes prevent replay and stale responses from being accepted`() = runBlocking {
+        var generation = 0L
+        val engine = RecordingEngine(response(401)).apply { onResponse = { generation++ } }
+        val client = SimklApiClient(
+            engine, accessToken = { "synthetic" }, onUnauthorized = { error("stale authorization callback") },
+            nowEpochMs = { 0 }, sleep = {},
+            recoverUnauthorized = { error("stale request must not refresh") },
+            sessionGeneration = { generation },
+        )
+        val error = assertFailsWith<SimklApiException> {
+            client.execute(SimklApiRequest(SimklHttpMethod.GET, "/sync/activities"))
+        }
+        assertEquals("authentication_changed", error.errorCode)
+        assertEquals(1, engine.requests.size)
+    }
+
+    @Test
+    fun `401 never replays writes or a second rejected read`() = runBlocking {
+        for (method in listOf(SimklHttpMethod.POST, SimklHttpMethod.GET)) {
+            val engine = RecordingEngine(
+                response(401, """{"error":"invalid_token","message":"private-synthetic-token"}"""),
+                response(401, """{"error":"invalid_token","message":"private-synthetic-token"}"""),
+            )
+            var recoveries = 0
+            val client = SimklApiClient(
+                engine, accessToken = { "old" }, onUnauthorized = {},
+                nowEpochMs = { 0 }, sleep = {},
+                recoverUnauthorized = { recoveries++; "rotated" },
+            )
+            val error = assertFailsWith<SimklApiException> {
+                client.execute(SimklApiRequest(method, "/sync/history", retryPolicy = SimklRetryPolicy.NEVER))
+            }
+            assertEquals(401, error.status)
+            assertFalse(error.toString().contains("private-synthetic-token"))
+            assertEquals(1, recoveries)
+            assertEquals(if (method == SimklHttpMethod.POST) 1 else 2, engine.requests.size)
+        }
+    }
+
     @Test
     fun `response classification retries only documented transient statuses`() {
         assertEquals(SimklResponseAction.SUCCESS, classifySimklResponse(200))

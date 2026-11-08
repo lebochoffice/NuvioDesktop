@@ -1377,7 +1377,7 @@
     <string name="settings_trakt_features">FEATURES</string>
     <string name="settings_trakt_finish_sign_in">Finish connection approval</string>
     <string name="settings_trakt_intro_description">Sync your watchlist, watch progress, continue watching, scrobbles, and personal lists with Trakt.</string>
-    <string name="settings_trakt_missing_credentials">Missing Trakt credentials in local.properties (TRAKT_CLIENT_ID / TRAKT_CLIENT_SECRET).</string>
+    <string name="settings_trakt_missing_credentials">Missing Trakt credentials in local.properties (TRAKT_CLIENT_ID).</string>
     <string name="settings_trakt_open_activation">Open Trakt Activate</string>
     <string name="settings_trakt_open_login">Open Trakt Login</string>
     <string name="settings_trakt_save_actions_description">Sync your watchlist, watch progress, continue watching, scrobbles, and personal lists with Trakt.</string>
@@ -1438,6 +1438,9 @@
     <string name="settings_simkl_visit">Visit Simkl</string>
     <string name="settings_simkl_invalid_callback">Simkl did not accept the sign-in callback. Please try again.</string>
     <string name="settings_simkl_authorization_expired">Simkl code expired. Start again.</string>
+    <string name="settings_simkl_authorization_denied">Simkl sign-in was declined. Connect again if you want to approve it.</string>
+    <string name="settings_simkl_invalid_client_id">Simkl rejected this app registration. This build needs a valid AUTH V2 device client ID.</string>
+    <string name="settings_simkl_token_storage_failed">Nuvio could not access the saved Simkl connection. Connect again to restore it.</string>
     <string name="settings_simkl_sign_in_failed">Could not complete Simkl sign in. Please try again.</string>
     <string name="settings_simkl_sync_now">Sync now</string>
     <string name="settings_simkl_sync_info_action">How syncing works</string>
@@ -1816,6 +1819,8 @@
     <string name="updates_debug_test_description">Preview the banner and simulated download progress.</string>
     <string name="updates_debug_test_title">Test update banner</string>
     <string name="updates_install_failed">Unable to start installation</string>
+    <string name="updates_checksum_missing">This update has no published SHA-256 checksum and was not installed.</string>
+    <string name="updates_checksum_mismatch">The downloaded update failed the SHA-256 check and was deleted.</string>
     <string name="updates_latest_version">You&apos;re using the latest version.</string>
     <string name="updates_message_allow_installs">Enable app installs for Nuvio, then come back and continue.</string>
     <string name="updates_message_downloading">Downloading update...</string>

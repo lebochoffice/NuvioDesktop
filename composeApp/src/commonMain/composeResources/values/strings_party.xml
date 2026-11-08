@@ -25,12 +25,12 @@
     <string name="party_end">End for everyone</string>
     <string name="party_end_title">End the watch party?</string>
     <string name="party_end_message">Everyone will be disconnected from the party.</string>
-    <string name="party_now_watching">The party is watching %1$s</string>
-    <string name="party_switch">Switch the party to %1$s</string>
-    <string name="party_switch_title">Switch the party?</string>
-    <string name="party_switch_message">Everyone will start watching %1$s with you.</string>
-    <string name="party_switch_confirm">Switch</string>
-    <string name="party_watch_with_party">Watch with the party</string>
+    <string name="party_now_watching">The party is watching %1$s – you are watching something else.</string>
+    <string name="party_switch">Bring everyone to %1$s</string>
+    <string name="party_switch_title">Bring everyone to your title?</string>
+    <string name="party_switch_message">All members leave the current title and watch %1$s with you.</string>
+    <string name="party_switch_confirm">Switch everyone</string>
+    <string name="party_watch_with_party">Rejoin the party (only you)</string>
     <string name="party_waiting_for">Waiting for %1$s</string>
     <string name="party_waiting">Waiting for everyone</string>
     <string name="party_reconnecting">Reconnecting</string>
@@ -52,6 +52,8 @@
     <string name="party_source">Party's source</string>
     <string name="party_episode_format">S%1$d E%2$d</string>
     <string name="party_host_only_title">Only I can control playback</string>
+    <string name="party_browser_more_options">More options</string>
+    <string name="party_playback_controls">Playback controls</string>
     <string name="party_host_only_description">Others can still pause or rewind for themselves.</string>
     <string name="party_host_only_note">Only the host can control playback</string>
     <string name="party_control_host_only">Only the host can control playback now</string>

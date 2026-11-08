@@ -1369,6 +1369,7 @@ private fun formatPlayerControlsSeconds(seconds: Double): String {
 }
 
 private fun PlayerScreenRuntime.handlePlayerControlsScrubChange(positionMs: Long) {
+    if (partyBlocksControl()) return
     playerControlsLog.d { "scrubChange positionMs=$positionMs ${playerControlLogContext()}" }
     isScrubbingTimeline = true
     scrubbingPositionMs = positionMs

@@ -14,6 +14,23 @@ internal sealed interface OwnSeek {
     data object Blocked : OwnSeek
 }
 
+/** Progress of applying a revision received from another member. */
+internal enum class PendingApply {
+    /** A real local action changed the intent since; nothing left to apply. */
+    Superseded,
+    /** The player has not reached the play state yet (seek/HLS/network). */
+    Waiting,
+    /** Play state reached, position still far away: regular correction seeks. */
+    Seeking,
+    /** Reached. */
+    Applied,
+}
+
+/** Estimated state of a member relative to the party time (display only). */
+internal enum class MemberSync { Synced, CatchingUp, Buffering, Unsynced, Solo, Stale, Unknown }
+
+internal data class MemberSyncInfo(val state: MemberSync, val positionMs: Long? = null, val driftMs: Long? = null)
+
 internal object PartySync {
     const val NUDGE_START_MS = 250L
     const val NUDGE_STOP_MS = 80L
@@ -46,6 +63,8 @@ internal object PartySync {
         expectedPositionMs: Long,
         playback: PartyPlayback,
         nudging: Boolean,
+        // Expert option "Mini-Korrekturen per Tempo"; off = only seek corrections.
+        allowNudge: Boolean = true,
     ): PartyCorrection {
         val drift = localPositionMs - expectedPositionMs
         val distance = abs(drift)
@@ -55,7 +74,7 @@ internal object PartySync {
         val threshold = if (nudging) NUDGE_STOP_MS else NUDGE_START_MS
         return when {
             distance > SEEK_THRESHOLD_MS -> PartyCorrection.Seek(expectedPositionMs)
-            distance > threshold -> {
+            distance > threshold && allowNudge -> {
                 val factor = if (drift > 0L) 1f - NUDGE_FACTOR else 1f + NUDGE_FACTOR
                 PartyCorrection.Nudge(playback.rate * factor)
             }
@@ -81,6 +100,92 @@ internal object PartySync {
             else -> null
         }
     }
+
+    fun pendingApply(pendingPaused: Boolean, shouldPlay: Boolean, isPlaying: Boolean, driftMs: Long): PendingApply = when {
+        shouldPlay == pendingPaused -> PendingApply.Superseded
+        isPlaying == pendingPaused -> PendingApply.Waiting
+        // Paused: "applied" means the paused frame is within the paused
+        // tolerance, not merely the play state (playing keeps the seek threshold).
+        abs(driftMs) > (if (pendingPaused) PAUSED_TOLERANCE_MS else SEEK_THRESHOLD_MS) -> PendingApply.Seeking
+        else -> PendingApply.Applied
+    }
+
+    const val REPORT_STALE_MS = 30_000L
+    const val MEMBER_SYNCED_MS = 1_000L
+    const val MEMBER_CATCH_UP_MS = 15_000L
+
+    /**
+     * Same rule as browser-site memberSync(): a report older than 30 s is stale;
+     * buffering/loading wins; "behind" (watching alone or catching up alone) is
+     * unsynced; otherwise the extrapolated position decides.
+     */
+    fun memberSync(presence: PartyPresence?, playback: PartyPlayback?, mediaKey: String, nowMs: Long): MemberSyncInfo {
+        if (presence == null || (presence.mediaKey != null && presence.mediaKey != mediaKey)) return MemberSyncInfo(MemberSync.Unknown)
+        // Deliberately independent: no drift shown, never counted as out of sync.
+        if (presence.solo == true) return MemberSyncInfo(MemberSync.Solo)
+        if (presence.status == PartyMemberStatus.Loading || presence.status == PartyMemberStatus.Buffering) return MemberSyncInfo(MemberSync.Buffering)
+        val reported = presence.positionMs
+        val at = presence.positionAt
+        if (reported == null || at == null) {
+            return MemberSyncInfo(if (presence.status == PartyMemberStatus.Behind) MemberSync.Unsynced else MemberSync.Unknown)
+        }
+        if (nowMs - at > REPORT_STALE_MS) return MemberSyncInfo(MemberSync.Stale)
+        val position = reported + if (presence.playing == true) (nowMs - at).coerceAtLeast(0L) else 0L
+        val drift = playback?.let { position - expectedPositionMs(it, nowMs) }
+        val state = when {
+            presence.status == PartyMemberStatus.Behind -> MemberSync.Unsynced
+            drift == null -> MemberSync.Unknown
+            abs(drift) <= MEMBER_SYNCED_MS -> MemberSync.Synced
+            abs(drift) <= MEMBER_CATCH_UP_MS -> MemberSync.CatchingUp
+            else -> MemberSync.Unsynced
+        }
+        return MemberSyncInfo(state, position, drift)
+    }
+
+    fun memberSyncLabel(info: MemberSyncInfo): String {
+        val drift = info.driftMs?.let { " (${formatDrift(it)})" }.orEmpty()
+        return when (info.state) {
+            MemberSync.Synced -> "Synchron$drift"
+            MemberSync.CatchingUp -> "Holt auf$drift"
+            MemberSync.Buffering -> "Puffert"
+            MemberSync.Unsynced -> "Unsynchron$drift"
+            MemberSync.Solo -> "Allein"
+            MemberSync.Stale -> "Status veraltet"
+            MemberSync.Unknown -> ""
+        }
+    }
+
+    fun formatDrift(driftMs: Long): String {
+        val sign = if (driftMs < 0) "−" else "+"
+        val ms = abs(driftMs)
+        return if (ms < 60_000L) {
+            val tenths = (ms + 50L) / 100L
+            "$sign${tenths / 10},${tenths % 10} s"
+        } else {
+            val seconds = (ms + 500L) / 1_000L
+            "$sign${seconds / 60}:${(seconds % 60).toString().padStart(2, '0')}"
+        }
+    }
+
+    /**
+     * Safety net after a frame-accurate seek: the host confirms its real
+     * paused position once per revision only if an exact seek was already
+     * tried for this revision and the player settled (no seek within
+     * SEEK_SETTLE, position stable, not buffering) but still stands more than
+     * PAUSED_TOLERANCE_MS from the target (keyframe-only fallback, imprecise
+     * stream). Not for coordinator waits; bounded, so no seek or publish loop.
+     */
+    fun shouldConfirmPausedPosition(
+        isHost: Boolean,
+        playback: PartyPlayback,
+        isPlaying: Boolean,
+        settled: Boolean,
+        stable: Boolean,
+        actualMs: Long,
+        alreadyConfirmed: Boolean,
+        exactAttempted: Boolean,
+    ): Boolean = isHost && playback.paused && !playback.waiting && !isPlaying && settled && stable && !alreadyConfirmed &&
+        exactAttempted && abs(actualMs - playback.positionMs) > PAUSED_TOLERANCE_MS
 
     fun ownSeek(targetMs: Long, partyPositionMs: Long, behind: Boolean): OwnSeek = when {
         targetMs < partyPositionMs - REJOIN_GAP_MS -> OwnSeek.Behind(targetMs)

@@ -97,6 +97,7 @@ supabase-realtime = { module = "io.github.jan-tennert.supabase:realtime-kt", ver
 quickjs-kt = { module = "io.github.dokar3:quickjs-kt", version.ref = "quickjsKt" }
 ksoup = { module = "com.fleeksoft.ksoup:ksoup", version.ref = "ksoup" }
 jna = { module = "net.java.dev.jna:jna", version.ref = "jna" }
+jnaplatform = { module = "net.java.dev.jna:jna-platform", version.ref = "jna" }
 reorderable = { module = "sh.calvin.reorderable:reorderable", version.ref = "reorderable" }
 desugar-jdk-libs = { module = "com.android.tools:desugar_jdk_libs", version.ref = "desugarJdkLibs" }
 sentry-android = { module = "io.sentry:sentry-android", version.ref = "sentry" }

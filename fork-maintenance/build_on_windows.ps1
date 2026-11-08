@@ -1,11 +1,15 @@
 [CmdletBinding()]
 param(
-    [string]$RepoPath = $(if (Test-Path (Join-Path (Split-Path -Parent $PSScriptRoot) 'gradlew.bat')) { Split-Path -Parent $PSScriptRoot } else { Join-Path (Split-Path -Parent $PSScriptRoot) 'NuvioDesktop' }),
+    [string]$RepoPath,
     [string]$WebView2Path,
     [switch]$Msi,
     [switch]$AllowUnconfiguredBuild
 )
 $ErrorActionPreference = 'Stop'
+if (!$PSBoundParameters.ContainsKey('RepoPath')) {
+    $parent = Split-Path -Parent $PSScriptRoot
+    $RepoPath = if (Test-Path -LiteralPath (Join-Path $parent 'gradlew.bat')) { $parent } else { Join-Path $parent 'NuvioDesktop' }
+}
 $repo = (Resolve-Path -LiteralPath $RepoPath).Path
 if (-not (Test-Path -LiteralPath (Join-Path $repo 'gradlew.bat'))) { throw 'Run this against the NuvioDesktop checkout.' }
 $previousGradleHome = $env:GRADLE_USER_HOME
@@ -20,6 +24,10 @@ try {
             if (-not [Environment]::GetEnvironmentVariable($name) -and $text -notmatch "(?m)^\s*$name\s*=\s*\S+") {
                 throw "$name missing. Set the public backend configuration. -AllowUnconfiguredBuild permits diagnostic packaging only."
             }
+        }
+        # Empty IntroDB configuration silently disables "Skip intro" (fail fast).
+        if ($text -notmatch '(?m)^\s*INTRODB_API_URL\s*=\s*https://\S+') {
+            throw 'INTRODB_API_URL (https) missing in local.properties. Skip intro would be disabled. -AllowUnconfiguredBuild permits diagnostic packaging only.'
         }
     }
     $arguments = @('--console=plain', '--stacktrace', '--no-configuration-cache', '--max-workers=4', '-Dorg.gradle.jvmargs=-Xmx4g', '-Pkotlin.daemon.jvmargs=-Xmx3g')

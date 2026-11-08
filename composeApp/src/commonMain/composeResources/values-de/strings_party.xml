@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="party_browser_more_options">Weitere Optionen</string>
+    <string name="party_playback_controls">Wiedergabesteuerung</string>
+    <string name="party_host_only_title">Nur Host darf steuern</string>
+</resources>

@@ -9,6 +9,8 @@ interface PlayerEngineController {
     fun play()
     fun pause()
     fun seekTo(positionMs: Long)
+    /** Frame-accurate seek where the engine supports it; otherwise [seekTo]. */
+    fun seekToExact(positionMs: Long) = seekTo(positionMs)
     fun trySeekTo(positionMs: Long): Boolean {
         seekTo(positionMs)
         return true

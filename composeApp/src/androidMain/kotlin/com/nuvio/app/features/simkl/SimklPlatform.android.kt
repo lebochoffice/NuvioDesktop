@@ -44,10 +44,10 @@ internal actual object SimklAuthStorage {
         preferences = context.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
     }
 
-    actual fun loadMetadataPayload(): String? =
+    actual fun loadMetadataPayload(profileId: Int?): String? =
         preferences?.getString(ProfileScopedKey.of(METADATA_KEY), null)
 
-    actual fun saveMetadataPayload(payload: String) {
+    actual fun saveMetadataPayload(payload: String, profileId: Int?) {
         preferences?.edit()?.putString(ProfileScopedKey.of(METADATA_KEY), payload)?.apply()
     }
 
@@ -58,6 +58,9 @@ internal actual object SimklAuthStorage {
     actual fun loadCodeVerifier(): String? = loadEncrypted(CODE_VERIFIER_KEY)
 
     actual fun saveCodeVerifier(value: String?) = saveEncrypted(CODE_VERIFIER_KEY, value)
+
+    actual fun loadDeviceSession(profileId: Int): String? = null
+    actual fun saveDeviceSession(profileId: Int, value: String?) = Unit
 
     actual fun removeProfile(profileId: Int) {
         preferences?.edit()

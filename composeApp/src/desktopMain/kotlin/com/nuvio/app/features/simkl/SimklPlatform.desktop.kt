@@ -2,6 +2,12 @@ package com.nuvio.app.features.simkl
 
 import com.nuvio.app.core.storage.DesktopStorage
 import com.nuvio.app.core.storage.ProfileScopedKey
+import com.sun.jna.Platform
+import com.sun.jna.platform.win32.Crypt32Util
+import com.sun.jna.platform.win32.WinCrypt
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption.ATOMIC_MOVE
+import java.nio.file.StandardCopyOption.REPLACE_EXISTING
 import java.security.MessageDigest
 import java.security.SecureRandom
 
@@ -25,12 +31,15 @@ internal actual object SimklAuthStorage {
     private const val codeVerifierKey = "simkl_code_verifier"
     private val store = DesktopStorage.store("nuvio_simkl_auth")
 
-    actual fun loadMetadataPayload(): String? =
-        store.getString(ProfileScopedKey.of(metadataKey))
+    actual fun loadMetadataPayload(profileId: Int?): String? =
+        store.getString(metadataProfileKey(profileId))
 
-    actual fun saveMetadataPayload(payload: String) {
-        store.putString(ProfileScopedKey.of(metadataKey), payload)
+    actual fun saveMetadataPayload(payload: String, profileId: Int?) {
+        store.putString(metadataProfileKey(profileId), payload)
     }
+
+    private fun metadataProfileKey(profileId: Int?): String =
+        if (profileId == null) ProfileScopedKey.of(metadataKey) else ProfileScopedKey.of(metadataKey, profileId)
 
     actual fun loadAccessToken(): String? =
         store.getString(ProfileScopedKey.of(accessTokenKey))
@@ -46,7 +55,15 @@ internal actual object SimklAuthStorage {
         store.putString(ProfileScopedKey.of(codeVerifierKey), value)
     }
 
+    private fun deviceSessionFile(profileId: Int) =
+        SimklDeviceSessionFile(DesktopStorage.rootDir.resolve("simkl-device-v2-$profileId.dat"))
+
+    actual fun loadDeviceSession(profileId: Int): String? = deviceSessionFile(profileId).load()
+
+    actual fun saveDeviceSession(profileId: Int, value: String?) = deviceSessionFile(profileId).save(value)
+
     actual fun removeProfile(profileId: Int) {
+        deviceSessionFile(profileId).save(null)
         store.removeAll(
             listOf(
                 ProfileScopedKey.of(metadataKey, profileId),
@@ -54,5 +71,45 @@ internal actual object SimklAuthStorage {
                 ProfileScopedKey.of(codeVerifierKey, profileId),
             ),
         )
+    }
+}
+
+internal class SimklDeviceSessionFile(private val file: java.nio.file.Path) {
+    fun load(): String? {
+        val stored = try {
+            Files.readAllBytes(file)
+        } catch (_: java.nio.file.NoSuchFileException) {
+            return null
+        }
+        val decoded = if (Platform.isWindows()) {
+            Crypt32Util.cryptUnprotectData(stored, WinCrypt.CRYPTPROTECT_UI_FORBIDDEN)
+        } else stored
+        return try {
+            decoded.decodeToString()
+        } finally {
+            decoded.fill(0)
+        }
+    }
+
+    fun save(value: String?) {
+        if (value == null) {
+            Files.deleteIfExists(file)
+            return
+        }
+        val decoded = value.encodeToByteArray()
+        try {
+            val stored = if (Platform.isWindows()) {
+                Crypt32Util.cryptProtectData(decoded, WinCrypt.CRYPTPROTECT_UI_FORBIDDEN)
+            } else decoded
+            val temporary = Files.createTempFile(file.parent, "simkl-device-", ".tmp")
+            try {
+                Files.write(temporary, stored)
+                Files.move(temporary, file, ATOMIC_MOVE, REPLACE_EXISTING)
+            } finally {
+                Files.deleteIfExists(temporary)
+            }
+        } finally {
+            decoded.fill(0)
+        }
     }
 }

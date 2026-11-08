@@ -195,6 +195,10 @@ internal fun PlayerScreenRuntime.toggleFromNativeControls(revealControls: Boolea
 }
 
 internal fun PlayerScreenRuntime.applyNativePlaybackState(play: Boolean) {
+    if (partyBlocksControl()) {
+        if (shouldPlay) playerController?.play() else playerController?.pause()
+        return
+    }
     if (!isPartyControlLocked) {
         val restart = play && playbackSnapshot.isEnded
         shouldPlay = play

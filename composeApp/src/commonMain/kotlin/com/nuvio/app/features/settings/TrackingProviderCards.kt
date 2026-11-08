@@ -78,6 +78,7 @@ import kotlinx.coroutines.launch
 import nuvio.composeapp.generated.resources.Res
 import nuvio.composeapp.generated.resources.action_cancel
 import nuvio.composeapp.generated.resources.settings_simkl_authorization_expired
+import nuvio.composeapp.generated.resources.settings_simkl_authorization_denied
 import nuvio.composeapp.generated.resources.settings_simkl_authorization_revoked
 import nuvio.composeapp.generated.resources.settings_simkl_connect
 import nuvio.composeapp.generated.resources.settings_simkl_connected_as
@@ -87,6 +88,7 @@ import nuvio.composeapp.generated.resources.settings_simkl_disconnect
 import nuvio.composeapp.generated.resources.settings_simkl_disconnect_description
 import nuvio.composeapp.generated.resources.settings_simkl_finish_sign_in
 import nuvio.composeapp.generated.resources.settings_simkl_invalid_callback
+import nuvio.composeapp.generated.resources.settings_simkl_invalid_client_id
 import nuvio.composeapp.generated.resources.settings_simkl_missing_credentials
 import nuvio.composeapp.generated.resources.settings_simkl_open_login
 import nuvio.composeapp.generated.resources.settings_simkl_open_pin
@@ -97,6 +99,7 @@ import nuvio.composeapp.generated.resources.settings_simkl_sign_in_description
 import nuvio.composeapp.generated.resources.settings_simkl_sign_in_failed
 import nuvio.composeapp.generated.resources.settings_simkl_sync_info_action
 import nuvio.composeapp.generated.resources.settings_simkl_sync_now
+import nuvio.composeapp.generated.resources.settings_simkl_token_storage_failed
 import nuvio.composeapp.generated.resources.settings_simkl_visit
 import nuvio.composeapp.generated.resources.settings_mdblist_disconnect_description
 import nuvio.composeapp.generated.resources.settings_tracking_approval_redirect
@@ -488,7 +491,7 @@ internal fun TrackingProviderCard(
                     TrackingBrandPrimaryButton(
                         label = connectLabel,
                         loading = isLoading,
-                        enabled = credentialsConfigured && !isLoading,
+                        enabled = trackingConnectEnabled(credentialsConfigured, isLoading),
                         onClick = {
                             actionScope.launch { openUrl(onConnectRequested()) }
                         },
@@ -842,6 +845,9 @@ private fun TrackingBrand.cardBrush(): Brush = when (this) {
 @Composable
 private fun simklErrorMessage(error: SimklAuthError?): String? = when (error) {
     null, SimklAuthError.MISSING_CLIENT_ID -> null
+    SimklAuthError.INVALID_CLIENT_ID -> stringResource(Res.string.settings_simkl_invalid_client_id)
+    SimklAuthError.AUTHORIZATION_DENIED -> stringResource(Res.string.settings_simkl_authorization_denied)
+    SimklAuthError.TOKEN_STORAGE_FAILED -> stringResource(Res.string.settings_simkl_token_storage_failed)
     SimklAuthError.INVALID_CALLBACK,
     SimklAuthError.INVALID_CALLBACK_STATE,
     -> stringResource(Res.string.settings_simkl_invalid_callback)

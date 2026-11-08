@@ -26,6 +26,8 @@ internal sealed interface AppDeepLink {
     data class Party(
         val code: String,
     ) : AppDeepLink
+
+    data object InvalidPartyInvitation : AppDeepLink
 }
 
 internal object AppDeepLinkRepository {
@@ -36,6 +38,10 @@ internal object AppDeepLinkRepository {
         parseAppDeepLink(url)?.let { deepLink ->
             _pendingDeepLink.value = deepLink
         }
+    }
+
+    fun rejectPartyInvitation() {
+        _pendingDeepLink.value = AppDeepLink.InvalidPartyInvitation
     }
 
     fun markConsumed(deepLink: AppDeepLink) {

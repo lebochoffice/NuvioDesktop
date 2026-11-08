@@ -8,6 +8,7 @@ import kotlinx.serialization.SerializationException
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonElement
 
 internal data class DebridApiResponse<T>(
     val status: Int,
@@ -28,6 +29,24 @@ internal object DebridApiJson {
 
 internal object TorboxApiClient {
     private const val BASE_URL = "https://api.torbox.app"
+    // Raw JSON intentionally: the official OpenAPI currently leaves response
+    // schemas unspecified. Do not guess playlist/token fields or auto-share.
+    suspend fun createStream(
+        apiKey: String, torrentId: Int, fileId: Int,
+        audioIndex: Int = 0, resolutionIndex: Int? = null,
+    ): DebridApiResponse<JsonElement> = request(
+        method = "GET",
+        url = "$BASE_URL/v1/api/stream/createstream?${torboxCreateStreamQuery(torrentId, fileId, audioIndex, resolutionIndex)}",
+        apiKey = apiKey,
+    )
+
+    suspend fun getStreamData(
+        apiKey: String, fileToken: String, presignedToken: String,
+    ): DebridApiResponse<JsonElement> = request(
+        method = "GET",
+        url = "$BASE_URL/v1/api/stream/getstreamdata?${torboxStreamDataQuery(fileToken, presignedToken)}",
+        apiKey = apiKey,
+    )
     // Keep each page bounded; season packs can contain large file arrays.
     private const val cloudListResponseMaxBytes = 16 * 1024 * 1024
 

@@ -3,6 +3,8 @@ package com.nuvio.app.features.party
 import co.touchlab.kermit.Logger
 import com.nuvio.app.core.auth.AuthRepository
 import com.nuvio.app.core.auth.AuthState
+import com.nuvio.app.core.network.SupabaseProvider
+import io.github.jan.supabase.auth.auth
 import com.nuvio.app.core.network.ServerConfigurationRepository
 import com.nuvio.app.core.sync.AppForegroundMonitor
 import com.nuvio.app.core.sync.AppVisibility
@@ -71,6 +73,79 @@ object PartyRepository {
     private val _sharedStream = MutableStateFlow<PartyStream?>(null)
     val sharedStream: StateFlow<PartyStream?> = _sharedStream.asStateFlow()
 
+    // Latest guest proposal of a video link (host only, memory only). It is
+    // applied solely by the host's explicit confirmation in the party panel.
+    private val _hlsSuggestion = MutableStateFlow<PartyHlsSuggestion?>(null)
+    val hlsSuggestion: StateFlow<PartyHlsSuggestion?> = _hlsSuggestion.asStateFlow()
+    private var hlsSuggestionId = 0
+
+    fun dismissHlsSuggestion(suggestion: PartyHlsSuggestion): Boolean =
+        _hlsSuggestion.compareAndSet(suggestion, null)
+
+    private val _mediaRequest = MutableStateFlow<PartyMediaRequest?>(null)
+    internal val mediaRequest = _mediaRequest.asStateFlow()
+    private var mediaRequestId = 0
+
+    internal suspend fun requestMedia(expectedParty: ActiveParty, media: PartyMedia): Boolean = withContext(dispatcher) {
+        val party = _state.value.party ?: return@withContext false
+        val hostId = party.hostMemberId ?: return@withContext false
+        if (party.id != expectedParty.id || party.memberId != expectedParty.memberId ||
+            hostId != expectedParty.hostMemberId || party.media.key != expectedParty.media.key ||
+            !party.canRequestMedia(media)) return@withContext false
+        val target = media.forMediaRequest() ?: return@withContext false
+        runRemote {
+            channel?.sendIfSubscribed("media_change_request", buildJsonObject {
+                put("party_id", party.id)
+                put("member_id", party.memberId)
+                put("target_member_id", hostId)
+                put("current_media_key", party.media.key)
+                put("media", PartyApi.json.encodeToJsonElement(PartyMedia.serializer(), target))
+            }) == true
+        } == true
+    }
+
+    internal fun dismissMediaRequest(id: Double) {
+        val request = _mediaRequest.value ?: return
+        val party = _state.value.party ?: return
+        if (id == request.id.toDouble() && request.isCurrent(party)) _mediaRequest.compareAndSet(request, null)
+    }
+
+    // Shared start (host announcement in server time); display only for members.
+    private val _countdown = MutableStateFlow<PartyCountdown?>(null)
+    val countdown: StateFlow<PartyCountdown?> = _countdown.asStateFlow()
+
+    fun startCountdown(seconds: Int) {
+        scope.launch {
+            val party = _state.value.party ?: return@launch
+            if (!party.isHost) return@launch
+            val length = seconds.coerceIn(PARTY_COUNTDOWN_MIN_S, PARTY_COUNTDOWN_MAX_S)
+            val next = PartyCountdown(clock.nowMs() + length * 1_000L, length, party.media.key)
+            _countdown.value = next
+            runCatching {
+                channel?.send("countdown", buildJsonObject {
+                    put("member_id", party.memberId)
+                    put("media_key", next.mediaKey)
+                    put("start_at", next.startAt)
+                    put("seconds", next.seconds)
+                })
+            }
+        }
+    }
+
+    fun cancelCountdown() {
+        scope.launch {
+            val party = _state.value.party ?: return@launch
+            val running = _countdown.value ?: return@launch
+            _countdown.value = null
+            if (party.isHost && running.mediaKey == party.media.key) {
+                runCatching { channel?.send("countdown", buildJsonObject { put("member_id", party.memberId); put("cancel", true) }) }
+            }
+        }
+    }
+
+    /** Local end of a finished countdown (no broadcast). */
+    fun clearCountdown() { _countdown.value = null }
+
     private val _enabled = MutableStateFlow(true)
     val available: StateFlow<Boolean> = combine(ServerConfigurationRepository.active, _enabled) { server, enabled ->
         server.capabilities.watchParty && enabled
@@ -86,6 +161,8 @@ object PartyRepository {
     private var resumedAt: TimeMark? = null
     private val ignoredWaiting = mutableSetOf<String>()
     private var rejoining = false
+    private val commands = PartyCommandLedger()
+    private var appliedReported: String? = null
 
     init {
         scope.launch {
@@ -170,20 +247,32 @@ object PartyRepository {
         }
     }
 
-    fun setSharing(enabled: Boolean) {
+    fun setSharing(enabled: Boolean) = changeStreamSharing(enabled, browser = false)
+
+    fun setBrowserSharing(enabled: Boolean) = changeStreamSharing(enabled, browser = true)
+
+    private fun changeStreamSharing(enabled: Boolean, browser: Boolean) {
+        val requestedIn = _state.value.party ?: return
         scope.launch {
             val party = _state.value.party ?: return@launch
-            if (!party.isHost || party.sharing == enabled) return@launch
-            updateParty { it.copy(sharing = enabled) }
-            if (!enabled) sendStream(null)
+            if (!party.isHost || party.id != requestedIn.id || party.memberId != requestedIn.memberId) return@launch
+            if ((if (browser) party.browserSharing else party.sharing) == enabled) return@launch
+            val next = if (browser) party.copy(browserSharing = enabled) else party.copy(sharing = enabled)
+            updateParty { next }
+            if (!enabled) {
+                val cached = _sharedStream.value?.takeIf { it.mediaKey == next.media.key }
+                val offer = next.streamOffer(cached, cached?.browserHls)
+                if (offer != _sharedStream.value) sendStream(offer)
+            }
         }
     }
 
-    fun shareStream(stream: PartyStream?) {
+    fun shareStream(partyId: String, memberId: String, mediaKey: String, desktop: PartyStream?, browser: PartyBrowserHls?) {
         scope.launch {
             val party = _state.value.party ?: return@launch
-            if (!party.isHost || !party.sharing || stream == _sharedStream.value) return@launch
-            sendStream(stream)
+            if (!party.isHost || party.id != partyId || party.memberId != memberId || party.media.key != mediaKey) return@launch
+            val offer = party.streamOffer(desktop, browser)
+            if (offer != _sharedStream.value) sendStream(offer)
         }
     }
 
@@ -192,11 +281,26 @@ object PartyRepository {
         scope.launch { publish(paused = paused, positionMs = positionMs, rate = rate, waiting = false, at = at) }
     }
 
+    /**
+     * The local player reached a revision the host sequenced from a guest
+     * command. Sent once per command; informational for the guest only.
+     */
+    fun reportApplied(commandId: String, seq: Long) {
+        scope.launch {
+            val party = _state.value.party ?: return@launch
+            val current = _playback.value ?: return@launch
+            if (!party.isHost || current.commandId != commandId || current.seq != seq || appliedReported == commandId) return@launch
+            appliedReported = commandId
+            runCatching { channel?.send("ack", ackPayload(party, commandId, current.originMemberId, "applied", seq, null)) }
+        }
+    }
+
     fun publishMedia(media: PartyMedia, positionMs: Long) {
         scope.launch {
             val party = _state.value.party ?: return@launch
             if (media == party.media || !party.isHost) return@launch
             val sameContent = media.key == party.media.key
+            if (!sameContent) _sharedStream.value = null
             updateParty { it.copy(media = media) }
             val next = if (sameContent) {
                 _playback.value
@@ -210,10 +314,13 @@ object PartyRepository {
         }
     }
 
-    fun setLocalStatus(status: PartyMemberStatus, mediaKey: String?, behindMs: Long? = null) {
+    fun setLocalStatus(status: PartyMemberStatus, mediaKey: String?, behindMs: Long? = null, solo: Boolean = false) {
         scope.launch {
             val party = _state.value.party ?: return@launch
-            val next = PartyPresence(memberId = party.memberId, status = status, mediaKey = mediaKey, behindMs = behindMs)
+            // Keep the last position report; a status change does not clear it.
+            val previous = localPresence?.takeIf { it.mediaKey == mediaKey }
+            val next = PartyPresence(memberId = party.memberId, status = status, mediaKey = mediaKey, behindMs = behindMs,
+                positionMs = previous?.positionMs, positionAt = previous?.positionAt, playing = previous?.playing, solo = solo.takeIf { it })
             if (next == localPresence) return@launch
             localPresence = next
             if (status == PartyMemberStatus.Ready) ignoredWaiting.remove(party.memberId)
@@ -223,6 +330,35 @@ object PartyRepository {
                 delay(250)
                 runCatching { channel?.send("status", encodePresence(next)) }
             }
+        }
+    }
+
+    /**
+     * Sparse position report for the members' sync display (about every 10 s
+     * from the player). Informational only: it rides on the existing "status"
+     * event, is never treated as a playback command and is ignored by older
+     * clients.
+     */
+    fun reportPosition(positionMs: Long, playing: Boolean) {
+        scope.launch {
+            val party = _state.value.party ?: return@launch
+            val base = localPresence?.takeIf { it.mediaKey == party.media.key } ?: return@launch
+            val next = base.copy(positionMs = positionMs.coerceAtLeast(0L), positionAt = clock.nowMs(), playing = playing)
+            localPresence = next
+            updateParty { it.copy(presence = it.presence + (party.memberId to next)) }
+            runCatching { channel?.send("status", encodePresence(next)) }
+        }
+    }
+
+    /**
+     * "Alle synchronisieren" (host): asks every member for an immediate status
+     * report through the existing state_request, so the host sees at once who
+     * reached the freshly published party time.
+     */
+    fun requestStatusReports() {
+        scope.launch {
+            val party = _state.value.party ?: return@launch
+            if (party.isHost) requestState(party)
         }
     }
 
@@ -269,6 +405,8 @@ object PartyRepository {
         ignoredWaiting.clear()
         waitStartedAt = null
         resumedAt = null
+        commands.clear()
+        appliedReported = null
         _playback.value = playback?.takeIf { it.mediaKey == null || it.mediaKey == party.media.key }
         _state.value = PartyUiState(party = party)
         session.launch {
@@ -294,13 +432,17 @@ object PartyRepository {
         persistJob?.cancel()
         persistJob = null
         presenceJob = null
-        channel?.close()
+        val closingChannel = channel
         channel = null
         localPresence = null
         _playback.value = null
         _sharedStream.value = null
+        _hlsSuggestion.value = null
+        _mediaRequest.value = null
+        _countdown.value = null
         _state.value = PartyUiState()
         PartyChat.stop()
+        closingChannel?.close()
     }
 
     private fun finish(event: PartyEvent) {
@@ -325,7 +467,7 @@ object PartyRepository {
         runCatching { channel?.track(presence) }
         runCatching { channel?.send("status", presence) }
         _playback.value?.let { current -> runCatching { channel?.send("state", encodePlayback(current)) } }
-        if (party.isHost && party.sharing) _sharedStream.value?.let { sendStream(it) }
+        if (party.isHost) sendStream(_sharedStream.value)
         requestState(party)
         PartyChat.refresh()
     }
@@ -334,10 +476,11 @@ object PartyRepository {
         val party = _state.value.party ?: return
         when (event) {
             "state" -> decode(payload, PartyPlayback.serializer())?.let(::accept)
+            "command" -> onCommand(party, payload)
             "state_request" -> {
                 if (payload.string("member_id") == party.memberId) return
                 runCatching { channel?.send("status", encodePresence(ownPresence(party))) }
-                if (party.isHost && party.sharing) _sharedStream.value?.let { sendStream(it) }
+                if (party.isHost) sendStream(_sharedStream.value)
                 val current = _playback.value ?: return
                 runCatching { channel?.send("state", encodePlayback(current)) }
             }
@@ -365,14 +508,101 @@ object PartyRepository {
             }
             "stream" -> {
                 if (party.isHost || payload.string("member_id") != party.hostMemberId) return
-                _sharedStream.value = payload["stream"]
+                val incoming = payload["stream"]
                     ?.takeIf { it !is JsonNull }
                     ?.let { decode(it, PartyStream.serializer()) }
-                    ?.takeIf { isShareableStreamUrl(it.url) }
+                if (incoming != null && incoming.mediaKey != party.media.key) return
+                // An HLS-only offer revokes the original; HLS renewals leave it alone.
+                _sharedStream.value = incoming?.forDesktop()
+            }
+            "countdown" -> {
+                if (party.isHost) return
+                when (val signal = partyCountdownFrom(payload.string("member_id"), party.hostMemberId, party.media.key, payload, clock.nowMs())) {
+                    PartyCountdownSignal.Cancel -> _countdown.value = null
+                    is PartyCountdownSignal.Start -> _countdown.value = signal.countdown
+                    null -> Unit
+                }
+            }
+            "media_change_request" -> {
+                // This is an informational request. The channel does not
+                // authenticate the member_id in the payload.
+                if (!party.isHost || payload.string("target_member_id") != party.memberId ||
+                    payload.string("party_id") != party.id || payload.string("current_media_key") != party.media.key) return
+                val memberId = payload.string("member_id") ?: return
+                if (memberId == party.memberId || party.member(memberId) == null) return
+                val target = payload["media"]?.let { decode(it, PartyMedia.serializer()) }?.forMediaRequest() ?: return
+                if (target.key == party.media.key) return
+                _mediaRequest.value = PartyMediaRequest(++mediaRequestId, party.id, party.memberId, memberId, party.media.key, target)
+            }
+            "stream_suggest" -> {
+                // Realtime sender identities are not verified by the server: the
+                // name is display only and nothing is shared before the host
+                // confirms and the link passes the desktop playlist check.
+                val memberId = payload.string("member_id") ?: return
+                val url = payload.string("url")?.trim()?.takeIf { it.length <= PARTY_HOST_HLS_MAX_LENGTH } ?: return
+                val member = party.member(memberId)
+                if (!party.isHost || memberId == party.memberId || member == null) return
+                if (payload.string("media_key") != party.media.key || !isPublicHttpsUrl(url)) return
+                _hlsSuggestion.value = PartyHlsSuggestion(++hlsSuggestionId, memberId, member.displayName, url, party.media.key)
             }
             "chat" -> PartyChat.receive(payload)
         }
     }
+
+    // Only the host sequences. Realtime payload identities are not verified by
+    // the server: membership/host-only are checked against the last server
+    // snapshot, and the result is persisted by the host's own authorized RPC.
+    private suspend fun onCommand(party: ActiveParty, payload: JsonObject) {
+        if (!party.isHost) return
+        val command = decode(payload, PartyCommand.serializer()) ?: return
+        if (!PartyCommands.validId(command.commandId)) return
+        commands.result(command.commandId)?.let { previous ->
+            // Retry of a known command ID: answer again, never execute twice.
+            runCatching { channel?.send("ack", ackPayload(party, command.commandId, command.memberId, previous)) }
+            return
+        }
+        val current = _playback.value
+        val result = when (val decision = PartyCommands.decide(command, party, current)) {
+            PartyCommandDecision.Accept -> {
+                // Remember before publishing: publish suspends while sending,
+                // and a retry arriving meanwhile must not execute again. The
+                // seq is assigned synchronously (single-threaded dispatcher).
+                val accepted = PartyCommandResult(accepted = true, seq = (current?.seq ?: 0L) + 1L)
+                commands.remember(command.commandId, accepted)
+                publish(
+                    paused = command.paused,
+                    positionMs = command.positionMs,
+                    rate = current?.rate ?: 1f,
+                    waiting = false,
+                    origin = command.memberId,
+                    commandId = command.commandId,
+                )
+                val next = _playback.value?.takeIf { it.commandId == command.commandId }
+                if (next != null) {
+                    val action = PartySync.actionOf(current, next)
+                    val name = party.member(command.memberId)?.displayName
+                    if (action != null && name != null) _notices.tryEmit(PartyNotice(name, action, next.positionMs, next.rate))
+                }
+                accepted
+            }
+            is PartyCommandDecision.Reject -> PartyCommandResult(accepted = false, seq = current?.seq, reason = decision.reason)
+                .also { commands.remember(command.commandId, it) }
+        }
+        runCatching { channel?.send("ack", ackPayload(party, command.commandId, command.memberId, result)) }
+    }
+
+    private fun ackPayload(party: ActiveParty, commandId: String, origin: String, result: PartyCommandResult): JsonObject =
+        ackPayload(party, commandId, origin, if (result.accepted) "accepted" else "rejected", result.seq, result.reason)
+
+    private fun ackPayload(party: ActiveParty, commandId: String, origin: String?, status: String, seq: Long?, reason: String?): JsonObject =
+        buildJsonObject {
+            put("command_id", commandId)
+            put("member_id", party.memberId)
+            origin?.let { put("origin_member_id", it) }
+            put("status", status)
+            seq?.let { put("seq", it) }
+            reason?.let { put("reason", it) }
+        }
 
     private fun onPresence(joins: Map<String, Presence>, leaves: Map<String, Presence>) {
         val party = _state.value.party ?: return
@@ -411,12 +641,17 @@ object PartyRepository {
             return
         }
         val name = party.member(memberId)?.displayName
-        if (memberId == party.hostMemberId) _sharedStream.value = null
+        val hostChanged = hostMemberId != null && hostMemberId != party.hostMemberId
+        if (memberId == party.hostMemberId || hostChanged) _sharedStream.value = null
+        if (_hlsSuggestion.value?.memberId == memberId) _hlsSuggestion.value = null
+        if (memberId == party.hostMemberId) _countdown.value = null
         updateParty { current ->
             current.copy(
                 members = current.members.filterNot { it.id == memberId },
                 presence = current.presence - memberId,
                 hostMemberId = hostMemberId ?: current.hostMemberId,
+                sharing = current.sharing && !hostChanged,
+                browserSharing = current.browserSharing && !hostChanged,
             )
         }
         ignoredWaiting.remove(memberId)
@@ -447,10 +682,14 @@ object PartyRepository {
             else -> return
         }
         val info = snapshot.party ?: return
+        val hostChanged = _state.value.party?.hostMemberId != info.hostMemberId
+        if (hostChanged) _sharedStream.value = null
         updateParty { current ->
             current.copy(
                 members = snapshot.members,
                 hostMemberId = info.hostMemberId,
+                sharing = current.sharing && !hostChanged,
+                browserSharing = current.browserSharing && !hostChanged,
                 maxMembers = info.maxMembers,
                 hostOnly = info.hostOnly,
                 presence = current.presence.filterKeys { key -> snapshot.members.any { it.id == key } },
@@ -467,9 +706,13 @@ object PartyRepository {
         if (changed) {
             _playback.value = playback?.takeIf { it.mediaKey == null || it.mediaKey == media.key }
             if (_sharedStream.value?.mediaKey != media.key) _sharedStream.value = null
+            if (_hlsSuggestion.value?.mediaKey != media.key) _hlsSuggestion.value = null
+            if (_countdown.value?.mediaKey != media.key) _countdown.value = null
             ignoredWaiting.clear()
             waitStartedAt = null
             _events.tryEmit(PartyEvent.MediaChanged(media))
+            // A stream offer can arrive before the media update on its own broadcast flow.
+            if (!party.isHost) sessionScope?.launch { requestState(party) }
         } else {
             playback?.let(::accept)
         }
@@ -486,9 +729,9 @@ object PartyRepository {
             if (current.waiting) ignoredWaiting += PartySync.waitingMemberIds(party, emptySet())
         }
         _playback.value = candidate
-        if (candidate.memberId == party.memberId) return
+        if (candidate.actorId == party.memberId) return
         val action = PartySync.actionOf(current, candidate) ?: return
-        val name = party.member(candidate.memberId)?.displayName ?: return
+        val name = party.member(candidate.actorId)?.displayName ?: return
         _notices.tryEmit(PartyNotice(name, action, candidate.positionMs, candidate.rate))
     }
 
@@ -498,11 +741,14 @@ object PartyRepository {
         rate: Float,
         waiting: Boolean,
         at: Long = clock.nowMs(),
+        origin: String? = null,
+        commandId: String? = null,
     ) {
         val party = _state.value.party ?: return
         if (!party.canControl) return
         val current = _playback.value
         val next = nextPlayback(party, paused, positionMs, rate, waiting, party.media.key, at)
+            .copy(originMemberId = origin, commandId = commandId)
         if (current != null && current.paused && !paused) {
             resumedAt = clock.mark()
             if (current.waiting && !waiting) ignoredWaiting += PartySync.waitingMemberIds(party, emptySet())
@@ -537,7 +783,8 @@ object PartyRepository {
         persistJob = sessionScope?.launch {
             delay(PERSIST_DELAY)
             val party = _state.value.party ?: return@launch
-            val playback = _playback.value ?: return@launch
+            // Command fields are wire-only; the stored row keeps the existing schema.
+            val playback = _playback.value?.copy(originMemberId = null, commandId = null) ?: return@launch
             runRemote { PartyApi.update(party.id, deviceId(), null, playback) }?.let { applySnapshot(it) }
         }
     }
@@ -611,7 +858,16 @@ object PartyRepository {
                         return@withLock
                     }
                     if (rejoined.memberId == party.memberId) {
-                        updateParty { it.copy(members = rejoined.members, hostMemberId = rejoined.hostMemberId) }
+                        val hostChanged = _state.value.party?.hostMemberId != rejoined.hostMemberId
+                        if (hostChanged) _sharedStream.value = null
+                        updateParty {
+                            it.copy(
+                                members = rejoined.members,
+                                hostMemberId = rejoined.hostMemberId,
+                                sharing = it.sharing && !hostChanged,
+                                browserSharing = it.browserSharing && !hostChanged,
+                            )
+                        }
                         return@withLock
                     }
                     val playback = _playback.value
@@ -628,6 +884,8 @@ object PartyRepository {
 
     private fun updateParty(transform: (ActiveParty) -> ActiveParty) {
         _state.update { state -> state.party?.let { state.copy(party = transform(it)) } ?: state }
+        val request = _mediaRequest.value ?: return
+        if (_state.value.party?.let(request::isCurrent) != true) _mediaRequest.compareAndSet(request, null)
     }
 
     private suspend fun <T> runRemote(block: suspend () -> T): T? =
@@ -644,7 +902,9 @@ object PartyRepository {
         val profile = ProfileRepository.state.value.activeProfile
         return PartyIdentity(
             deviceId = deviceId(),
-            displayName = profile?.name?.trim()?.takeIf { it.isNotEmpty() }?.take(40) ?: DEFAULT_NAME,
+            displayName = profile?.name?.trim()?.takeIf { it.isNotEmpty() }?.take(40)
+                ?: partyEmailName(runCatching { SupabaseProvider.client.auth.currentUserOrNull()?.email }.getOrNull())
+                ?: DEFAULT_NAME,
             avatarUrl = profile?.let { AvatarRepository.shareableImageUrl(it) }?.takeIf { it.startsWith("https://") && it.length <= 512 },
             avatarColor = profile?.avatarColorHex?.takeIf { COLOR_PATTERN.matches(it) },
             profileIndex = profile?.profileIndex,
@@ -655,6 +915,7 @@ object PartyRepository {
 
     private suspend fun sendStream(stream: PartyStream?) {
         val party = _state.value.party ?: return
+        if (!party.isHost || (stream != null && stream.mediaKey != party.media.key)) return
         _sharedStream.value = stream
         val payload = buildJsonObject {
             put("member_id", party.memberId)
@@ -666,8 +927,13 @@ object PartyRepository {
     private fun encodePlayback(playback: PartyPlayback): JsonObject =
         PartyApi.json.encodeToJsonElement(PartyPlayback.serializer(), playback).jsonObject
 
-    private fun encodePresence(presence: PartyPresence): JsonObject =
-        PartyApi.json.encodeToJsonElement(PartyPresence.serializer(), presence).jsonObject
+    // The host announces that it sequences guest commands; browsers then send
+    // "command" events instead of their own revisions.
+    private fun encodePresence(presence: PartyPresence): JsonObject {
+        val party = _state.value.party
+        val announced = if (party?.isHost == true && presence.memberId == party.memberId) presence.copy(commands = PartyCommands.PROTOCOL) else presence
+        return PartyApi.json.encodeToJsonElement(PartyPresence.serializer(), announced).jsonObject
+    }
 
     private fun <T> decode(element: JsonElement, serializer: KSerializer<T>): T? =
         runCatching { PartyApi.json.decodeFromJsonElement(serializer, element) }.getOrNull()
@@ -711,8 +977,22 @@ fun isValidPartyCode(input: String): Boolean = normalizePartyCode(input).length 
 fun formatPartyCode(code: String): String =
     normalizePartyCode(code).let { if (it.length == PARTY_CODE_LENGTH) "${it.take(3)} ${it.drop(3)}" else it }
 
-fun partyInviteLink(code: String): String =
-    if (ServerConfigurationRepository.active.value.isCustom) "nuvio://party/$code" else "https://nuvio.tv/party/$code"
+/** Browser watch party of this fork (Cloudflare Pages). Opens /party/<CODE>. */
+const val WATCH_PARTY_BROWSER_ORIGIN = "https://family-beta.nuvio-watch-friends.pages.dev"
+
+/** Production remains available through the explicit Gradle override. */
+private const val WATCH_PARTY_BROWSER_PRODUCTION_ORIGIN = "https://nuvio-watch-friends.pages.dev"
+
+/** Origin of this build: family preview unless production was selected. */
+val watchPartyBrowserOrigin: String
+    get() = PartyBrowserConfig.ORIGIN.takeIf { it == WATCH_PARTY_BROWSER_PRODUCTION_ORIGIN } ?: WATCH_PARTY_BROWSER_ORIGIN
+
+// "Watch in Nuvio": the original upstream invite (opens the Nuvio app).
+// "Watch in Browser" builds its own link from watchPartyBrowserOrigin.
+fun partyInviteLink(code: String): String = partyInviteLink(code, ServerConfigurationRepository.active.value.isCustom)
+
+internal fun partyInviteLink(code: String, customBackend: Boolean): String =
+    if (customBackend) "nuvio://party/$code" else "https://nuvio.tv/party/$code"
 
 const val PARTY_CODE_LENGTH = 6
 private const val PARTY_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"

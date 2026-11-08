@@ -1479,7 +1479,8 @@ void runEventLoop(Player *player) {
         switch (event->event_id) {
             case MPV_EVENT_LOG_MESSAGE: {
                 auto *msg = static_cast<mpv_event_log_message *>(event->data);
-                if (msg) NUVIO_LOG("mpv[%s] %s: %s", msg->level, msg->prefix, msg->text);
+                // mpv diagnostics can contain the shared source URL and request headers.
+                if (msg) NUVIO_LOG("mpv[%s] %s", msg->level, msg->prefix);
                 break;
             }
             case MPV_EVENT_END_FILE: {
@@ -1690,7 +1691,7 @@ JNIEXPORT jlong JNICALL NP(create)(
             if (!ev || ev->event_id == MPV_EVENT_NONE) break;
             if (ev->event_id == MPV_EVENT_LOG_MESSAGE) {
                 auto *m = static_cast<mpv_event_log_message *>(ev->data);
-                if (m) NUVIO_LOG("mpv[%s] %s: %s", m->level, m->prefix, m->text);
+                if (m) NUVIO_LOG("mpv[%s] %s", m->level, m->prefix);
             }
         }
         mpv_destroy(player->mpv);

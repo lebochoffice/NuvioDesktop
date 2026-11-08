@@ -1,12 +1,16 @@
 # No installation, deployment, execution-policy change or app launch.
 [CmdletBinding()]
 param(
-    [string]$RepoPath = $(if (Test-Path (Join-Path (Split-Path -Parent $PSScriptRoot) 'gradlew.bat')) { Split-Path -Parent $PSScriptRoot } else { Join-Path (Split-Path -Parent $PSScriptRoot) 'NuvioDesktop' }),
+    [string]$RepoPath,
     [string]$PythonPath,
     [string]$Branch = 'feature/watch-in-browser',
     [switch]$Check
 )
 $ErrorActionPreference = 'Stop'
+if (!$PSBoundParameters.ContainsKey('RepoPath')) {
+    $parent = Split-Path -Parent $PSScriptRoot
+    $RepoPath = if (Test-Path -LiteralPath (Join-Path $parent 'gradlew.bat')) { $parent } else { Join-Path $parent 'NuvioDesktop' }
+}
 Set-StrictMode -Version Latest
 
 function Assert-NativeSuccess([string]$Action) {

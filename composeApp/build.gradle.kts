@@ -66,12 +66,18 @@ abstract class GenerateRuntimeConfigsTask : DefaultTask() {
     @get:Input
     abstract val tmdbApiKey: Property<String>
 
+    @get:Input
+    abstract val partyBrowserOrigin: Property<String>
+
+    @get:Input
+    abstract val partyShareWorker: Property<String>
+
     @TaskAction
     fun generate() {
         val props = Properties()
         localPropertiesFile.asFile.orNull?.takeIf { it.exists() }?.inputStream()?.use { props.load(it) }
 
-        val outDir = outputDir.get().asFile
+        val outDir = outputDir.get().asFile.resolve("common")
         outDir.resolve("com/nuvio/app/core/network").apply {
             mkdirs()
             resolve("SupabaseConfig.kt").writeText(
@@ -123,10 +129,28 @@ abstract class GenerateRuntimeConfigsTask : DefaultTask() {
                 |
                 |object TraktConfig {
                 |    const val CLIENT_ID = "${props.getProperty("TRAKT_CLIENT_ID", "")}" 
-                |    const val CLIENT_SECRET = "${props.getProperty("TRAKT_CLIENT_SECRET", "")}" 
                 |    const val REDIRECT_URI = "${props.getProperty("TRAKT_REDIRECT_URI", "nuvio://auth/trakt")}" 
                 |}
                 """.trimMargin()
+            )
+        }
+
+        // Keep the legacy mobile authorization code flow separate from the
+        // Desktop artifact, even when a local legacy secret is configured.
+        outputDir.get().asFile.resolve("mobile/com/nuvio/app/features/trakt").apply {
+            mkdirs()
+            val secret = props.getProperty("TRAKT_CLIENT_SECRET", "").trim()
+            val literal = buildString {
+                append('"')
+                for (char in secret) {
+                    append("\\u")
+                    append(char.code.toString(16).padStart(4, '0'))
+                }
+                append('"')
+            }
+            resolve("TraktLegacyClientSecret.kt").writeText(
+                "package com.nuvio.app.features.trakt\n\n" +
+                    "internal actual val traktLegacyClientSecret: String? = $literal.takeIf { it.isNotBlank() }\n",
             )
         }
 
@@ -153,6 +177,22 @@ abstract class GenerateRuntimeConfigsTask : DefaultTask() {
                 |
                 |object DiscordConfig {
                 |    const val CLIENT_ID = "${props.getProperty("NUVIO_DISCORD_CLIENT_ID", "1538974392376369212")}" 
+                |}
+                """.trimMargin()
+            )
+        }
+
+        // Browser watch party origin for invitation links; validated at
+        // configuration time (family preview by default for this fork).
+        outDir.resolve("com/nuvio/app/features/party").apply {
+            mkdirs()
+            resolve("PartyBrowserConfig.kt").writeText(
+                """
+                |package com.nuvio.app.features.party
+                |
+                |object PartyBrowserConfig {
+                |    const val ORIGIN = "${partyBrowserOrigin.get()}"
+                |    const val SHARE_WORKER = "${partyShareWorker.get()}"
                 |}
                 """.trimMargin()
             )
@@ -555,6 +595,26 @@ fun runtimeConfigBoolean(key: String, default: Boolean): Boolean =
         else -> default
     }
 
+// Invitation links of the browser watch party. Only these two exact origins
+// are accepted: the family preview (default) and explicit production.
+// Both accept their alias or their full URL. Anything else fails the build.
+val partyBrowserProductionOrigin = "https://nuvio-watch-friends.pages.dev"
+val partyBrowserPreviewOrigin = "https://family-beta.nuvio-watch-friends.pages.dev"
+val partyBrowserOriginValue: String = when (val requested = providers.gradleProperty("nuvio.party.browserOrigin").orNull?.trim()?.trimEnd('/')) {
+    "production", partyBrowserProductionOrigin -> partyBrowserProductionOrigin
+    null, "", "preview", partyBrowserPreviewOrigin -> partyBrowserPreviewOrigin
+    else -> throw GradleException("nuvio.party.browserOrigin must be 'production', 'preview', $partyBrowserProductionOrigin or $partyBrowserPreviewOrigin (got '$requested').")
+}
+
+// Optional family share Worker (party-share-worker/). Empty by default: then
+// TorBox addresses with the account token are never shared. Only an exact
+// HTTPS origin without path, port or credentials is accepted.
+val partyShareWorkerValue: String = providers.gradleProperty("nuvio.party.shareWorker").orNull?.trim()?.trimEnd('/').orEmpty().also {
+    if (it.isNotEmpty() && !Regex("^https://[a-z0-9-]+(\\.[a-z0-9-]+)+$").matches(it)) {
+        throw GradleException("nuvio.party.shareWorker must be an https origin such as https://nuvio-party-share.example.workers.dev (got '$it').")
+    }
+}
+
 val generateRuntimeConfigs = tasks.register<GenerateRuntimeConfigsTask>("generateRuntimeConfigs") {
     outputDir.set(generatedRuntimeConfigDir)
     // NUVIO_BROWSER_PARTY_BRIDGE_V1: optional file must be unset if absent.
@@ -571,6 +631,8 @@ val generateRuntimeConfigs = tasks.register<GenerateRuntimeConfigsTask>("generat
     sentryDsn.set(runtimeConfigValue("SENTRY_DSN"))
     sentryDesktopDsn.set(runtimeConfigValue("SENTRY_DESKTOP_DSN"))
     tmdbApiKey.set(runtimeConfigValue("TMDB_API_KEY"))
+    partyBrowserOrigin.set(partyBrowserOriginValue)
+    partyShareWorker.set(partyShareWorkerValue)
     sentryEnvironment.set(
         when {
             requestedGradleTasks.any { "benchmark" in it } -> "benchmark"
@@ -727,6 +789,8 @@ val windowsPlayerBridgeArch = when (System.getProperty("os.arch").lowercase()) {
     else -> "x64"
 }
 val windowsPlayerBridgeSource = layout.projectDirectory.file("src/desktopMain/native/windows/player_bridge.cpp")
+val windowsPartyMsiSource = layout.projectDirectory.file("src/desktopMain/native/windows/party_protocol_msi.cpp")
+val windowsPartyMsiDll = layout.buildDirectory.file("native/windows/party_protocol_msi.dll")
 val windowsPlayerBridgeOutput = layout.buildDirectory.file("native/windows/player_bridge.dll")
 val windowsPlayerBridgeImportLib = layout.buildDirectory.file("native/windows/player_bridge.lib")
 val windowsPlayerBridgePdb = layout.buildDirectory.file("native/windows/player_bridge.pdb")
@@ -736,9 +800,12 @@ val windowsPlayerRuntimeOutput = layout.buildDirectory.dir("native/windows-runti
 if (isWindowsHost) {
     windowsPlayerBridgeOutput.get().asFile.parentFile.mkdirs()
 }
+// A relative SDK path is relative to the repository root. A bare File would
+// resolve against the Gradle daemon's working directory for exists() but
+// against composeApp/ in Copy/Sync, silently dropping WebView2Loader.dll.
 val windowsWebView2Root = providers.gradleProperty("nuvio.webview2.dir").orNull
     ?.takeIf { it.isNotBlank() }
-    ?.let(::File)
+    ?.let { rootProject.file(it) }
     ?: newestDirectory(File(System.getProperty("user.home"), ".nuget/packages/microsoft.web.webview2"))
     ?: File("__missing_webview2__")
 val windowsWebView2IncludeDir = File(windowsWebView2Root, "build/native/include")
@@ -840,6 +907,15 @@ val windowsPlayerBridgeCommand = if (missingWindowsPlayerBridgeInputs.isNotEmpty
         "D3d11.lib",
     ).joinToString(" ")
     val powershellCompileCommand = compileCommand.replace("\"", "__DQ__")
+    val msiDll = windowsPartyMsiDll.get().asFile
+    val partyMsiCompileCommand = listOf(
+        "cl", "/nologo", "/EHsc", "/std:c++17", "/MT", "/LD",
+        cmdQuote(windowsPartyMsiSource.asFile.absolutePath),
+        "/Fo${cmdQuote(msiDll.resolveSibling("party_protocol_msi.obj").absolutePath)}",
+        "/Fe${cmdQuote(msiDll.absolutePath)}",
+        "/link", "/IMPLIB:${cmdQuote(msiDll.resolveSibling("party_protocol_msi.lib").absolutePath)}",
+        "Msi.lib", "Advapi32.lib",
+    ).joinToString(" ").replace("\"", "__DQ__")
     val powershellCommand = """
         ${'$'}ErrorActionPreference = 'Stop'
         ${'$'}dq = [char]34
@@ -857,12 +933,15 @@ val windowsPlayerBridgeCommand = if (missingWindowsPlayerBridgeInputs.isNotEmpty
         ${'$'}vcvars = ([string]${'$'}vcvars).Trim()
         ${'$'}bat = ${psSingleQuote(windowsPlayerBridgeScript.get().asFile.absolutePath)}
         ${'$'}compile = ${psSingleQuote(powershellCompileCommand)}.Replace('__DQ__', ${'$'}dq)
+        ${'$'}compileMsi = ${psSingleQuote(partyMsiCompileCommand)}.Replace('__DQ__', ${'$'}dq)
         ${'$'}lines = @(
           '@echo off',
           ('set {0}VCVARS={1}{0}' -f ${'$'}dq, ${'$'}vcvars),
           ('call {0}%VCVARS%{0} >nul' -f ${'$'}dq),
           'if errorlevel 1 exit /b %errorlevel%',
           ${'$'}compile,
+          'if errorlevel 1 exit /b %errorlevel%',
+          ${'$'}compileMsi,
           'exit /b %ERRORLEVEL%'
         )
         Set-Content -LiteralPath ${'$'}bat -Value ${'$'}lines -Encoding ASCII
@@ -883,6 +962,7 @@ val buildWindowsPlayerBridge = tasks.register<Exec>("buildWindowsPlayerBridge") 
     notCompatibleWithConfigurationCache("Builds a host-local player bridge against WebView2 and libmpv for Windows.")
     enabled = isWindowsHost
     inputs.file(windowsPlayerBridgeSource)
+    inputs.file(windowsPartyMsiSource)
     if (windowsWebView2IncludeDir.exists()) {
         inputs.dir(windowsWebView2IncludeDir)
     }
@@ -892,7 +972,15 @@ val buildWindowsPlayerBridge = tasks.register<Exec>("buildWindowsPlayerBridge") 
     outputs.file(windowsPlayerBridgeOutput)
     outputs.file(windowsPlayerBridgeImportLib)
     outputs.file(windowsPlayerBridgePdb)
-    onlyIf { !windowsPlayerBridgeOutput.get().asFile.exists() }
+    outputs.file(windowsPartyMsiDll)
+    // Rebuild when the DLL is missing or older than player_bridge.cpp; a bare
+    // "exists" check silently packaged a stale bridge after source changes.
+    onlyIf {
+        val output = windowsPlayerBridgeOutput.get().asFile
+        val msiDll = windowsPartyMsiDll.get().asFile
+        !output.exists() || windowsPlayerBridgeSource.asFile.lastModified() > output.lastModified() ||
+            !msiDll.exists() || windowsPartyMsiSource.asFile.lastModified() > msiDll.lastModified()
+    }
     commandLine(windowsPlayerBridgeCommand)
 }
 
@@ -1088,6 +1176,7 @@ kotlin {
                 defaultSourceSet.kotlin.srcDir(fullCommonSourceDir)
             }
             defaultSourceSet.kotlin.srcDir(project.file(iosDistributionSourceDir))
+            defaultSourceSet.kotlin.srcDir(generatedRuntimeConfigDir.map { it.dir("mobile") })
             defaultSourceSet.dependencies {
                 implementation(libs.ktor.client.darwin)
                 if (iosDistribution == "full") {
@@ -1122,9 +1211,10 @@ kotlin {
     
     sourceSets {
         val commonMain by getting {
-            kotlin.srcDir(generatedRuntimeConfigDir)
+            kotlin.srcDir(generatedRuntimeConfigDir.map { it.dir("common") })
         }
         androidMain {
+            kotlin.srcDir(generatedRuntimeConfigDir.map { it.dir("mobile") })
             kotlin.srcDir(project.file(androidDistributionSourceDir))
             if (androidDistribution == "full") {
                 kotlin.srcDir(fullCommonSourceDir)
@@ -1190,6 +1280,7 @@ kotlin {
                 implementation(libs.ksoup)
                 implementation(libs.sentry.jvm)
                 implementation(libs.jna)
+                implementation(libs.jnaplatform)
                 implementation(files("libs/nuvio-engine-jvm-0.1.6.jar"))
             }
         }
@@ -1255,6 +1346,13 @@ kotlin {
             implementation("io.ktor:ktor-client-mock:${libs.versions.ktor.get()}")
         }
     }
+}
+
+// Resource-label assertions use English in the forked desktop test JVM only
+// (machines with a German system locale otherwise resolve German strings).
+tasks.withType<org.gradle.api.tasks.testing.Test>().matching { it.name == "desktopTest" }.configureEach {
+    systemProperty("user.language", "en")
+    systemProperty("user.country", "US")
 }
 
 tasks.matching {
@@ -1404,6 +1502,22 @@ fun publishWindowsMsiOutput(release: Boolean) {
         ?: finalMsi.takeIf { it.exists() }
         ?: error("Expected Windows MSI output in ${outputDir.absolutePath}")
 
+    val protocolScript = rootProject.file("fork-maintenance/register-windows-party-protocol.ps1")
+    fun runProtocolStep(step: String, vararg options: String) {
+        val process = ProcessBuilder(
+            "powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+            "-File", protocolScript.absolutePath, "-MsiPath", sourceMsi.absolutePath, *options,
+        ).redirectErrorStream(true).start()
+        val output = process.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }.trim()
+        val exitCode = process.waitFor()
+        if (exitCode != 0) {
+            throw GradleException("Windows MSI party protocol $step failed (exit $exitCode).\n$output")
+        }
+        if (output.isNotEmpty()) logger.lifecycle(output)
+    }
+    runProtocolStep("registration", "-SchemaActionDll", windowsPartyMsiDll.get().asFile.absolutePath)
+    runProtocolStep("verification", "-VerifyOnly")
+
     if (sourceMsi.canonicalFile != finalMsi.canonicalFile) {
         sourceMsi.copyTo(finalMsi, overwrite = true)
     }
@@ -1476,8 +1590,29 @@ tasks.matching { it.name == "packageMsi" }.configureEach {
     }
 }
 
+// Fork guard: IntroDbConfig.URL is generated from local.properties. When it is
+// empty, IntroDB (the only skip source for regular films/series) is silently
+// disabled and "Skip intro" never appears. Never package that by accident.
+val releaseIntroDbUrl = supabaseProps.getProperty("INTRODB_API_URL").orEmpty().trim()
+val allowMissingIntroDb = providers.gradleProperty("nuvio.allowMissingIntroDb").orNull == "true"
 tasks.matching { it.name == "packageReleaseMsi" }.configureEach {
     notCompatibleWithConfigurationCache("Windows MSI artifact publication uses script file operations.")
+    doFirst {
+        if (!releaseIntroDbUrl.startsWith("https://") && !allowMissingIntroDb) {
+            throw GradleException("INTRODB_API_URL missing or not https in local.properties; Skip intro would be disabled. Set it or pass -Pnuvio.allowMissingIntroDb=true for diagnostic builds only.")
+        }
+        // Without the WebView2 SDK the runtime Sync silently omits
+        // WebView2Loader.dll and the Windows player cannot start.
+        if (isWindowsHost && !windowsWebView2LoaderDll.exists()) {
+            throw GradleException("WebView2Loader.dll not found (${windowsWebView2LoaderDll.path}). Install the Microsoft.Web.WebView2 NuGet package or pass -Pnuvio.webview2.dir=<sdk>; the MSI would lack the player runtime.")
+        }
+        // Check what is actually packaged, not only the SDK: an up-to-date
+        // runtime directory from an earlier run may still lack the loader.
+        val stagedLoader = windowsPlayerRuntimeOutput.get().file("WebView2Loader.dll").asFile
+        if (isWindowsHost && !stagedLoader.exists()) {
+            throw GradleException("WebView2Loader.dll missing from the staged player runtime (${stagedLoader.path}); the MSI would not start the Windows player. Re-run with -Pnuvio.webview2.dir=<sdk>.")
+        }
+    }
     doLast {
         publishWindowsMsiOutput(release = true)
     }

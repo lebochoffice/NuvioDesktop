@@ -114,6 +114,7 @@ sealed interface CloudLibraryPlaybackResult {
         val url: String,
         val filename: String? = null,
         val videoSizeBytes: Long? = null,
+        val torboxPartyFile: com.nuvio.app.features.debrid.TorboxPartyFile? = null,
     ) : CloudLibraryPlaybackResult
 
     data object MissingCredentials : CloudLibraryPlaybackResult

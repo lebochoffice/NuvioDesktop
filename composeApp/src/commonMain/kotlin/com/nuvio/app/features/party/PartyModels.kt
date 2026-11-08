@@ -6,6 +6,11 @@ import com.nuvio.app.features.streams.StreamItem
 import com.nuvio.app.features.streams.StreamProxyHeaders
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import io.ktor.http.decodeURLPart
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonArray
 
 @Serializable
 data class PartySource(
@@ -39,6 +44,23 @@ data class PartyMedia(
 }
 
 @Serializable
+data class PartyBrowserHls(
+    // Null means preparation unavailable/pending, never "use the Desktop URL".
+    val url: String? = null,
+    val headers: Map<String, String> = emptyMap(),
+    // Optional, for browsers: "preparing", "denied" or "failed" while url is
+    // null. Older browsers ignore it and keep showing "pending".
+    val state: String? = null,
+    // Optional display name ("TorBox HLS", "Video-Link des Hosts"); older browsers ignore it.
+    val label: String? = null,
+    // state "family": the address is only available from the family share
+    // service for admitted guests; rev changes with every new share there.
+    val rev: Int? = null,
+    // The TorBox token must also go on variant/segment requests (relative URIs lose it).
+    @SerialName("propagate_token") val propagateToken: Boolean? = null,
+)
+
+@Serializable
 data class PartyStream(
     @SerialName("media_key") val mediaKey: String,
     val url: String,
@@ -54,7 +76,14 @@ data class PartyStream(
     @SerialName("binge_group") val bingeGroup: String? = null,
     @SerialName("stream_type") val streamType: String? = null,
     val badges: List<StreamBadge> = emptyList(),
+    @SerialName("browser_hls") val browserHls: PartyBrowserHls? = null,
 ) {
+    fun forDesktop(): PartyStream? = when {
+        !isShareableStreamUrl(url) -> null
+        browserHls == null -> this
+        else -> copy(browserHls = null)
+    }
+
     fun toStreamItem(): StreamItem = StreamItem(
         name = name,
         description = description,
@@ -75,6 +104,39 @@ data class PartyStream(
 
 internal fun isShareableStreamUrl(url: String): Boolean = SHAREABLE_URL.containsMatchIn(url)
 
+internal fun ActiveParty?.desktopStreamFor(mediaKey: String, offer: PartyStream?): PartyStream? {
+    val party = this ?: return null
+    val stream = offer ?: return null
+    if (party.isHost || party.media.key != mediaKey || stream.mediaKey != mediaKey) return null
+    return stream.forDesktop()
+}
+
+// A single offer (or revocation) keeps both routes on the existing stream event.
+// Older Desktop clients ignore browser_hls; an empty top-level URL is not playable.
+internal fun ActiveParty.streamOffer(desktop: PartyStream?, browser: PartyBrowserHls?): PartyStream? {
+    if (!isHost) return null
+    val original = desktop?.takeIf { sharing && it.mediaKey == media.key && isShareableStreamUrl(it.url) }
+    val hls = browser?.takeIf { browserSharing && it.state != "disabled" }
+    return when {
+        original != null -> original.copy(browserHls = hls ?: PartyBrowserHls(state = "disabled"))
+        hls != null -> PartyStream(mediaKey = media.key, url = "", browserHls = hls)
+        else -> null
+    }
+}
+
+// Detect a complete known account key when a sharing path requires that check.
+internal fun PartyStream.containsAccountKey(key: String): Boolean {
+    if (key.isBlank()) return false
+    fun textContains(value: String): Boolean = value.contains(key) ||
+        runCatching { value.decodeURLPart().contains(key) }.getOrDefault(false)
+    fun contains(element: JsonElement): Boolean = when (element) {
+        is JsonPrimitive -> element.isString && textContains(element.content)
+        is JsonObject -> element.any { (name, value) -> textContains(name) || contains(value) }
+        is JsonArray -> element.any { contains(it) }
+    }
+    return contains(PartyApi.json.encodeToJsonElement(PartyStream.serializer(), this))
+}
+
 private val SHAREABLE_URL = Regex("^https?://(?!localhost|127\\.|0\\.0\\.0\\.0|\\[::1])[^\\s/]+", RegexOption.IGNORE_CASE)
 
 internal fun partyMediaKey(metaType: String, metaId: String, season: Int?, episode: Int?): String =
@@ -91,7 +153,16 @@ data class PartyPlayback(
     val at: Long,
     @SerialName("media_key") val mediaKey: String? = null,
     val waiting: Boolean = false,
-)
+    // Fork command protocol (optional, ignored by older clients): the member
+    // whose command the host sequenced into this revision, and its command ID.
+    // memberId remains the publisher (the host). Never persisted.
+    @SerialName("origin_member_id") val originMemberId: String? = null,
+    @SerialName("command_id") val commandId: String? = null,
+) {
+    /** Member whose action produced this revision. */
+    val actorId: String?
+        get() = originMemberId ?: memberId
+}
 
 @Serializable
 data class PartyMember(
@@ -128,6 +199,16 @@ data class PartyPresence(
     val status: PartyMemberStatus = PartyMemberStatus.Browsing,
     @SerialName("media_key") val mediaKey: String? = null,
     @SerialName("behind_ms") val behindMs: Long? = null,
+    // Set by a host that sequences guest commands (PartyCommands.PROTOCOL).
+    val commands: Int? = null,
+    // Optional position report (fork, informational only, never a command):
+    // player position at server time positionAt and whether it was playing.
+    @SerialName("position_ms") val positionMs: Long? = null,
+    @SerialName("position_at") val positionAt: Long? = null,
+    val playing: Boolean? = null,
+    // Watching alone on purpose (local pause/seek, browser "Allein schauen"):
+    // shown as "Allein", not as out of sync. Optional; older clients ignore it.
+    val solo: Boolean? = null,
 )
 
 @Serializable
@@ -210,12 +291,16 @@ data class ActiveParty(
     val connected: Boolean,
     val hostOnly: Boolean = false,
     val sharing: Boolean = false,
+    val browserSharing: Boolean = false,
 ) {
     val isHost: Boolean
         get() = memberId == hostMemberId
 
     val canControl: Boolean
         get() = !hostOnly || isHost
+
+    fun blocksManualPlayback(playerMediaKey: String, solo: Boolean): Boolean =
+        !solo && !canControl && media.key == playerMediaKey
 
     fun member(id: String?): PartyMember? = members.firstOrNull { it.id == id }
 }

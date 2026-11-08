@@ -1,0 +1,4 @@
+# Local Worker configuration and secrets: never commit (copy wrangler.toml.example).
+wrangler.toml
+.dev.vars*
+.wrangler/

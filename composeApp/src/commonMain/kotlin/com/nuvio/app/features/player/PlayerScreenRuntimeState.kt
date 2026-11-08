@@ -279,7 +279,8 @@ internal class PlayerScreenRuntime(
     var partyPanelToken by mutableStateOf(0L)
     var partyMessage by mutableStateOf("")
     var partyMessageToken by mutableStateOf(0L)
-    var copyPartyInvite: () -> Unit = {}
+    var copyPartyInvite: (codeOnly: Boolean) -> Unit = {}
+    var copyNuvioInvite: () -> Unit = {}
     // NUVIO_BROWSER_PARTY_BRIDGE_V1
     var copyBrowserInvite: (String) -> Unit = {}
     var showPartyChat by mutableStateOf(false)
@@ -288,9 +289,63 @@ internal class PlayerScreenRuntime(
         get() = showAudioModal || showSubtitleModal || showVideoSettingsModal || showStreamInfo ||
             showPartyPanel || showSourcesPanel || showEpisodesPanel || showSubmitIntroModal
     var partyBehind by mutableStateOf(false)
+    var partySolo by mutableStateOf(false)
+    var partyLockedNoticeAt: kotlin.time.TimeMark? = null
+    // "Mich synchronisieren": incremented to re-apply the current party state
+    // through the existing path (same as returning from background).
+    var partyResyncRequest by mutableStateOf(0)
+    // "Alle synchronisieren": party time (server clock) of the host's request.
+    var partySyncAllAt by mutableStateOf<Long?>(null)
+    // Shared start: length the host picked (1-10 s).
+    var partyCountdownSeconds by mutableStateOf(3)
+    // "Intelligente Wiedergabe": expert option and live counters of the
+    // existing sync loop (display only; they never steer playback).
+    var partySmartNudge by mutableStateOf(true)
+    var partyStatSeeks by mutableStateOf(0)
+    var partyStatNudges by mutableStateOf(0)
+    var partyStatBuffering by mutableStateOf(0)
+    var partyStatSeekLeadMs by mutableStateOf(0L)
+    var partyStatLastCorrection by mutableStateOf("")
+    var partyStatLastCorrectionAt by mutableStateOf<Long?>(null)
+    var torboxPartyStream by mutableStateOf<com.nuvio.app.features.party.PartyStream?>(null)
+    var torboxPartyStatus by mutableStateOf("")
+    var torboxPreparedFile by mutableStateOf<com.nuvio.app.features.debrid.TorboxPartyFile?>(null)
+    var torboxPartyPhase by mutableStateOf(com.nuvio.app.features.debrid.TorboxHlsPhase.Unavailable)
+    // TorBox file identity found for an addon stream in the user's own TorBox
+    // cloud (exact info hash + unique file). Null when none or not unique.
+    var torboxMappedFile by mutableStateOf<com.nuvio.app.features.debrid.TorboxPartyFile?>(null)
+    var torboxMappedFor by mutableStateOf<String?>(null)
+    // Incremented by "HLS erstellen / aktualisieren": restarts the single producer.
+    var torboxPartyRefresh by mutableStateOf(0)
+    // File the host explicitly linked from its TorBox cloud for this title
+    // (torboxManualFor = party media key). Real IDs from mylist only.
+    var torboxManualFile by mutableStateOf<com.nuvio.app.features.debrid.TorboxPartyFile?>(null)
+    var torboxManualFor by mutableStateOf<String?>(null)
+    var torboxManualName by mutableStateOf("")
+    // True when the link above was found automatically (info hash or title).
+    var torboxLinkAuto by mutableStateOf(false)
+    var torboxAutoTriedFor by mutableStateOf<String?>(null)
+    // Cloud file list for "Mit TorBox-Datei verknüpfen" (open picker only).
+    var torboxChoices by mutableStateOf<List<com.nuvio.app.features.debrid.TorboxCloudChoice>?>(null)
+    var torboxChoicesFor by mutableStateOf<String?>(null)
+    var torboxChoicesBusy by mutableStateOf(false)
+    var torboxChoicesStatus by mutableStateOf("")
+    // Video link the host shares as the party's browser source (memory only).
+    var hostPartyHls by mutableStateOf<com.nuvio.app.features.party.PartyHostHls?>(null)
+    var hostPartyHlsStatus by mutableStateOf("")
+    var hostPartyHlsBusy by mutableStateOf(false)
+    var hostPartyHlsJob: Job? = null
+    // Family share: the prepared TorBox address carries the account token.
+    var torboxFamilyOnly by mutableStateOf(false)
+    var torboxPropagateToken by mutableStateOf(false)
+    var familyShareRev by mutableStateOf<Int?>(null)
+    var familyShareStatus by mutableStateOf("")
+    // Party of the last published family share, revoked when the host leaves.
+    var familySharePartyId by mutableStateOf<String?>(null)
     var partyBehindMs by mutableStateOf<Long?>(null)
     var partyRateNudge: Float? = null
     var partyPreviousKey: String? = null
+    var partyOpeningRequestedSource = false
     var partyAppInBackground = false
     var playbackSnapshotMark: TimeMark? = null
     var pendingSeekTarget: Pair<Long, TimeMark>? = null

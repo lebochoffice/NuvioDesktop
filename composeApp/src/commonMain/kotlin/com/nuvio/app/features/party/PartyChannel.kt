@@ -59,9 +59,14 @@ internal class PartyChannel(
     }
 
     suspend fun send(event: String, payload: JsonObject) {
-        val current = channel ?: return
-        if (current.status.value != RealtimeChannel.Status.SUBSCRIBED) return
+        sendIfSubscribed(event, payload)
+    }
+
+    suspend fun sendIfSubscribed(event: String, payload: JsonObject): Boolean {
+        val current = channel ?: return false
+        if (current.status.value != RealtimeChannel.Status.SUBSCRIBED) return false
         current.broadcast(event, payload)
+        return true
     }
 
     suspend fun track(payload: JsonObject) {
@@ -79,7 +84,7 @@ internal class PartyChannel(
     }
 
     companion object {
-        val PARTY_EVENTS = listOf("state", "state_request", "status", "control", "member_joined", "member_left", "ended", "media", "stream", "chat")
+        val PARTY_EVENTS = listOf("state", "state_request", "status", "control", "member_joined", "member_left", "ended", "media", "media_change_request", "stream", "stream_suggest", "countdown", "chat", "command")
         val COMPANION_EVENTS = listOf("chat", "media", "member_left", "ended")
     }
 }

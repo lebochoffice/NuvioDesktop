@@ -71,18 +71,25 @@ internal class CloudLibraryStore(
             ?: return CloudLibraryPlaybackResult.MissingCredentials
         val api = providerApis.firstOrNull { it.provider.id == item.providerId }
             ?: return CloudLibraryPlaybackResult.Failed()
+        val torboxFile = if (item.providerId == com.nuvio.app.features.debrid.DebridProviders.TORBOX_ID && item.type == CloudLibraryItemType.Torrent) {
+            val torrentId = item.id.toIntOrNull()
+            val fileId = file.id?.toIntOrNull()
+            if (torrentId != null && fileId != null && torrentId >= 0 && fileId >= 0)
+                com.nuvio.app.features.debrid.TorboxPartyFile(torrentId, fileId, com.nuvio.app.features.debrid.torboxAccountFingerprint(credential.apiKey)) else null
+        } else null
         file.playbackUrl?.takeIf { it.isNotBlank() }?.let { url ->
             return CloudLibraryPlaybackResult.Success(
                 url = url,
                 filename = file.name.takeIf { it.isNotBlank() },
                 videoSizeBytes = file.sizeBytes,
+                torboxPartyFile = torboxFile,
             )
         }
         return api.resolvePlayback(
             apiKey = credential.apiKey,
             item = item,
             file = file,
-        )
+        ).let { result -> if (result is CloudLibraryPlaybackResult.Success) result.copy(torboxPartyFile = torboxFile) else result }
     }
 }
 

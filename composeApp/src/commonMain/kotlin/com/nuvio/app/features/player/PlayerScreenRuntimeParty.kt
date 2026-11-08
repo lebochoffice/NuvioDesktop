@@ -2,6 +2,7 @@ package com.nuvio.app.features.player
 
 import androidx.compose.animation.AnimatedVisibility
 import com.nuvio.app.features.party.OwnSeek
+import com.nuvio.app.features.party.containsAccountKey
 import com.nuvio.app.features.party.PartyMember
 import com.nuvio.app.features.party.AvatarStack
 import androidx.compose.foundation.shape.CircleShape
@@ -58,9 +59,11 @@ import com.nuvio.app.features.party.PartyPanel
 import com.nuvio.app.features.party.PartyPlayback
 import com.nuvio.app.features.party.PartyRepository
 import com.nuvio.app.features.party.PartySource
+import com.nuvio.app.features.party.PartyBrowserHls
 import com.nuvio.app.features.party.PartyStream
 import com.nuvio.app.features.party.isShareableStreamUrl
 import com.nuvio.app.features.party.PartySync
+import com.nuvio.app.features.party.PendingApply
 import com.nuvio.app.features.party.message
 import com.nuvio.app.features.party.UnreadBadge
 import com.nuvio.app.features.party.messageRes
@@ -96,11 +99,14 @@ internal val PlayerScreenRuntime.isPartySynced: Boolean
     get() = PartyRepository.state.value.party?.media?.key == partyKey
 
 internal val PlayerScreenRuntime.isPartyControlLocked: Boolean
-    get() = PartyRepository.state.value.party?.let { party -> !party.canControl && party.media.key == partyKey } == true
+    get() = PartyRepository.state.value.party?.blocksManualPlayback(partyKey, partySolo) == true
 
 internal fun PlayerScreenRuntime.partyBlocksControl(): Boolean {
     if (!isPartyControlLocked) return false
-    scope.launch { showPartyMessage(getString(Res.string.party_host_only_note)) }
+    if (partyLockedNoticeAt?.elapsedNow()?.inWholeMilliseconds?.let { it < 3000 } != true) {
+        partyLockedNoticeAt = kotlin.time.TimeSource.Monotonic.markNow()
+        showPartyMessage("Der Host steuert die Wiedergabe. Wenn du selbst pausieren oder spulen möchtest, öffne das Party-Menü und wähle „Allein schauen“.")
+    }
     return true
 }
 
@@ -132,8 +138,31 @@ internal fun PlayerScreenRuntime.watchWithParty() {
 }
 
 internal fun PlayerScreenRuntime.catchUpWithParty() {
+    partySolo = false
     partyBehind = false
     showPartyPanel = false
+}
+
+/** "Mich synchronisieren": leave local mode and re-apply the current party state (own player only). */
+internal fun PlayerScreenRuntime.syncMeWithParty() {
+    partySolo = false
+    partyBehind = false
+    partyResyncRequest += 1
+    showPartyPanel = false
+}
+
+/**
+ * "Alle synchronisieren" (host): publish the host's current party time as a
+ * new revision through the existing publish path, then ask for immediate
+ * status reports. Members already in sync stay put (existing tolerances);
+ * paused stays paused; members watching alone are not pulled back.
+ */
+internal fun PlayerScreenRuntime.syncEveryone() {
+    val party = PartyRepository.state.value.party ?: return
+    if (!party.isHost || party.media.key != partyKey || !isPartySynced) return
+    publishPartyPlayback()
+    PartyRepository.requestStatusReports()
+    partySyncAllAt = PartyRepository.nowMs()
 }
 
 internal fun PlayerScreenRuntime.leaveParty() {
@@ -147,6 +176,7 @@ internal fun PlayerScreenRuntime.endParty() {
 }
 
 internal fun PlayerScreenRuntime.toggleOwnPlayback(revealControls: Boolean = true) {
+    if (partyBlocksControl()) return
     if (revealControls) controlsVisible = true
     when {
         shouldPlay -> {
@@ -163,6 +193,7 @@ internal fun PlayerScreenRuntime.toggleOwnPlayback(revealControls: Boolean = tru
 }
 
 internal fun PlayerScreenRuntime.ownSeekTarget(targetMs: Long): Long? {
+    if (partyBlocksControl()) return null
     val playback = PartyRepository.playback.value ?: return targetMs
     val partyPositionMs = PartySync.expectedPositionMs(playback, PartyRepository.nowMs(), playbackSnapshot.durationMs)
     return when (val seek = PartySync.ownSeek(targetMs, partyPositionMs, partyBehind)) {
@@ -204,10 +235,32 @@ internal fun PlayerScreenRuntime.currentPartyMedia(): PartyMedia = PartyMedia(
     ),
 )
 
+/** TorBox file of the current source: its own identity, a unique cloud match, or the host's manual link. */
+internal val PlayerScreenRuntime.effectiveTorboxFile: com.nuvio.app.features.debrid.TorboxPartyFile?
+    get() = activeStream?.torboxPartyFile ?: torboxMappedFile?.takeIf { torboxMappedFor == torboxMappingKey() }
+        ?: torboxManualFile?.takeIf { torboxManualFor == partyKey }
+
+/** The host's shared video link, valid only for the title it was entered for. */
+internal val PlayerScreenRuntime.activeHostPartyHls: com.nuvio.app.features.party.PartyHostHls?
+    get() {
+        val party = PartyRepository.state.value.party ?: return null
+        return hostPartyHls?.takeIf {
+            party.isHost && it.partyId == party.id && it.memberId == party.memberId &&
+                it.mediaKey == partyKey && party.media.key == partyKey
+        }
+    }
+
+private fun configuredDebridKeys(): List<String> =
+    com.nuvio.app.features.debrid.DebridSettingsRepository.snapshot().providerApiKeys.values.filter { it.isNotBlank() }
+
+/** Identity of the addon stream a cloud match was made for (hash + filename + media). */
+internal fun PlayerScreenRuntime.torboxMappingKey(): String? =
+    activeTorrentInfoHash?.takeIf { it.isNotBlank() }?.let { hash -> "$partyKey|${hash.lowercase()}|${activeSourceFilename ?: activeStream?.behaviorHints?.filename.orEmpty()}" }
+
 internal fun PlayerScreenRuntime.currentPartyStream(): PartyStream? {
     val stream = activeStream ?: return null
     if (!isShareableStreamUrl(activeSourceUrl) || activeSourceAudioUrl != null) return null
-    return PartyStream(
+    val offer = PartyStream(
         mediaKey = partyKey,
         url = activeSourceUrl,
         headers = activeSourceHeaders,
@@ -223,6 +276,41 @@ internal fun PlayerScreenRuntime.currentPartyStream(): PartyStream? {
         streamType = activeStreamType,
         badges = stream.badges,
     )
+    if (isDesktop) return offer
+    val accountKey = com.nuvio.app.features.debrid.DebridSettingsRepository.snapshot()
+        .apiKeyFor(com.nuvio.app.features.debrid.DebridProviders.TORBOX_ID)
+    return offer.takeUnless { it.containsAccountKey(accountKey) }
+}
+
+private fun PlayerScreenRuntime.currentPartyBrowserHls(): PartyBrowserHls {
+    // An explicitly shared host link replaces the TorBox HLS as browser source.
+    val hostLink = activeHostPartyHls?.takeUnless { link -> link.familyOnly || configuredDebridKeys().any { link.url.contains(it) } }
+    val familyHostLink = activeHostPartyHls?.takeIf { it.familyOnly }
+    val torboxFile = effectiveTorboxFile.takeIf { hostLink == null && familyHostLink == null }
+    val accountKey = com.nuvio.app.features.debrid.DebridSettingsRepository.snapshot()
+        .apiKeyFor(com.nuvio.app.features.debrid.DebridProviders.TORBOX_ID)
+    if (torboxFile != null && torboxFile.accountFingerprint != com.nuvio.app.features.debrid.torboxAccountFingerprint(accountKey)) {
+        return PartyBrowserHls(state = "unsupported")
+    }
+    val ready = torboxPartyStream?.takeIf { torboxFile != null && it.mediaKey == partyKey && torboxPreparedFile == torboxFile }
+    // TorBox link WITH the account token: the host shares it directly with
+    // party members through the existing channel after Browser-HLS consent.
+    val keyedUrl = familyHostLink?.url ?: ready?.url?.takeIf { hostLink == null && torboxFamilyOnly }
+    val browserHls = if (hostLink != null) {
+        PartyBrowserHls(url = hostLink.url, label = hostLink.label)
+    } else if (keyedUrl != null) {
+        PartyBrowserHls(url = keyedUrl, label = "TorBox HLS",
+            propagateToken = (familyHostLink == null && torboxPropagateToken).takeIf { it })
+    } else if (torboxFile != null) {
+        PartyBrowserHls(
+            url = ready?.url,
+            headers = ready?.headers.orEmpty(),
+            state = if (ready != null) null else com.nuvio.app.features.debrid.torboxBrowserState(torboxPartyPhase),
+        )
+    } else PartyBrowserHls(state = "unsupported")
+    return if (keyedUrl == null && PartyStream(partyKey, "", browserHls = browserHls).containsAccountKey(accountKey)) {
+        PartyBrowserHls(state = "unsupported")
+    } else browserHls
 }
 
 internal fun PlayerScreenRuntime.partyBaseRate(): Float =
@@ -239,7 +327,7 @@ internal fun PlayerScreenRuntime.publishPartyPlayback(
     positionMs: Long = currentPlaybackPositionMs(),
     rate: Float = partyBaseRate(),
 ) {
-    if (!isPartySynced) return
+    if (!isPartySynced || partySolo) return
     PartyRepository.publishPlayback(paused = !shouldPlay, positionMs = positionMs, rate = rate)
 }
 
@@ -284,10 +372,107 @@ private fun PlayerScreenRuntime.handlePartyMediaChange(media: PartyMedia) {
 internal fun PlayerScreenRuntime.BindPartyEffects() {
     // This binding belongs to the player session, including background PiP.
     val partyState by PartyRepository.state.collectAsState()
-    val partyId = partyState.party?.id
+    val party = partyState.party
+    val partyId = party?.id
     val key = partyKey
-    val sharing = partyState.party?.let { it.isHost && it.sharing } == true
-    val sharedStream = if (sharing) currentPartyStream() else null
+    val sharingHost = party?.takeIf { it.isHost && it.media.key == key }
+    val desktopOffer = if (sharingHost?.sharing == true) currentPartyStream() else null
+    val browserOffer = if (sharingHost?.browserSharing == true) currentPartyBrowserHls() else null
+    val browserSharing = sharingHost?.browserSharing == true
+    val debridSettings by com.nuvio.app.features.debrid.DebridSettingsRepository.uiState.collectAsState()
+    val torboxKey = debridSettings.apiKeyFor(com.nuvio.app.features.debrid.DebridProviders.Torbox.id)
+    // Addon stream without TorBox identity: look for exactly one matching file
+    // in the user's own TorBox cloud (by info hash), once per stream. Host only.
+    // Addon stream without TorBox identity: link a cloud file automatically
+    // (unique info hash, else exact title), once per stream; the host can
+    // change or remove it. A manual link always wins.
+    val autoKey = if (activeStream != null && activeStream?.torboxPartyFile == null && partyState.party?.isHost == true)
+        "$key|${activeTorrentInfoHash.orEmpty()}|${activeSourceFilename ?: activeStream?.behaviorHints?.filename.orEmpty()}" else null
+    LaunchedEffect(autoKey, torboxKey) {
+        if (autoKey == null || torboxKey.isBlank() || torboxAutoTriedFor == autoKey || torboxManualFor == key) return@LaunchedEffect
+        torboxAutoTriedFor = autoKey
+        val media = currentPartyMedia()
+        val found = try {
+            com.nuvio.app.features.debrid.autoLinkTorboxCloud(torboxKey, activeTorrentInfoHash,
+                activeSourceFilename ?: activeStream?.behaviorHints?.filename, media.title, media.season, media.episode)
+        } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled } catch (_: Exception) { null }
+        if (found != null && torboxManualFor != key) {
+            torboxManualFile = found.first; torboxManualFor = key; torboxManualName = found.second; torboxLinkAuto = true
+        }
+    }
+    val torboxFile = effectiveTorboxFile
+    // torboxPartyRefresh restarts this single producer (button); the previous
+    // run is cancelled first, so a click never runs two TorBox sessions at once.
+    LaunchedEffect(partyId, key, torboxFile, torboxKey, partyState.party?.isHost, partyState.party?.media?.key, torboxPartyRefresh) {
+        torboxPartyStream = null
+        torboxPreparedFile = null
+        torboxFamilyOnly = false
+        torboxPropagateToken = false
+        torboxPartyStatus = ""
+        torboxPartyPhase = com.nuvio.app.features.debrid.TorboxHlsPhase.Unavailable
+        if (torboxFile == null || partyId == null || partyState.party?.isHost != true || partyState.party?.media?.key != key) return@LaunchedEffect
+        torboxPartyPhase = com.nuvio.app.features.debrid.TorboxHlsPhase.Preparing
+        torboxPartyStatus = "TorBox: Stream wird vorbereitet …"
+        var renewals = 0
+        // One producer per player/file; cancellation on media, account or party change.
+        while (isActive) {
+            val result = com.nuvio.app.features.debrid.prepareTorboxPartyHls(
+                torboxFile, torboxKey,
+                onProcessing = {
+                    torboxPartyPhase = com.nuvio.app.features.debrid.TorboxHlsPhase.Processing
+                    torboxPartyStatus = "TorBox verarbeitet den Stream. Die Playlist ist noch nicht fertig; es wird bis zu etwa 10 Minuten geprüft."
+                },
+                familyShare = true,
+            )
+            when (result) {
+                is com.nuvio.app.features.debrid.TorboxPartyHlsResult.Failed -> {
+                    torboxPartyStream = null
+                    torboxPartyStatus = result.message
+                    torboxPartyPhase = when (result.reason) {
+                        com.nuvio.app.features.debrid.TorboxHlsFailure.Denied -> com.nuvio.app.features.debrid.TorboxHlsPhase.Denied
+                        com.nuvio.app.features.debrid.TorboxHlsFailure.Unsupported -> com.nuvio.app.features.debrid.TorboxHlsPhase.Unsupported
+                        com.nuvio.app.features.debrid.TorboxHlsFailure.NotReady -> com.nuvio.app.features.debrid.TorboxHlsPhase.NotReady
+                        com.nuvio.app.features.debrid.TorboxHlsFailure.RequestFailed -> com.nuvio.app.features.debrid.TorboxHlsPhase.Failed
+                    }
+                    return@LaunchedEffect
+                }
+                is com.nuvio.app.features.debrid.TorboxPartyHlsResult.Ready -> {
+                    torboxPreparedFile = torboxFile
+                    torboxFamilyOnly = result.familyOnly
+                    torboxPropagateToken = result.propagateToken
+                    torboxPartyStream = PartyStream(mediaKey = key, url = result.url, name = "TorBox HLS", streamType = "hls")
+                    torboxPartyPhase = com.nuvio.app.features.debrid.TorboxHlsPhase.Ready
+                    torboxPartyStatus = if (result.familyOnly)
+                        "TorBox HLS mit Account-Key vorbereitet. Bei Browser-HLS-Freigabe erhalten ihn alle Party-Mitglieder."
+                    else "TorBox HLS vorbereitet. Mehrgerätezugriff und Browserwiedergabe müssen geprüft werden."
+                    // Renew only after an explicit expiry/access failure, never on
+                    // every recomposition, toggle or transient network failure.
+                    while (isActive) {
+                        delay(60_000L)
+                        // The family address carries the token by design: no key check on it.
+                        val code = try { com.nuvio.app.features.debrid.probeTorboxPartyHls(result.url, if (result.familyOnly) "" else torboxKey) }
+                            catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+                            catch (_: Exception) { 0 }
+                        if (code == 498 || code == com.nuvio.app.features.debrid.TORBOX_PROBE_UNSAFE_HOST) {
+                            torboxPartyStream = null
+                            torboxPartyStatus = "TorBox: Manifest enthält Account-Zugangsdaten. Browserfreigabe gestoppt."
+                            torboxPartyPhase = com.nuvio.app.features.debrid.TorboxHlsPhase.Unsupported
+                            return@LaunchedEffect
+                        }
+                        if (code in listOf(401, 403, 404, 410)) break
+                    }
+                    torboxPartyStream = null
+                    if (++renewals > 3) {
+                        torboxPartyStatus = "TorBox: Wiederholte Zugriffsfehler. Browserfreigabe gestoppt; Account und Mehrgeräteberechtigung prüfen."
+                        torboxPartyPhase = com.nuvio.app.features.debrid.TorboxHlsPhase.Failed
+                        return@LaunchedEffect
+                    }
+                    torboxPartyPhase = com.nuvio.app.features.debrid.TorboxHlsPhase.Expired
+                    torboxPartyStatus = "TorBox: Stream abgelaufen oder Zugriff entzogen. Neue HLS-Quelle wird vorbereitet …"
+                }
+            }
+        }
+    }
 
     DisposableEffect(playerController) {
         val source = playerController as? PlayerSystemControlSource
@@ -319,11 +504,97 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
         onDispose { source?.setSystemControlHandler(null) }
     }
 
-    LaunchedEffect(sharing, sharedStream) {
-        if (sharing) PartyRepository.shareStream(sharedStream)
+    LaunchedEffect(sharingHost?.id, sharingHost?.memberId, key, desktopOffer, browserOffer) {
+        if (sharingHost != null) {
+            PartyRepository.shareStream(sharingHost.id, sharingHost.memberId, key, desktopOffer, browserOffer)
+        }
     }
 
-    LaunchedEffect(key) {
+    // Shared start: everyone shows the countdown to the server-time start; at
+    // the start the host plays through the existing path (members follow the
+    // authoritative state). A play/pause before the start cancels it.
+    val countdown by PartyRepository.countdown.collectAsState()
+    LaunchedEffect(countdown, key) {
+        val running = countdown ?: return@LaunchedEffect
+        if (running.mediaKey != key) return@LaunchedEffect
+        var shown = -1
+        while (isActive) {
+            if (PartyRepository.countdown.value != running) return@LaunchedEffect
+            if (PartyRepository.playback.value?.paused == false) { PartyRepository.clearCountdown(); return@LaunchedEffect }
+            val left = running.startAt - PartyRepository.nowMs()
+            if (left <= 0L) break
+            val seconds = ((left + 999L) / 1000L).toInt()
+            if (seconds != shown) { shown = seconds; showPartyMessage("Start in $seconds …") }
+            delay(((left - 1L) % 1000L + 1L).coerceIn(20L, 1000L))
+        }
+        val party = PartyRepository.state.value.party
+        if (party?.isHost == true && party.media.key == key && PartyRepository.countdown.value == running) setPlaybackPlaying(true)
+        showPartyMessage("Los geht's!")
+        PartyRepository.clearCountdown()
+    }
+
+    // Family share: publish the token address for the admitted members while
+    // Browser-HLS sharing is on; revoke when it is off, the title changes or the
+    // party ends. Guests that already loaded it keep playing.
+    // TorBox links with the key now go directly through the party state, so
+    // the family share service is not used (a leftover share is revoked).
+    val familyUrl: String? = null
+    val familyHost = partyState.party?.isHost == true && partyState.party?.media?.key == key
+    // Republish when members change, so kicked or departed members lose their grants at once.
+    val familyMembers = partyState.party?.members.orEmpty().map { it.id }.sorted()
+    LaunchedEffect(partyId, key, browserSharing, familyUrl, familyHost, familyMembers) {
+        val previous = familySharePartyId
+        if (previous != null && previous != partyId) {
+            // Host left: no new grants. Guests keep what they already loaded.
+            com.nuvio.app.features.party.PartyFamilyShare.revoke(previous)
+            familySharePartyId = null
+        }
+        if (partyId == null) { familyShareRev = null; familyShareStatus = ""; return@LaunchedEffect }
+        if (!com.nuvio.app.features.party.PartyFamilyShare.configured || !familyHost) return@LaunchedEffect
+        if (!browserSharing || familyUrl == null) {
+            if (familySharePartyId != null) com.nuvio.app.features.party.PartyFamilyShare.revoke(partyId)
+            familySharePartyId = null
+            familyShareRev = null
+            familyShareStatus = if (familyUrl != null) "Familienfreigabe beendet (Browser-HLS-Freigabe ist aus)." else ""
+            return@LaunchedEffect
+        }
+        // Every current member except the host is admitted; joins, kicks and
+        // leaves republish (removed members'
+        // grants are deleted by the share service).
+        val admitted = familyMembers.filter { it != partyState.party?.memberId }
+        // Short-lived share, renewed while it is on: a crash or host change ends it by itself.
+        while (isActive) {
+            val propagate = activeHostPartyHls?.familyOnly != true && torboxPropagateToken
+            val result = com.nuvio.app.features.party.PartyFamilyShare.publish(partyId, key, familyUrl, admitted, propagate)
+            familySharePartyId = partyId
+            // Throttled: keep the last rev (guests keep their state) and retry sooner.
+            if (result.retryAfterMs == null) familyShareRev = result.rev
+            familyShareStatus = result.message
+            delay(result.retryAfterMs ?: com.nuvio.app.features.party.FAMILY_SHARE_RENEW_MS)
+        }
+    }
+
+    DisposableEffect(key, partyId, party?.memberId, party?.isHost) {
+        onDispose {
+            hostPartyHlsJob?.cancel()
+            hostPartyHlsJob = null
+            hostPartyHlsBusy = false
+        }
+    }
+    LaunchedEffect(key, partyId, party?.memberId, party?.hostMemberId) {
+        // A shared video link and a manual TorBox link belong to one title of one party.
+        if (hostPartyHls != null && activeHostPartyHls == null) {
+            hostPartyHls = null
+            hostPartyHlsStatus = if (partyId == null) "" else "Der geteilte Video-Link galt für den vorherigen Titel und wurde beendet."
+        }
+        if (torboxManualFor != null && (partyId == null || torboxManualFor != key)) {
+            torboxManualFile = null; torboxManualFor = null; torboxManualName = ""; torboxLinkAuto = false
+        }
+        if (torboxChoicesFor != key) { torboxChoices = null; torboxChoicesFor = null; torboxChoicesStatus = "" }
+    }
+
+    LaunchedEffect(partyId, key) {
+        partySolo = false
         partyBehind = false
         val previous = partyPreviousKey
         partyPreviousKey = key
@@ -358,11 +629,27 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
         var lastSeek: TimeMark? = null
         var lastCorrection: TimeMark? = null
         var lastSeq: Pair<Long, String?>? = null
+        // Revision from another member (e.g. a browser guest command the host
+        // sequenced) that the local player has not reached yet (seek/HLS/
+        // network). Until it is reached, superseded by a newer revision or by a
+        // real local action, the player's old state is never published back as
+        // a new command (playback ping-pong). Event-based, no fixed time window.
+        var awaitingApply: PartyPlayback? = null
+        var applyRetries = 0
         var lastStatus: Triple<PartyMemberStatus, String, Long?>? = null
+        var lastPositionReport: TimeMark? = null
         var wasInBackground = false
+        var handledResync = partyResyncRequest
         var publishedInitial = false
         var seekLeadMs = 0L
         var measureSeekLead = false
+        // Final paused position (host only), now a safety net: paused party
+        // seeks are frame-accurate (seekToExact). If the player still misses
+        // the target (keyframe-only fallback, non-seekable stream), the host
+        // confirms where it really stands, at most once per revision.
+        var confirmedPausedSeq: Pair<Long, String?>? = null
+        var exactSeekFor: Pair<Long, String?>? = null
+        var lastPausedPosition: Long? = null
         var wasBehind = false
         while (isActive) {
             delay(PARTY_TICK)
@@ -373,6 +660,7 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
             val resumedFromBackground = wasInBackground && !partyAppInBackground
             wasInBackground = partyAppInBackground
             if (resumedFromBackground) lastSeq = null
+            if (handledResync != partyResyncRequest) { handledResync = partyResyncRequest; lastSeq = null }
             val behindGap = PartyRepository.playback.value
                 ?.takeIf { partyBehind && party.media.key == partyKey }
                 ?.let { PartySync.expectedPositionMs(it, PartyRepository.nowMs(), snapshot.durationMs) - currentPlaybackPositionMs() }
@@ -396,13 +684,20 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
             )
             if (reportedStatus != lastStatus) {
                 lastStatus = reportedStatus
-                PartyRepository.setLocalStatus(status, partyKey, reportedStatus.third)
+                // Behind is only reported in the deliberate local mode: "Allein".
+                PartyRepository.setLocalStatus(status, partyKey, reportedStatus.third, solo = status == PartyMemberStatus.Behind)
+                if (status == PartyMemberStatus.Buffering) partyStatBuffering += 1
             }
 
             val controller = playerController
             if (party.media.key != partyKey || controller == null || errorMessage != null || awayFromPlayback) {
                 clearPartyNudge()
                 continue
+            }
+            // Sparse, informational position report for the members' sync display.
+            if (initialLoadCompleted && lastPositionReport?.let { it.elapsedNow() < POSITION_REPORT_INTERVAL } != true) {
+                lastPositionReport = clock.markNow()
+                PartyRepository.reportPosition(currentPlaybackPositionMs(), snapshot.isPlaying && !snapshot.isLoading)
             }
             val playback = PartyRepository.playback.value
             if (playback == null) {
@@ -418,6 +713,10 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
             }
             publishedInitial = true
             if (!initialLoadCompleted) continue
+            if (partySolo) {
+                clearPartyNudge(playback)
+                continue
+            }
             if (partyBehind && party.canControl) partyBehind = false
             if (partyBehind) {
                 clearPartyNudge(playback)
@@ -444,9 +743,19 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
                 val forced = lastSeq == null
                 lastSeq = identity
                 applyPartyPaused(playback.paused, force = forced)
-                val own = playback.memberId == party.memberId && !forced
+                // A revision the host sequenced from a guest command is published
+                // by this device but caused by someone else: apply it like a remote one.
+                val own = playback.actorId == party.memberId && !forced
+                awaitingApply = if (own) null else playback
+                applyRetries = 0
                 if ((!own || playback.paused) && abs(snapshot.positionMs - expected) > PartySync.PAUSED_TOLERANCE_MS) {
-                    controller.seekTo(if (playback.paused) expected else expected + seekLeadMs)
+                    // Paused: frame-accurate, so everyone shows the chosen frame
+                    // (keyframe seeks miss by up to a GOP); playing keeps the
+                    // fast keyframe seek with the measured lead.
+                    if (playback.paused) {
+                        controller.seekToExact(expected)
+                        exactSeekFor = identity
+                    } else controller.seekTo(expected + seekLeadMs)
                     measureSeekLead = !playback.paused
                 }
                 lastSeek = clock.markNow()
@@ -460,6 +769,38 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
             if (snapshot.isLoading || isScrubbingTimeline || snapshot.isEnded) {
                 mismatchSince = null
                 continue
+            }
+
+            val pending = awaitingApply
+            if (pending != null) {
+                when (PartySync.pendingApply(pending.paused, shouldPlay, snapshot.isPlaying, snapshot.positionMs - expected)) {
+                    // A real local action changed the intent; it was published on its own.
+                    PendingApply.Superseded -> awaitingApply = null
+                    PendingApply.Applied -> {
+                        awaitingApply = null
+                        mismatchSince = null
+                        pending.commandId?.let { PartyRepository.reportApplied(it, pending.seq) }
+                    }
+                    // Play state reached; the regular correction below completes the seek.
+                    PendingApply.Seeking -> Unit
+                    PendingApply.Waiting -> {
+                        // Re-issue the programmatic apply; this is recovery, not a
+                        // lock: local controls publish directly at any time. Only a
+                        // player that never reaches it (failed play) is handled like
+                        // any other divergence afterwards.
+                        val since = mismatchSince ?: clock.markNow().also { mismatchSince = it }
+                        if (since.elapsedNow() > OUTSIDE_TOGGLE_DELAY) {
+                            mismatchSince = null
+                            if (applyRetries < MAX_APPLY_RETRIES) {
+                                applyRetries++
+                                applyPartyPaused(pending.paused, force = true)
+                            } else {
+                                awaitingApply = null
+                            }
+                        }
+                        continue
+                    }
+                }
             }
 
             if (snapshot.isPlaying != shouldPlay) {
@@ -477,8 +818,7 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
                         }
                         snapshot.isPlaying -> applyPartyPaused(playback.paused, force = true)
                         else -> {
-                            partyBehind = true
-                            shouldPlay = false
+                            applyPartyPaused(playback.paused, force = true)
                         }
                     }
                 }
@@ -487,6 +827,23 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
             mismatchSince = null
 
             val settled = lastSeek?.let { it.elapsedNow() > SEEK_SETTLE } ?: true
+            val stablePosition = lastPausedPosition?.let { abs(it - snapshot.positionMs) <= POSITION_STABLE_MS } == true
+            lastPausedPosition = snapshot.positionMs.takeIf { playback.paused && !snapshot.isPlaying }
+            if (PartySync.shouldConfirmPausedPosition(
+                    isHost = party.isHost,
+                    playback = playback,
+                    isPlaying = snapshot.isPlaying,
+                    settled = settled,
+                    stable = stablePosition,
+                    actualMs = snapshot.positionMs,
+                    alreadyConfirmed = confirmedPausedSeq == identity,
+                    exactAttempted = exactSeekFor == identity,
+                )) {
+                confirmedPausedSeq = identity
+                partyLog.i { "Confirming paused keyframe position ${snapshot.positionMs} for target ${playback.positionMs}" }
+                PartyRepository.publishPlayback(paused = true, positionMs = snapshot.positionMs, rate = playback.rate)
+                continue
+            }
             val due = lastCorrection?.let { it.elapsedNow() >= CORRECTION_INTERVAL } ?: true
             if (!settled || !due) continue
             lastCorrection = clock.markNow()
@@ -494,13 +851,21 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
             if (measureSeekLead && !playback.paused) {
                 measureSeekLead = false
                 if (abs(drift) < MAX_SEEK_LEAD_MS) seekLeadMs = (seekLeadMs - drift).coerceIn(0L, MAX_SEEK_LEAD_MS)
+                partyStatSeekLeadMs = seekLeadMs
             }
-            when (val correction = PartySync.correction(snapshot.positionMs, expected, playback, partyRateNudge != null)) {
+            when (val correction = PartySync.correction(snapshot.positionMs, expected, playback, partyRateNudge != null, allowNudge = partySmartNudge)) {
                 is PartyCorrection.Seek -> {
                     partyLog.i { "Seeking $drift ms back into sync with ${seekLeadMs} ms lead" }
+                    partyStatSeeks += 1
+                    partyStatLastCorrection = "Seek-Korrektur"
+                    partyStatLastCorrectionAt = PartyRepository.nowMs()
                     clearPartyNudge(playback)
                     val target = if (playback.paused) correction.positionMs else correction.positionMs + seekLeadMs
-                    controller.seekTo(if (snapshot.durationMs > 0L) target.coerceAtMost(snapshot.durationMs) else target)
+                    val clamped = if (snapshot.durationMs > 0L) target.coerceAtMost(snapshot.durationMs) else target
+                    if (playback.paused) {
+                        controller.seekToExact(clamped)
+                        exactSeekFor = playback.seq to playback.memberId
+                    } else controller.seekTo(clamped)
                     lastSeek = clock.markNow()
                     measureSeekLead = !playback.paused
                 }
@@ -509,6 +874,9 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
                         partyLog.i { "Nudging speed to ${correction.rate} for ${snapshot.positionMs - expected} ms drift" }
                         partyRateNudge = correction.rate
                         controller.setPlaybackSpeed(correction.rate)
+                        partyStatNudges += 1
+                        partyStatLastCorrection = "Tempo-Korrektur"
+                        partyStatLastCorrectionAt = PartyRepository.nowMs()
                     }
                 }
                 PartyCorrection.InSync -> clearPartyNudge(playback)
@@ -524,7 +892,7 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
             val othersWatching = party.presence.values.any {
                 it.memberId != party.memberId && it.mediaKey == party.media.key && it.status != PartyMemberStatus.Browsing
             }
-            if (party.media.key == partyKey && playback != null && !playback.paused && !othersWatching) {
+            if (!partyOpeningRequestedSource && party.media.key == partyKey && playback != null && !playback.paused && !othersWatching) {
                 PartyRepository.publishPlayback(paused = true, positionMs = playbackSnapshot.positionMs, rate = playback.rate)
             }
             PartyRepository.setLocalStatus(PartyMemberStatus.Browsing, null)
@@ -687,6 +1055,9 @@ private val PARTY_TICK = 250.milliseconds
 private val NOTICE_DURATION = 3_000.milliseconds
 private val BUFFERING_REPORT_DELAY = 1_000.milliseconds
 private val OUTSIDE_TOGGLE_DELAY = 1_200.milliseconds
+private const val MAX_APPLY_RETRIES = 3
+private val POSITION_REPORT_INTERVAL = 10_000.milliseconds
+private const val POSITION_STABLE_MS = 50L
 private val SEEK_SETTLE = 2_500.milliseconds
 private val CORRECTION_INTERVAL = 500.milliseconds
 private const val MAX_SEEK_LEAD_MS = 3_000L
