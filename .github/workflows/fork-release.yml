@@ -47,13 +47,21 @@ jobs:
         shell: pwsh
         run: |
           $version = $env:NUVIO_FORK_VERSION
-          if ($version -notmatch '^\d+\.\d+\.\d+-watchparty$') { throw 'Version must look like 0.1.38-watchparty.' }
+          if ($version -cnotmatch '^(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,4})-watchparty\z') {
+            throw 'Version must look like 0.1.38-watchparty.'
+          }
           $tag = "v$version"
           if (git tag --list $tag) { throw "Tag $tag already exists." }
           $core = [version]($version.Split('-')[0])
+          if ($core.Major -gt 255 -or $core.Minor -gt 255 -or $core.Build -gt 65535) { throw 'Version exceeds Windows Installer limits.' }
+          $msiVersion = [version]::new([Math]::Max(1, $core.Major), $core.Minor, $core.Build)
           $releases = gh release list --repo $env:GITHUB_REPOSITORY --limit 100 --json tagName | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot confirm existing release versions.' }
           foreach ($r in $releases) {
-            if ($r.tagName -match '^v(\d+\.\d+\.\d+)-watchparty$' -and [version]$Matches[1] -ge $core) { throw "Version must exceed existing release $($r.tagName)." }
+            if ($r.tagName -notmatch '^v(\d+\.\d+\.\d+)-watchparty$') { continue }
+            $previous = [version]$Matches[1]
+            $previousMsi = [version]::new([Math]::Max(1, $previous.Major), $previous.Minor, $previous.Build)
+            if ($previous -ge $core -or $previousMsi -ge $msiVersion) { throw "App and MSI versions must exceed existing release $($r.tagName)." }
           }
           "FORK_TAG=$tag" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "FORK_SHA=$(git rev-parse HEAD)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
@@ -95,21 +103,40 @@ jobs:
       - name: Desktop tests (party, updater, fork logic)
         shell: pwsh
         run: |
-          .\gradlew.bat :composeApp:desktopTest --tests '*Party*Test' --tests '*Fork*UpdateTest' --tests '*AppUpdate*Test' --tests '*UpdateChannelTest' --tests '*ReleaseSelector*' --tests '*VersionUtils*' "-Pnuvio.webview2.dir=$env:NUVIO_WEBVIEW2_DIR" '-Dorg.gradle.jvmargs=-Xmx4g' '-Pkotlin.daemon.jvmargs=-Xmx3g' --max-workers=2 --no-configuration-cache --console=plain --stacktrace
+          .\fork-maintenance\tests\windows-msi-identity.test.ps1
+          .\gradlew.bat :composeApp:desktopTest --tests '*Party*Test' --tests '*Fork*UpdateTest' --tests '*AppUpdate*Test' --tests '*UpdateChannelTest' --tests '*ReleaseSelector*' --tests '*VersionUtils*' --tests '*DesktopStorageTest' "-Pnuvio.webview2.dir=$env:NUVIO_WEBVIEW2_DIR" '-Dorg.gradle.jvmargs=-Xmx4g' '-Pkotlin.daemon.jvmargs=-Xmx3g' --max-workers=2 --no-configuration-cache --console=plain --stacktrace
           if ($LASTEXITCODE -ne 0) { throw 'Desktop tests failed; no release.' }
       - name: Build and verify MSI (same commit)
         shell: pwsh
         run: ./fork-maintenance/build-ci.ps1
+      - name: Sign MSI and verify signed bytes
+        shell: pwsh
+        env:
+          NUVIO_SIGN_TIMESTAMP_URL: ${{ vars.NUVIO_SIGN_TIMESTAMP_URL }}
+        run: |
+          $msi = Get-Item "composeApp/build/compose/release-msis/Nuvio-Windows-x64-$env:NUVIO_FORK_VERSION.msi"
+          $manifestPath = Join-Path $msi.DirectoryName ($msi.BaseName + '-verification.json')
+          $unsigned = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+          .\fork-maintenance\sign-family-release.ps1 -MsiPath $msi.FullName -TimestampUrl $env:NUVIO_SIGN_TIMESTAMP_URL
+          .\fork-maintenance\verify-msi.ps1 -MsiPath $msi.FullName -ExpectedProductVersion $unsigned.productVersion
       - name: Prepare release assets
         shell: pwsh
         run: |
           $source = Get-Item "composeApp/build/compose/release-msis/Nuvio-Windows-x64-$env:NUVIO_FORK_VERSION.msi"
+          $manifestPath = Join-Path $source.DirectoryName ($source.BaseName + '-verification.json')
+          $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
           $out = New-Item -ItemType Directory -Force -Path "$env:RUNNER_TEMP/release"
           $asset = Join-Path $out "Nuvio-WatchParty-Windows-x64-$env:NUVIO_FORK_VERSION.msi"
           Copy-Item -LiteralPath $source.FullName -Destination $asset
           $hash = (Get-FileHash -LiteralPath $asset -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($manifest.sha256 -cne $hash -or $manifest.sourceCommit -cne $env:FORK_SHA -or
+              $manifest.browserInviteOrigin -cne 'https://nuvio-watch-friends.pages.dev' -or
+              $manifest.conditionalPartyProtocolInspected -ne $true -or $manifest.architecture -cne 'x64' -or
+              $manifest.signature -cne 'Valid') {
+            throw 'Release artifact differs from the verified production-origin x64 MSI.'
+          }
           "$hash  $(Split-Path -Leaf $asset)" | Set-Content -LiteralPath "$asset.sha256" -Encoding ascii
-          Copy-Item -LiteralPath "composeApp/build/compose/release-msis/Nuvio-Windows-x64-$env:NUVIO_FORK_VERSION-verification.json" -Destination (Join-Path $out "Nuvio-WatchParty-Windows-x64-$env:NUVIO_FORK_VERSION-verification.json")
+          Copy-Item -LiteralPath $manifestPath -Destination (Join-Path $out "Nuvio-WatchParty-Windows-x64-$env:NUVIO_FORK_VERSION-verification.json")
           $notes = @(
             "Nuvio Desktop (Watch Party fork) $env:NUVIO_FORK_VERSION",
             '',
@@ -117,7 +144,7 @@ jobs:
             '',
             "Source commit: https://github.com/$env:GITHUB_REPOSITORY/commit/$env:FORK_SHA",
             "SHA-256 ($(Split-Path -Leaf $asset)): $hash",
-            'Unsigned build. Install only from this repository. The in-app updater verifies the SHA-256 digest before running msiexec.'
+            'Signed Nuvio Family MSI. In-app installation remains disabled pending isolated Windows acceptance.'
           ) -join "`n"
           Set-Content -LiteralPath (Join-Path $out 'notes.md') -Value $notes -Encoding utf8
           "RELEASE_DIR=$out" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8

@@ -16,11 +16,15 @@ $env:SENTRY_AUTH_TOKEN = $null
 if ($env:NUVIO_INTRODB_API_URL -ne 'https://api.introdb.app') { throw 'Set repository Variable NUVIO_INTRODB_API_URL=https://api.introdb.app.' }
 Add-Content -LiteralPath 'local.properties' -Value "`nINTRODB_API_URL=$($env:NUVIO_INTRODB_API_URL)" -Encoding utf8
 $versionArgs = @()
+$verifyArgs = @{}
 if ($env:NUVIO_FORK_VERSION) {
     if ($env:NUVIO_FORK_VERSION -notmatch '^\d+\.\d+\.\d+-watchparty$') { throw 'NUVIO_FORK_VERSION must look like 0.1.38-watchparty.' }
     $core = $env:NUVIO_FORK_VERSION.Split('-')[0].Split('.') | ForEach-Object { [int]$_ }
     $versionArgs = @("-Pnuvio.desktop.versionName=$($env:NUVIO_FORK_VERSION)", "-Pnuvio.desktop.versionCode=$($core[0] * 10000 + $core[1] * 100 + $core[2])")
+    $verifyArgs.MsiPath = "composeApp/build/compose/release-msis/Nuvio-Windows-x64-$env:NUVIO_FORK_VERSION.msi"
+    $verifyArgs.ExpectedProductVersion = '{0}.{1}.{2}' -f ([Math]::Max(1, $core[0])), $core[1], $core[2]
 }
+# Hosted artifacts use the production invite origin. Preview builds stay local.
 & .\gradlew.bat :composeApp:packageReleaseMsi "-Pnuvio.webview2.dir=$env:NUVIO_WEBVIEW2_DIR" '-Pnuvio.party.browserOrigin=production' @versionArgs '-Dorg.gradle.jvmargs=-Xmx4g' '-Pkotlin.daemon.jvmargs=-Xmx3g' --max-workers=2 --no-configuration-cache --console=plain --stacktrace
 if ($LASTEXITCODE -ne 0) { throw 'MSI build failed' }
-& "$PSScriptRoot/verify-msi.ps1"
+& "$PSScriptRoot/verify-msi.ps1" @verifyArgs

@@ -36,6 +36,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -77,6 +79,8 @@ import nuvio.composeapp.generated.resources.updates_title_allow_installs
 import nuvio.composeapp.generated.resources.updates_title_available
 import org.jetbrains.compose.resources.stringResource
 
+internal val LocalForkUpdater = staticCompositionLocalOf<AppUpdaterController?> { null }
+
 @Composable
 fun AppUpdaterHost(
     controller: AppUpdaterController,
@@ -85,6 +89,12 @@ fun AppUpdaterHost(
 ) {
     if (!AppFeaturePolicy.inAppUpdaterEnabled || !AppUpdaterPlatform.isSupported) {
         content()
+        return
+    }
+
+    if (AppUpdaterPlatform.isStatusOnlyForkUpdater) {
+        LaunchedEffect(controller) { controller.ensureAutoCheckStarted() }
+        CompositionLocalProvider(LocalForkUpdater provides controller) { content() }
         return
     }
 

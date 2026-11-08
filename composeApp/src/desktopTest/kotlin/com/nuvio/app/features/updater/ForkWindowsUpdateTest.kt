@@ -1,6 +1,9 @@
 package com.nuvio.app.features.updater
 
+import kotlinx.coroutines.runBlocking
+import org.junit.Assume.assumeTrue
 import java.io.File
+import java.net.URI
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -9,6 +12,41 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class ForkWindowsUpdateTest {
+    @Test
+    fun `windows downloads only follow HTTPS redirects to GitHub asset hosts`() {
+        val initial = URI("https://github.com/lebochoffice/NuvioDesktop/releases/download/v0.1.63-watchparty/update.msi")
+        assertTrue(isAllowedWindowsUpdateRedirect(URI("https://release-assets.githubusercontent.com/asset?signature=test"), initial))
+        assertTrue(isAllowedWindowsUpdateRedirect(URI("https://objects.githubusercontent.com/asset"), initial))
+        for (target in listOf(
+            "http://release-assets.githubusercontent.com/asset",
+            "https://release-assets.githubusercontent.com.evil.example/asset",
+            "https://release-assets.githubusercontent.com:8443/asset",
+            "https://name@release-assets.githubusercontent.com/asset",
+            "https://github.com/NuvioMedia/NuvioDesktop/releases/download/v1.0.0/update.msi",
+        )) {
+            assertFalse(isAllowedWindowsUpdateRedirect(URI(target), initial))
+        }
+    }
+
+    @Test
+    fun `windows status mode blocks downloads and rejects even an existing invalid msi`() = runBlocking {
+        assumeTrue(System.getProperty("os.name").startsWith("Windows", ignoreCase = true))
+        assertFalse(windowsForkUpdateInstaller()?.installationReleased ?: true)
+        val directory = createTempDirectory("nuvio-blocked-update-test").toFile()
+        try {
+            val invalidMsi = File(directory, "Nuvio-WatchParty-Windows-x64-0.1.63-watchparty.msi")
+                .apply { writeText("not an installer") }
+            assertTrue(AppUpdaterPlatform.isStatusOnlyForkUpdater)
+            assertFalse(AppUpdaterPlatform.canInstallDownloadedUpdate())
+            val download = AppUpdaterPlatform.downloadUpdateAsset("invalid-url", invalidMsi.name) { _, _ ->
+                error("A blocked download must not report progress.")
+            }
+            assertEquals("Installation is disabled.", download.exceptionOrNull()?.message)
+            val install = AppUpdaterPlatform.installDownloadedUpdate(invalidMsi.absolutePath)
+            assertEquals("Installation is disabled.", install.exceptionOrNull()?.message)
+        } finally { directory.deleteRecursively() }
+    }
+
     @Test
     fun `updates are downloaded only from this fork's github releases`() {
         assertTrue(isForkReleaseAsset("https://github.com/lebochoffice/NuvioDesktop/releases/download/v0.1.38-watchparty/Nuvio-WatchParty-Windows-x64-0.1.38-watchparty.msi"))

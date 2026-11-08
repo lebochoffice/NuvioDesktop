@@ -122,6 +122,9 @@ internal fun LazyListScope.settingsRootContent(
             }
         }
     }
+    if (category == null || category == SettingsCategory.System) {
+        item(key = "fork-update-status") { ForkUpdateSettingsSection(isTablet) }
+    }
     settingsFooterContent(isTablet = isTablet)
 }
 

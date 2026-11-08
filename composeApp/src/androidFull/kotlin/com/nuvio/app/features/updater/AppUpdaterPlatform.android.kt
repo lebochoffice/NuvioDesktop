@@ -2,11 +2,16 @@ package com.nuvio.app.features.updater
 
 import com.nuvio.app.core.build.AppVersionConfig
 
+internal actual fun windowsForkUpdateInstaller(): WindowsForkUpdateInstaller? = null
+
 actual object AppUpdaterPlatform {
     actual val isSupported: Boolean = true
     actual val isDebugBuild: Boolean
         get() = AndroidAppUpdaterPlatform.isDebugBuild()
     actual val hasSingleUpdateChannel: Boolean = false
+    actual val isStatusOnlyForkUpdater: Boolean = false
+    actual fun getLastSuccessfulForkCheck(): Long? = null
+    actual fun setLastSuccessfulForkCheck(epochMillis: Long) = Unit
     // Upstream behaviour unchanged here; only the fork's desktop build enforces checksums.
     actual val requiresUpdateChecksum: Boolean = false
     actual fun verifyDownloadedUpdate(path: String, expectedSha256: String): Result<Unit> = Result.success(Unit)

@@ -3,10 +3,12 @@
 #include <windows.h>
 #include <msi.h>
 #include <msiquery.h>
+#include <array>
 #include <string>
 
 #ifdef _M_IX86
 #pragma comment(linker, "/EXPORT:NuvioPartySchema=_NuvioPartySchema@4")
+#pragma comment(linker, "/EXPORT:NuvioFamilyCheckVersion=_NuvioFamilyCheckVersion@4")
 #endif
 
 namespace {
@@ -17,8 +19,8 @@ struct Handle {
 
 constexpr wchar_t scheme[] = L"Software\\Classes\\nuvio";
 constexpr wchar_t commandKey[] = L"Software\\Classes\\nuvio\\shell\\open\\command";
-constexpr wchar_t ownerName[] = L"NuvioFamilyBetaOwner";
-constexpr wchar_t description[] = L"URL:Nuvio Family Beta Party";
+constexpr wchar_t ownerName[] = L"NuvioFamilyOwner";
+constexpr wchar_t description[] = L"URL:Nuvio Family Party";
 
 LONG readValue(HKEY hive, const wchar_t* key, const wchar_t* name, std::wstring& result) {
     wchar_t buffer[32768];
@@ -114,6 +116,68 @@ UINT configureSchema(MSIHANDLE session) {
     MsiViewClose(rows.value);
     return status;
 }
+}
+
+namespace {
+using MsiVersion = std::array<unsigned, 3>;
+
+bool parseMsiVersion(const wchar_t* text, MsiVersion& version) {
+    constexpr MsiVersion limits{255, 255, 65535};
+    for (size_t field = 0; field < version.size(); ++field) {
+        if (field && *text++ != L'.') return false;
+        if (*text < L'0' || *text > L'9') return false;
+        unsigned value = 0;
+        do {
+            value = value * 10 + (*text++ - L'0');
+            if (value > limits[field]) return false;
+        } while (*text >= L'0' && *text <= L'9');
+        version[field] = value;
+    }
+    return *text == L'\0';
+}
+
+UINT blockFamilyInstall(MSIHANDLE session, const wchar_t* message) {
+    Handle record{MsiCreateRecord(0)};
+    if (record.value && MsiRecordSetStringW(record.value, 0, message) == ERROR_SUCCESS) {
+        MsiProcessMessage(session, INSTALLMESSAGE_ERROR, record.value);
+    }
+    return ERROR_INSTALL_FAILURE;
+}
+}
+
+extern "C" __declspec(dllexport) UINT __stdcall NuvioFamilyCheckVersion(MSIHANDLE session) {
+    constexpr wchar_t family[] = L"{DFE71C5B-C265-42CE-A025-396193575A13}";
+    constexpr wchar_t failure[] = L"Could not verify installed Nuvio Family versions. Installation stopped.";
+    wchar_t ownCode[39]{}, versionText[32]{};
+    DWORD codeSize = _countof(ownCode), versionSize = _countof(versionText);
+    MsiVersion incoming{};
+    if (MsiGetPropertyW(session, L"ProductCode", ownCode, &codeSize) != ERROR_SUCCESS || codeSize != 38 ||
+        MsiGetPropertyW(session, L"ProductVersion", versionText, &versionSize) != ERROR_SUCCESS ||
+        !parseMsiVersion(versionText, incoming)) {
+        return blockFamilyInstall(session, failure);
+    }
+
+    // Re-enumerate in the execute sequence, independently of UI properties.
+    for (DWORD index = 0; ; ++index) {
+        wchar_t installedCode[39]{};
+        const UINT status = MsiEnumRelatedProductsW(family, 0, index, installedCode);
+        if (status == ERROR_NO_MORE_ITEMS) return ERROR_SUCCESS;
+        if (status != ERROR_SUCCESS) return blockFamilyInstall(session, failure);
+        MsiVersion installed{};
+        versionSize = _countof(versionText);
+        if (MsiGetProductInfoExW(installedCode, nullptr, MSIINSTALLCONTEXT_MACHINE, L"VersionString",
+                                versionText, &versionSize) != ERROR_SUCCESS ||
+            !parseMsiVersion(versionText, installed)) {
+            return blockFamilyInstall(session, failure);
+        }
+        if (CompareStringOrdinal(installedCode, -1, ownCode, -1, TRUE) == CSTR_EQUAL) {
+            if (installed != incoming) return blockFamilyInstall(session, failure);
+            continue; // Maintenance of the exact installed package remains supported.
+        }
+        if (installed >= incoming) {
+            return blockFamilyInstall(session, L"An equal or newer Nuvio Family version is already installed.");
+        }
+    }
 }
 
 extern "C" __declspec(dllexport) UINT __stdcall NuvioPartySchema(MSIHANDLE session) {

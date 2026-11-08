@@ -10,6 +10,9 @@ import java.util.Locale
 import java.util.Properties
 import kotlin.io.path.exists
 
+internal fun windowsFamilyDataDirectory(configuredBase: String?, fallbackBase: Path): Path =
+    (configuredBase?.takeIf(String::isNotBlank)?.let(Paths::get) ?: fallbackBase).resolve("Nuvio Family")
+
 internal object DesktopStorage {
     private val json = Json { ignoreUnknownKeys = true }
     private val stores = mutableMapOf<String, Store>()
@@ -45,10 +48,9 @@ internal object DesktopStorage {
         val userHome = Paths.get(System.getProperty("user.home").orEmpty())
         return when {
             osName.contains("mac") -> userHome.resolve("Library/Application Support/Nuvio")
-            osName.contains("win") -> {
-                val appData = System.getenv("APPDATA")?.takeIf { it.isNotBlank() }
-                (appData?.let(Paths::get) ?: userHome.resolve("AppData/Roaming")).resolve("Nuvio")
-            }
+            osName.contains("win") -> windowsFamilyDataDirectory(
+                System.getenv("APPDATA"), userHome.resolve("AppData/Roaming"),
+            )
             else -> {
                 val xdgConfig = System.getenv("XDG_CONFIG_HOME")?.takeIf { it.isNotBlank() }
                 (xdgConfig?.let(Paths::get) ?: userHome.resolve(".config")).resolve("nuvio")
@@ -61,10 +63,9 @@ internal object DesktopStorage {
         val userHome = Paths.get(System.getProperty("user.home").orEmpty())
         return when {
             osName.contains("mac") -> userHome.resolve("Library/Caches/Nuvio")
-            osName.contains("win") -> {
-                val localAppData = System.getenv("LOCALAPPDATA")?.takeIf { it.isNotBlank() }
-                (localAppData?.let(Paths::get) ?: userHome.resolve("AppData/Local")).resolve("Nuvio/Cache")
-            }
+            osName.contains("win") -> windowsFamilyDataDirectory(
+                System.getenv("LOCALAPPDATA"), userHome.resolve("AppData/Local"),
+            ).resolve("Cache")
             else -> {
                 val xdgCache = System.getenv("XDG_CACHE_HOME")?.takeIf { it.isNotBlank() }
                 (xdgCache?.let(Paths::get) ?: userHome.resolve(".cache")).resolve("nuvio")

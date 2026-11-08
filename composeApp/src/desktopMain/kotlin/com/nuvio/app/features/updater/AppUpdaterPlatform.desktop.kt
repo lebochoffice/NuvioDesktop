@@ -4,20 +4,24 @@ import com.nuvio.app.core.build.AppVersionConfig
 import com.nuvio.app.core.storage.DesktopStorage
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import nuvio.composeapp.generated.resources.Res
 import nuvio.composeapp.generated.resources.updates_checksum_mismatch
 import nuvio.composeapp.generated.resources.updates_download_failed
 import nuvio.composeapp.generated.resources.updates_download_failed_http
 import nuvio.composeapp.generated.resources.updates_downloaded_file_missing
-import nuvio.composeapp.generated.resources.updates_empty_download_body
 import org.jetbrains.compose.resources.getString
 import java.io.File
 import java.io.FileOutputStream
+import java.io.InputStream
 import java.net.URI
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
 import java.net.http.HttpResponse
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.time.Duration
 import java.util.Locale
 import java.util.concurrent.TimeUnit
@@ -42,11 +46,26 @@ private val desktopUpdaterHttpClient: HttpClient = HttpClient.newBuilder()
     .followRedirects(HttpClient.Redirect.NORMAL)
     .build()
 
+private val windowsUpdaterHttpClient = HttpClient.newBuilder()
+    .connectTimeout(Duration.ofSeconds(30))
+    .followRedirects(HttpClient.Redirect.NEVER)
+    .build()
+
+internal actual fun windowsForkUpdateInstaller(): WindowsForkUpdateInstaller? =
+    if (DesktopUpdaterOs.current() == DesktopUpdaterOs.WINDOWS) DesktopWindowsForkUpdate else null
+
 actual object AppUpdaterPlatform {
     private val currentOs: DesktopUpdaterOs = DesktopUpdaterOs.current()
-    private val store = DesktopStorage.store(desktopUpdaterPreferencesName)
+    private val store by lazy { DesktopStorage.store(desktopUpdaterPreferencesName) }
     actual val isDebugBuild: Boolean = false
     actual val hasSingleUpdateChannel: Boolean = true
+    actual val isStatusOnlyForkUpdater: Boolean get() = currentOs == DesktopUpdaterOs.WINDOWS
+
+    actual fun getLastSuccessfulForkCheck(): Long? = store.getString("last_successful_fork_check")?.toLongOrNull()
+
+    actual fun setLastSuccessfulForkCheck(epochMillis: Long) {
+        store.putString("last_successful_fork_check", epochMillis.toString())
+    }
 
     // Linux ships four package formats and the running app is the only place
     // that can tell which one it was installed from, so the format is resolved
@@ -105,63 +124,82 @@ actual object AppUpdaterPlatform {
         assetUrl: String,
         assetName: String,
         onProgress: (downloadedBytes: Long, totalBytes: Long?) -> Unit,
-    ): Result<String> = withContext(Dispatchers.IO) {
-        runCatching {
-            require(isForkReleaseAsset(assetUrl)) { "Update source not allowed: only $forkReleaseOwner/$forkReleaseRepo releases are installed." }
-            clearDir(updatesDir())
-            val safeName = assetName.replace(Regex("[^a-zA-Z0-9._-]"), "_")
-            val destination = File(updatesDir(), safeName)
-            val tempFile = File(updatesDir(), "$safeName.part")
+    ): Result<String> {
+        if (isStatusOnlyForkUpdater) return Result.failure(IllegalStateException("Installation is disabled."))
+        return runCatching { downloadDesktopUpdate(assetUrl, assetName, null, onProgress) }
+    }
 
-            val request = HttpRequest.newBuilder()
-                .uri(URI(assetUrl))
-                .GET()
-                .build()
-            val response = desktopUpdaterHttpClient.send(request, HttpResponse.BodyHandlers.ofInputStream())
-            if (response.statusCode() !in 200..299) {
-                error(runBlocking { getString(Res.string.updates_download_failed_http, response.statusCode()) })
-            }
+    internal suspend fun downloadWindowsForkUpdate(update: AppUpdate, progress: (Long, Long?) -> Unit): String =
+        downloadDesktopUpdate(update.assetUrl, update.assetName, requireNotNull(update.assetSizeBytes), progress)
 
-            val totalBytes = response.headers().firstValue("Content-Length").orElse(null)
-                ?.toLongOrNull()
-                ?.takeIf { it > 0L }
-            var downloadedBytes = 0L
-            try {
-                response.body()?.use { input ->
-                    FileOutputStream(tempFile).use { output ->
-                        val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
-                        while (true) {
-                            val read = input.read(buffer)
-                            if (read <= 0) break
-                            output.write(buffer, 0, read)
-                            downloadedBytes += read.toLong()
-                            onProgress(downloadedBytes, totalBytes)
+    private suspend fun downloadDesktopUpdate(
+        assetUrl: String,
+        assetName: String,
+        expectedBytes: Long?,
+        onProgress: (Long, Long?) -> Unit,
+    ): String {
+        require(isForkReleaseAsset(assetUrl)) { "Update source not allowed: only $forkReleaseOwner/$forkReleaseRepo releases are installed." }
+        if (expectedBytes != null) require(expectedBytes in 1L..maximumForkMsiBytes)
+        var temporaryDirectory: File? = null
+        try {
+            return withTimeout(15 * 60_000L) {
+                runInterruptible(Dispatchers.IO) {
+                    val directory = if (expectedBytes == null) updatesDir().also(::clearDir)
+                    else Files.createTempDirectory(updatesDir().toPath(), "family-").toFile().also { temporaryDirectory = it }
+                    val safeName = assetName.replace(Regex("[^a-zA-Z0-9._-]"), "_")
+                    val destination = File(directory, safeName)
+                    val part = File(directory, "$safeName.part")
+                    val uri = URI(assetUrl)
+                    val response = if (expectedBytes != null) requestWindowsUpdate(uri)
+                    else desktopUpdaterHttpClient.send(updateRequest(uri), HttpResponse.BodyHandlers.ofInputStream())
+                    try {
+                        response.body().use { input ->
+                            val status = response.statusCode()
+                            if (status !in 200..299 || (expectedBytes != null && status != 200)) {
+                                error(runBlocking { getString(Res.string.updates_download_failed_http, status) })
+                            }
+                            val contentLength = response.headers().firstValueAsLong("Content-Length").orElse(-1)
+                            if (expectedBytes != null && contentLength >= 0) check(contentLength == expectedBytes)
+                            val totalBytes = expectedBytes ?: contentLength.takeIf { it > 0 }
+                            var received = 0L
+                            FileOutputStream(part).use { output ->
+                                val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                                while (true) {
+                                    val read = input.read(buffer)
+                                    if (read == -1) break
+                                    received += read
+                                    if (expectedBytes != null) check(received <= expectedBytes)
+                                    output.write(buffer, 0, read)
+                                    onProgress(received, totalBytes)
+                                }
+                            }
+                            if (totalBytes != null && received != totalBytes) {
+                                error(runBlocking { getString(Res.string.updates_download_failed) })
+                            }
                         }
-                        output.flush()
+                        if (expectedBytes != null) {
+                            Files.move(part.toPath(), destination.toPath(), StandardCopyOption.ATOMIC_MOVE)
+                        } else if (!part.renameTo(destination)) {
+                            part.copyTo(destination, overwrite = true)
+                        }
+                        destination.absolutePath
+                    } finally {
+                        part.delete()
                     }
-                } ?: error(runBlocking { getString(Res.string.updates_empty_download_body) })
-
-                if (totalBytes != null && downloadedBytes != totalBytes) {
-                    error(runBlocking { getString(Res.string.updates_download_failed) })
                 }
-
-                if (!tempFile.renameTo(destination)) {
-                    tempFile.copyTo(destination, overwrite = true)
-                    tempFile.delete()
-                }
-                destination.absolutePath
-            } catch (t: Throwable) {
-                if (tempFile.exists()) tempFile.delete()
-                throw t
             }
+        } catch (failure: Throwable) {
+            temporaryDirectory?.deleteRecursively()
+            throw failure
         }
     }
 
-    actual fun canInstallDownloadedUpdate(): Boolean = true
+    actual fun canInstallDownloadedUpdate(): Boolean = !isStatusOnlyForkUpdater
 
     actual fun openInstallPermissionSettings() = Unit
 
     actual fun installDownloadedUpdate(path: String): Result<Unit> = runCatching {
+        check(!isStatusOnlyForkUpdater) { "Installation is disabled." }
         val updateFile = File(path)
         check(updateFile.exists()) { runBlocking { getString(Res.string.updates_downloaded_file_missing) } }
 
@@ -182,7 +220,7 @@ actual object AppUpdaterPlatform {
 
     private fun launchInstaller(updateFile: File) {
         val command = when (currentOs) {
-            DesktopUpdaterOs.WINDOWS -> windowsInstallerCommand(updateFile)
+            DesktopUpdaterOs.WINDOWS -> error("Installation is disabled.")
             DesktopUpdaterOs.MACOS -> listOf("open", updateFile.absolutePath)
             DesktopUpdaterOs.LINUX -> linuxInstallerCommand(
                 method = linuxInstallMethod,
@@ -201,6 +239,29 @@ actual object AppUpdaterPlatform {
             exitProcess(0)
         }
     }
+}
+
+private fun updateRequest(uri: URI): HttpRequest =
+    HttpRequest.newBuilder(uri).timeout(Duration.ofSeconds(60)).GET().build()
+
+internal fun isAllowedWindowsUpdateRedirect(target: URI, initial: URI): Boolean =
+    target.scheme.equals("https", ignoreCase = true) && target.rawUserInfo == null &&
+        (target.port == -1 || target.port == 443) && target.rawFragment == null &&
+        (target == initial || target.host?.lowercase(Locale.ROOT) in setOf(
+            "release-assets.githubusercontent.com", "objects.githubusercontent.com",
+        ))
+
+private fun requestWindowsUpdate(initial: URI): HttpResponse<InputStream> {
+    var uri = initial
+    repeat(5) {
+        val response = windowsUpdaterHttpClient.send(updateRequest(uri), HttpResponse.BodyHandlers.ofInputStream())
+        if (response.statusCode() !in listOf(301, 302, 303, 307, 308)) return response
+        response.body().close()
+        val target = uri.resolve(response.headers().firstValue("Location").orElseThrow())
+        check(isAllowedWindowsUpdateRedirect(target, initial)) { "Untrusted update redirect." }
+        uri = target
+    }
+    error("Too many update redirects.")
 }
 
 private enum class DesktopUpdaterOs {
