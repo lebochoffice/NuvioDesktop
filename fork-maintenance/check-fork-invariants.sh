@@ -16,7 +16,9 @@ need_file browser-site/tests/personal-hls-integration.test.js
 # Desktop bridge, invitation link and browser control smoothing.
 need_text composeApp/src/desktopMain/resources/player-ui/party.js 'NUVIO_BROWSER_PARTY_BRIDGE_V1'
 need_text composeApp/src/desktopMain/resources/player-ui/party.js 'nuvio-browser-party-host-v2'
-need_text composeApp/src/commonMain/kotlin/com/nuvio/app/features/party/PartyRepository.kt 'WATCH_PARTY_BROWSER_ORIGIN = "https://nuvio-watch-friends.pages.dev"'
+need_text composeApp/src/commonMain/kotlin/com/nuvio/app/features/party/PartyRepository.kt 'WATCH_PARTY_BROWSER_ORIGIN = "https://family-beta.nuvio-watch-friends.pages.dev"'
+need_text composeApp/src/commonMain/kotlin/com/nuvio/app/features/party/PartyRepository.kt 'WATCH_PARTY_BROWSER_PRODUCTION_ORIGIN = "https://nuvio-watch-friends.pages.dev"'
+need_text composeApp/src/commonMain/kotlin/com/nuvio/app/features/party/PartyRepository.kt 'PartyBrowserConfig.ORIGIN.takeIf { it == WATCH_PARTY_BROWSER_PRODUCTION_ORIGIN } ?: WATCH_PARTY_BROWSER_ORIGIN'
 # Host-sequenced guest commands (command ID, ack) and event-based remote apply.
 need_file composeApp/src/commonMain/kotlin/com/nuvio/app/features/party/PartyCommands.kt
 need_text composeApp/src/commonMain/kotlin/com/nuvio/app/features/party/PartyChannel.kt '"command")'
@@ -27,8 +29,10 @@ need_text composeApp/src/desktopMain/native/windows/player_bridge.cpp 'exact ? "
 need_text composeApp/src/desktopMain/native/windows/player_bridge.cpp 'NativePlayerBridge_seekToExact'
 need_text composeApp/src/commonMain/kotlin/com/nuvio/app/features/player/PlayerScreenRuntimeParty.kt 'controller.seekToExact('
 need_text composeApp/build.gradle.kts 'windowsPlayerBridgeSource.asFile.lastModified() > output.lastModified()'
-# Invitation origin: production by default, the preview only via the checked build property.
+# Hosted MSI builds explicitly select production. Local builds may use the validated preview fallback.
 need_text composeApp/build.gradle.kts 'nuvio.party.browserOrigin must be'
+need_text composeApp/build.gradle.kts '"production", partyBrowserProductionOrigin -> partyBrowserProductionOrigin'
+need_text fork-maintenance/build-ci.ps1 '-Pnuvio.party.browserOrigin=production'
 need_text fork-maintenance/verify-msi.ps1 'AllowPreviewOrigin'
 need_text browser-site/src/session.js 'export const COMMAND_PROTOCOL = 1;'
 # TorBox HLS for browser guests.

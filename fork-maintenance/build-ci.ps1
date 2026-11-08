@@ -21,6 +21,6 @@ if ($env:NUVIO_FORK_VERSION) {
     $core = $env:NUVIO_FORK_VERSION.Split('-')[0].Split('.') | ForEach-Object { [int]$_ }
     $versionArgs = @("-Pnuvio.desktop.versionName=$($env:NUVIO_FORK_VERSION)", "-Pnuvio.desktop.versionCode=$($core[0] * 10000 + $core[1] * 100 + $core[2])")
 }
-& .\gradlew.bat :composeApp:packageReleaseMsi "-Pnuvio.webview2.dir=$env:NUVIO_WEBVIEW2_DIR" @versionArgs '-Dorg.gradle.jvmargs=-Xmx4g' '-Pkotlin.daemon.jvmargs=-Xmx3g' --max-workers=2 --no-configuration-cache --console=plain --stacktrace
+& .\gradlew.bat :composeApp:packageReleaseMsi "-Pnuvio.webview2.dir=$env:NUVIO_WEBVIEW2_DIR" '-Pnuvio.party.browserOrigin=production' @versionArgs '-Dorg.gradle.jvmargs=-Xmx4g' '-Pkotlin.daemon.jvmargs=-Xmx3g' --max-workers=2 --no-configuration-cache --console=plain --stacktrace
 if ($LASTEXITCODE -ne 0) { throw 'MSI build failed' }
 & "$PSScriptRoot/verify-msi.ps1"
