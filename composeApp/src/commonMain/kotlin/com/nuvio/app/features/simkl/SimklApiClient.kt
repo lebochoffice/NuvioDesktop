@@ -7,7 +7,6 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.Json
@@ -64,19 +63,33 @@ internal fun interface SimklHttpEngine {
 
 internal class SimklApiClient(
     private val engine: SimklHttpEngine,
-    private val accessToken: () -> String?,
+    private val accessToken: suspend () -> String?,
     private val onUnauthorized: () -> Unit,
     private val nowEpochMs: () -> Long = SimklPlatformClock::nowEpochMs,
     private val sleep: suspend (Long) -> Unit = { delayMs -> delay(delayMs) },
     private val retryJitterMs: () -> Long = { Random.nextLong(RETRY_JITTER_BOUND_MS + 1L) },
+    private val recoverUnauthorized: (suspend (String) -> String?)? = null,
+    private val sessionGeneration: (() -> Long)? = null,
 ) {
     private val requestMutex = Mutex()
     private val json = Json { ignoreUnknownKeys = true }
     private var nextGetAtEpochMs = 0L
     private var nextPostAtEpochMs = 0L
 
-    suspend fun execute(request: SimklApiRequest): SimklApiResponse = requestMutex.withLock {
-        val token = if (request.requiresAuthentication) {
+    suspend fun execute(request: SimklApiRequest): SimklApiResponse {
+        val generation = if (request.requiresAuthentication) sessionGeneration?.invoke() else null
+        return requestMutex.withLock { executeLocked(request, generation) }
+    }
+
+    private suspend fun executeLocked(request: SimklApiRequest, generation: Long?): SimklApiResponse {
+        fun checkGeneration() {
+            if (generation != null && generation != sessionGeneration?.invoke()) {
+                throw SimklApiException(401, "authentication_changed", "Simkl session changed")
+            }
+        }
+
+        checkGeneration()
+        var token = if (request.requiresAuthentication) {
             accessToken()?.takeIf(String::isNotBlank)
                 ?: throw SimklApiException(
                     status = 401,
@@ -94,9 +107,14 @@ internal class SimklApiClient(
             SimklRetryPolicy.NEVER -> 1
         }
         var syncWriteLockRetried = false
-        for (attempt in 0 until maxAttempts) {
+        var authRetried = false
+        var attempts = 0
+        while (attempts < maxAttempts) {
+            val attempt = attempts++
+            checkGeneration()
             val response = try {
                 executeRateLimited(request.method) {
+                    checkGeneration()
                     engine.execute(
                         method = request.method.name,
                         url = buildSimklApiUrl(request.path, request.query),
@@ -110,18 +128,19 @@ internal class SimklApiClient(
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
-                if (attempt == maxAttempts - 1) {
+                checkGeneration()
+                if (authRetried || attempt == maxAttempts - 1) {
                     throw SimklApiException(
                         status = null,
                         errorCode = "transport_failure",
                         message = "Simkl request failed",
-                        cause = error,
                     )
                 }
                 sleep(retryDelayMs(attempt, retryAfterHeader = null, retryJitterMs()))
                 continue
             }
 
+            checkGeneration()
             logSyncReadResponse(
                 request = request,
                 response = response,
@@ -141,17 +160,35 @@ internal class SimklApiClient(
             }
 
             when (classifySimklResponse(response.status, request.scrobbleStopConflictIsSuccess)) {
-                SimklResponseAction.SUCCESS -> return@withLock response.toApiResponse()
+                SimklResponseAction.SUCCESS -> return response.toApiResponse()
                 SimklResponseAction.SOFT_SUCCESS -> {
-                    return@withLock response.toApiResponse(isSoftSuccess = true)
+                    return response.toApiResponse(isSoftSuccess = true)
                 }
                 SimklResponseAction.REAUTHENTICATE -> {
-                    if (request.requiresAuthentication) onUnauthorized()
+                    val rejected = token
+                    if (rejected != null && !authRetried) {
+                        val recovery = recoverUnauthorized
+                        if (recovery == null) {
+                            onUnauthorized()
+                        } else {
+                            val renewed = recovery(rejected)
+                            checkGeneration()
+                            // Only replay reads, including the POST used to retrieve settings.
+                            if (renewed != null && renewed != rejected &&
+                                (request.method == SimklHttpMethod.GET || request.path == "/users/settings")
+                            ) {
+                                token = renewed
+                                authRetried = true
+                                attempts--
+                                continue
+                            }
+                        }
+                    }
                     throw response.toApiException(json)
                 }
                 SimklResponseAction.FAIL -> throw response.toApiException(json)
                 SimklResponseAction.RETRY -> {
-                    if (attempt == maxAttempts - 1) throw response.toApiException(json)
+                    if (authRetried || attempt == maxAttempts - 1) throw response.toApiException(json)
                     sleep(
                         retryDelayMs(
                             attempt = attempt,
@@ -239,11 +276,14 @@ internal object SimklApi {
                     url = url,
                     headers = headers,
                     body = body,
+                    followRedirects = false,
                     maxResponseBodyBytes = SIMKL_MAX_RESPONSE_BODY_BYTES,
                 )
             },
             accessToken = SimklAuthRepository::authorizedAccessToken,
-            onUnauthorized = SimklAuthRepository::onUnauthorizedResponse,
+            onUnauthorized = {},
+            recoverUnauthorized = SimklAuthRepository::recoverUnauthorizedResponse,
+            sessionGeneration = SimklAuthRepository::requestGeneration,
         )
     }
 }
@@ -294,14 +334,11 @@ private fun RawHttpResponse.toApiResponse(isSoftSuccess: Boolean = false): Simkl
     )
 
 private fun RawHttpResponse.toApiException(json: Json): SimklApiException {
-    val envelope = errorEnvelope(json)
+    val code = errorCode(json)?.takeIf { it in SAFE_SIMKL_ERRORS }
     return SimklApiException(
         status = status,
-        errorCode = envelope?.error,
-        message = envelope?.message?.takeIf(String::isNotBlank)
-            ?: envelope?.errorDescription?.takeIf(String::isNotBlank)
-            ?: envelope?.error?.takeIf(String::isNotBlank)
-            ?: "Simkl request failed with HTTP $status",
+        errorCode = code,
+        message = "Simkl request failed with HTTP $status",
     )
 }
 
@@ -315,10 +352,12 @@ private fun RawHttpResponse.errorEnvelope(json: Json): SimklErrorEnvelope? =
 private fun Map<String, String>.headerValue(name: String): String? =
     entries.firstOrNull { (key, _) -> key.equals(name, ignoreCase = true) }?.value
 
+private val SAFE_SIMKL_ERRORS = setOf(
+    "rate_limit", "user_limit_exceeded", "invalid_token", "invalid_grant",
+    "invalid_client", "unauthorized_client", "insufficient_scope", "premium_only", "wrong_parameter",
+)
+
 @Serializable
 private data class SimklErrorEnvelope(
     val error: String? = null,
-    val code: Int? = null,
-    val message: String? = null,
-    @SerialName("error_description") val errorDescription: String? = null,
 )

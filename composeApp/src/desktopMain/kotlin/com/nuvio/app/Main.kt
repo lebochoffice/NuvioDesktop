@@ -43,6 +43,7 @@ import com.nuvio.app.features.settings.AppIconRepository
 import com.nuvio.app.features.settings.applyDesktopRendererPreference
 import com.nuvio.app.features.settings.transparentPreviewResource
 import java.awt.Desktop
+import java.awt.Frame
 import javax.imageio.ImageIO
 import java.awt.Color as AwtColor
 import javax.swing.JComponent
@@ -52,6 +53,16 @@ private const val MacosDarkAquaAppearance = "NSAppearanceNameDarkAqua"
 
 @OptIn(ExperimentalComposeUiApi::class)
 fun main(args: Array<String>) {
+    val isWindows = DesktopHostOs.current == DesktopHostOs.WINDOWS
+    val protocolLaunch = isWindows && args.firstOrNull() == "--party-link"
+    val windowsInvitation = if (protocolLaunch) {
+        val uri = args.getOrNull(1)?.takeIf { args.size == 2 } ?: return
+        windowsPartyInvitation(uri) ?: return
+    } else if (isWindows) {
+        args.reversedArray().firstNotNullOfOrNull(::windowsPartyInvitation)
+    } else null
+    val windowsLinks = if (isWindows) WindowsPartyLinks.open() else null
+    if (windowsInvitation != null && windowsLinks?.forward(windowsInvitation) == true) return
     // On Linux, initialize GTK BEFORE AWT/Compose/Skia to prevent GdkDisplayManager
     // type registration conflict (Skiko partially loads GDK without full GTK init).
     if (System.getProperty("os.name", "").lowercase().contains("linux")) {
@@ -63,7 +74,7 @@ fun main(args: Array<String>) {
     configureDesktopChrome()
     configureLinuxSwingGlobalsBeforeAwt()
     installDesktopOpenUriHandler()
-    handleDesktopLaunchArgs(args)
+    if (windowsInvitation != null) windowsInvitation.dispatch() else handleDesktopLaunchArgs(args)
     preloadNativePlayerBridgeAsync()
     // Load cached profile data synchronously so the profile color is available
     // on the very first Compose frame (matching Android's SharedPreferences behavior).
@@ -125,6 +136,7 @@ fun main(args: Array<String>) {
 
         SwingWindow(
             onCloseRequest = {
+                windowsLinks?.close()
                 P2pStreamingEngine.shutdown()
                 DiscordPresenceManager.shutdown()
                 SentryInitializer.close()
@@ -135,6 +147,14 @@ fun main(args: Array<String>) {
             icon = painterResource(appIconState.selected.transparentPreviewResource),
             init = ::configureMacosWindowBeforePeer,
         ) {
+            LaunchedEffect(window) {
+                windowsLinks?.listen { invitation ->
+                    window.extendedState = window.extendedState and Frame.ICONIFIED.inv()
+                    window.toFront()
+                    window.requestFocus()
+                    invitation.dispatch()
+                }
+            }
             SideEffect {
                 window.background = NuvioDesktopNativeBackground
                 window.rootPane.background = NuvioDesktopNativeBackground

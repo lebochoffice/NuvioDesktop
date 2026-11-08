@@ -52,6 +52,8 @@
     <string name="party_source">Party's source</string>
     <string name="party_episode_format">S%1$d E%2$d</string>
     <string name="party_host_only_title">Only I can control playback</string>
+    <string name="party_browser_more_options">More options</string>
+    <string name="party_playback_controls">Playback controls</string>
     <string name="party_host_only_description">Others can still pause or rewind for themselves.</string>
     <string name="party_host_only_note">Only the host can control playback</string>
     <string name="party_control_host_only">Only the host can control playback now</string>

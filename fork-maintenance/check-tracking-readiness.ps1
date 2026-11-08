@@ -1,9 +1,12 @@
 [CmdletBinding()]
 param(
-    [string]$RepoPath = (Split-Path -Parent $PSScriptRoot),
+    [string]$RepoPath,
     [switch]$RequireConfigured
 )
 $ErrorActionPreference = 'Stop'
+if (!$PSBoundParameters.ContainsKey('RepoPath')) {
+    $RepoPath = Split-Path -Parent $PSScriptRoot
+}
 $repo = (Resolve-Path -LiteralPath $RepoPath).Path
 $propertiesFile = Join-Path $repo 'local.properties'
 $properties = @{}
@@ -55,8 +58,12 @@ function Test-PublicClientId([string]$Name) {
 $redirect = $null
 $redirectReady = [Uri]::TryCreate([string]$properties['TRAKT_REDIRECT_URI'], [UriKind]::Absolute, [ref]$redirect)
 if ($redirectReady) {
-    $redirectReady = $redirect.Scheme -eq 'https' -and $redirect.Host -and
-        -not $redirect.UserInfo -and -not $redirect.Fragment -and -not $redirect.IsLoopback
+    $httpsRedirect = $redirect.Scheme -eq 'https' -and $redirect.Host -and -not $redirect.IsLoopback
+    # Check the original authority to accept only these explicit development hosts.
+    $httpLoopbackRedirect = $redirect.Scheme -eq 'http' -and
+        $redirect.OriginalString -match '^http://(?:localhost|127\.0\.0\.1|\[::1\])(?::[0-9]+)?(?:/|\?|$)'
+    $redirectReady = ($httpsRedirect -or $httpLoopbackRedirect) -and
+        -not $redirect.UserInfo -and -not $redirect.Fragment
 }
 $ready = [ordered]@{
     Trakt = ((Test-PublicClientId 'TRAKT_CLIENT_ID') -and $redirectReady)
@@ -68,5 +75,5 @@ foreach ($provider in $ready.Keys) {
     Write-Output ("${provider}: $status")
 }
 if ($RequireConfigured -and $ready.Values -contains $false) {
-    throw 'Tracking-Konfiguration unvollstaendig. Eigene App-IDs und registrierte Trakt-HTTPS-Redirect-URI in local.properties eintragen.'
+    throw 'Tracking-Konfiguration unvollstaendig. Eigene App-IDs und registrierte Trakt-Redirect-URI (HTTPS oder HTTP-Loopback) in local.properties eintragen.'
 }

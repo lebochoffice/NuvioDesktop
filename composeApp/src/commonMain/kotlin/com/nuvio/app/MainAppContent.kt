@@ -62,6 +62,7 @@ import com.nuvio.app.core.auth.DeviceSessionRegistration
 import com.nuvio.app.core.build.AppFeaturePolicy
 import com.nuvio.app.core.deeplink.AppDeepLink
 import com.nuvio.app.core.deeplink.AppDeepLinkRepository
+import nuvio.composeapp.generated.resources.party_error_not_found
 import com.nuvio.app.core.format.formatReleaseDateForDisplay
 import com.nuvio.app.core.network.NetworkCondition
 import com.nuvio.app.core.network.NetworkStatusRepository
@@ -133,7 +134,9 @@ import com.nuvio.app.features.party.PartyMedia
 import com.nuvio.app.features.party.PartyRepository
 import com.nuvio.app.features.party.PartyScreen
 import com.nuvio.app.features.party.PartySync
+import com.nuvio.app.features.party.desktopStreamFor
 import com.nuvio.app.features.party.message
+import com.nuvio.app.features.party.partyMediaKey
 import com.nuvio.app.features.player.ExternalPlayerIntentResult
 import com.nuvio.app.features.player.externalPlaybackSession
 import com.nuvio.app.features.player.infusePlaybackCallbacks
@@ -803,6 +806,12 @@ internal fun MainAppContent(
                         AppDeepLinkRepository.markConsumed(deepLink)
                     }
 
+                    AppDeepLink.InvalidPartyInvitation -> {
+                        appGateController?.appReady?.first { it }
+                        NuvioToastController.show(getString(Res.string.party_error_not_found))
+                        AppDeepLinkRepository.markConsumed(deepLink)
+                    }
+
                     null -> Unit
                 }
             }
@@ -1032,7 +1041,11 @@ internal fun MainAppContent(
                 }
             }
 
-            if (!PlaybackAvailability.current().canStream(type, videoId)) {
+            val sharedPartySource = isDesktop && PartyRepository.state.value.party.desktopStreamFor(
+                partyMediaKey(parentMetaType, parentMetaId, seasonNumber, episodeNumber),
+                PartyRepository.sharedStream.value,
+            ) != null
+            if (!sharedPartySource && !PlaybackAvailability.current().canStream(type, videoId)) {
                 NuvioToastController.show(playbackUnavailableMessage)
                 return
             }

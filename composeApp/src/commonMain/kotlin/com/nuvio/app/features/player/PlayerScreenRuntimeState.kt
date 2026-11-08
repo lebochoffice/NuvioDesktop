@@ -279,7 +279,7 @@ internal class PlayerScreenRuntime(
     var partyPanelToken by mutableStateOf(0L)
     var partyMessage by mutableStateOf("")
     var partyMessageToken by mutableStateOf(0L)
-    var copyPartyInvite: () -> Unit = {}
+    var copyPartyInvite: (codeOnly: Boolean) -> Unit = {}
     var copyNuvioInvite: () -> Unit = {}
     // NUVIO_BROWSER_PARTY_BRIDGE_V1
     var copyBrowserInvite: (String) -> Unit = {}

@@ -52,6 +52,7 @@ import org.jetbrains.compose.resources.stringResource
 import org.jetbrains.compose.resources.getString
 import androidx.compose.runtime.CompositionLocalProvider
 import com.nuvio.app.features.party.PartyRepository
+import com.nuvio.app.features.party.desktopStreamFor
 import com.nuvio.app.features.party.matches
 import com.nuvio.app.features.party.partyMediaKey
 import com.nuvio.app.features.streams.LocalSharedStream
@@ -770,11 +771,15 @@ internal fun StreamDestination(
         { stream -> if (partySource?.matches(stream) == true) partySourceLabel else null }
     }
     val sharedLabel = stringResource(Res.string.party_shared_by, party?.member(party.hostMemberId)?.displayName.orEmpty())
-    val isHost = party?.isHost == true
-    val sharedStream = remember(partyStream, sharedLabel, isHost, contentKey) {
-        partyStream
-            ?.takeIf { !isHost && it.mediaKey == contentKey }
+    val sharedStream = remember(partyStream, sharedLabel, party, contentKey) {
+        party.desktopStreamFor(contentKey, partyStream)
             ?.let { SharedStream(label = sharedLabel, stream = it.toStreamItem()) }
+    }
+
+    fun isCurrentSharedSelection(stream: StreamItem): Boolean {
+        val currentParty = PartyRepository.state.value.party
+        return currentParty?.id == party?.id && currentParty?.memberId == party?.memberId &&
+            currentParty.desktopStreamFor(contentKey, PartyRepository.sharedStream.value)?.toStreamItem() == stream
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
@@ -801,23 +806,30 @@ internal fun StreamDestination(
                 manualSelection = launch.manualSelection,
                 startFromBeginning = launch.startFromBeginning,
                 onStreamSelected = { stream, resolvedResumePositionMs, resolvedResumeProgressFraction ->
-                    openSelectedStream(
-                        stream = stream,
-                        resolvedResumePositionMs = resolvedResumePositionMs,
-                        resolvedResumeProgressFraction = resolvedResumeProgressFraction,
-                        forceExternal = false,
-                        forceInternal = false,
-                        saveForReuse = stream != sharedStream?.stream,
-                    )
+                    val isShared = stream == sharedStream?.stream
+                    if (!isShared || isCurrentSharedSelection(stream)) {
+                        openSelectedStream(
+                            stream = stream,
+                            resolvedResumePositionMs = resolvedResumePositionMs,
+                            resolvedResumeProgressFraction = resolvedResumeProgressFraction,
+                            forceExternal = false,
+                            forceInternal = isDesktop && isShared,
+                            saveForReuse = !isShared,
+                        )
+                    }
                 },
                 onStreamActionOpen = { stream, openExternally, resolvedResumePositionMs, resolvedResumeProgressFraction ->
-                    openSelectedStream(
-                        stream = stream,
-                        resolvedResumePositionMs = resolvedResumePositionMs,
-                        resolvedResumeProgressFraction = resolvedResumeProgressFraction,
-                        forceExternal = openExternally,
-                        forceInternal = !openExternally,
-                    )
+                    val isShared = stream == sharedStream?.stream
+                    if (!isShared || isCurrentSharedSelection(stream)) {
+                        openSelectedStream(
+                            stream = stream,
+                            resolvedResumePositionMs = resolvedResumePositionMs,
+                            resolvedResumeProgressFraction = resolvedResumeProgressFraction,
+                            forceExternal = openExternally,
+                            forceInternal = !openExternally || (isDesktop && isShared),
+                            saveForReuse = !isShared,
+                        )
+                    }
                 },
                 onBack = onBack,
                 modifier = Modifier.fillMaxSize(),

@@ -71,10 +71,10 @@ internal actual object SimklAuthStorage {
     private const val CODE_VERIFIER_KEY = "simkl_code_verifier"
     private const val KEYCHAIN_SERVICE = "com.nuvio.media.simkl"
 
-    actual fun loadMetadataPayload(): String? =
+    actual fun loadMetadataPayload(profileId: Int?): String? =
         NSUserDefaults.standardUserDefaults.stringForKey(ProfileScopedKey.of(METADATA_KEY))
 
-    actual fun saveMetadataPayload(payload: String) {
+    actual fun saveMetadataPayload(payload: String, profileId: Int?) {
         NSUserDefaults.standardUserDefaults.setObject(payload, forKey = ProfileScopedKey.of(METADATA_KEY))
     }
 
@@ -85,6 +85,9 @@ internal actual object SimklAuthStorage {
     actual fun loadCodeVerifier(): String? = loadKeychainValue(CODE_VERIFIER_KEY)
 
     actual fun saveCodeVerifier(value: String?) = saveKeychainValue(CODE_VERIFIER_KEY, value)
+
+    actual fun loadDeviceSession(profileId: Int): String? = null
+    actual fun saveDeviceSession(profileId: Int, value: String?) = Unit
 
     actual fun removeProfile(profileId: Int) {
         NSUserDefaults.standardUserDefaults.removeObjectForKey(ProfileScopedKey.of(METADATA_KEY, profileId))

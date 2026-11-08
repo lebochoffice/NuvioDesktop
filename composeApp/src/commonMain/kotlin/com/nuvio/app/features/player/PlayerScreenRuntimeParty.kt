@@ -260,9 +260,7 @@ internal fun PlayerScreenRuntime.torboxMappingKey(): String? =
 internal fun PlayerScreenRuntime.currentPartyStream(): PartyStream? {
     val stream = activeStream ?: return null
     if (!isShareableStreamUrl(activeSourceUrl) || activeSourceAudioUrl != null) return null
-    val accountKey = com.nuvio.app.features.debrid.DebridSettingsRepository.snapshot()
-        .apiKeyFor(com.nuvio.app.features.debrid.DebridProviders.TORBOX_ID)
-    return PartyStream(
+    val offer = PartyStream(
         mediaKey = partyKey,
         url = activeSourceUrl,
         headers = activeSourceHeaders,
@@ -277,7 +275,11 @@ internal fun PlayerScreenRuntime.currentPartyStream(): PartyStream? {
         bingeGroup = stream.behaviorHints.bingeGroup,
         streamType = activeStreamType,
         badges = stream.badges,
-    ).takeUnless { it.containsAccountKey(accountKey) }
+    )
+    if (isDesktop) return offer
+    val accountKey = com.nuvio.app.features.debrid.DebridSettingsRepository.snapshot()
+        .apiKeyFor(com.nuvio.app.features.debrid.DebridProviders.TORBOX_ID)
+    return offer.takeUnless { it.containsAccountKey(accountKey) }
 }
 
 private fun PlayerScreenRuntime.currentPartyBrowserHls(): PartyBrowserHls {

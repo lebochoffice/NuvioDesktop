@@ -20,7 +20,6 @@ import com.nuvio.app.features.party.partyChatRows
 import com.nuvio.app.features.party.behindMs
 import com.nuvio.app.features.party.canRequestMedia
 import com.nuvio.app.features.party.displayTitle
-import com.nuvio.app.features.party.formatPartyCode
 import com.nuvio.app.features.party.partyInviteLink
 import com.nuvio.app.features.party.presenceState
 import com.nuvio.app.features.party.rememberProfileAvatar
@@ -32,6 +31,8 @@ import nuvio.composeapp.generated.resources.action_close
 import nuvio.composeapp.generated.resources.action_remove
 import nuvio.composeapp.generated.resources.party_behind
 import nuvio.composeapp.generated.resources.party_behind_title
+import nuvio.composeapp.generated.resources.party_browser_more_options
+import nuvio.composeapp.generated.resources.party_playback_controls
 import nuvio.composeapp.generated.resources.party_chat_empty_message
 import nuvio.composeapp.generated.resources.party_chat_empty_title
 import nuvio.composeapp.generated.resources.party_chat_new_messages
@@ -50,7 +51,6 @@ import nuvio.composeapp.generated.resources.party_host_only_description
 import nuvio.composeapp.generated.resources.party_host_only_note
 import nuvio.composeapp.generated.resources.party_host_only_title
 import nuvio.composeapp.generated.resources.party_invite_copied
-import nuvio.composeapp.generated.resources.party_invite_message
 import nuvio.composeapp.generated.resources.party_leave
 import nuvio.composeapp.generated.resources.party_media_request_action
 import nuvio.composeapp.generated.resources.party_media_request_blocked
@@ -102,9 +102,6 @@ internal fun PlayerScreenRuntime.rememberPartyControlsState(): PlayerControlPart
     val avatar = rememberProfileAvatar()
     val clipboard = LocalClipboardManager.current
     val party = partyState.party
-    val invite = party?.let {
-        stringResource(Res.string.party_invite_message, formatPartyCode(it.code), partyInviteLink(it.code))
-    }
     val copiedLabel = stringResource(Res.string.party_invite_copied)
     SideEffect {
         copyBrowserInvite = { url ->
@@ -117,9 +114,9 @@ internal fun PlayerScreenRuntime.rememberPartyControlsState(): PlayerControlPart
                 showPartyMessage("Nuvio link copied")
             }
         }
-        copyPartyInvite = {
-            if (invite != null) {
-                clipboard.setText(AnnotatedString(invite))
+        copyPartyInvite = { codeOnly ->
+            PartyRepository.state.value.party?.let { current ->
+                clipboard.setText(AnnotatedString(if (codeOnly) current.code else partyInviteLink(current.code)))
                 showPartyMessage(copiedLabel)
             }
         }
@@ -427,7 +424,8 @@ internal fun PlayerScreenRuntime.handlePartyControlsEvent(type: String, value: D
     }
     when (type) {
         "partyStart" -> startParty()
-        "partyCopyInvite" -> copyPartyInvite()
+        "partyCopyCode" -> copyPartyInvite(true)
+        "partyCopyInvite" -> copyPartyInvite(false)
         "partyCopyNuvioLink" -> copyNuvioInvite()
         "partyHostOnly" -> PartyRepository.setHostOnly(value >= 0.5)
         "partySharing" -> PartyRepository.setSharing(value >= 0.5)
@@ -546,6 +544,8 @@ private fun partyControlLabels(): Map<String, String> = mapOf(
     "remove" to stringResource(Res.string.action_remove),
     "removeMessage" to stringResource(Res.string.party_remove_message),
     "hostOnlyTitle" to stringResource(Res.string.party_host_only_title),
+    "browserMoreOptions" to stringResource(Res.string.party_browser_more_options),
+    "playbackControls" to stringResource(Res.string.party_playback_controls),
     "hostOnlyDescription" to stringResource(Res.string.party_host_only_description),
     "hostOnlyNote" to stringResource(Res.string.party_host_only_note),
     "shareTitle" to stringResource(Res.string.party_share_title),

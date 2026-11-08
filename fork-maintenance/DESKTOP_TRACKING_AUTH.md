@@ -53,10 +53,18 @@ erneut geprüft.
 
 ## Simkl und MDBList
 
-Simkl verwendet am Desktop weiter seinen PIN-Flow und prüft SIMKL_CLIENT_ID.
-Der vorhandene Simkl-Pfad besitzt keinen mit Trakt vergleichbaren Refresh-Token-
-Austausch. Die vorhandenen Token-/Profil-Aktualisierungen und die Trennung
-werden beibehalten.
+Simkl verwendet am Desktop AUTH V2 Device Authorization mit PKCE S256. In
+`local.properties` muss `SIMKL_CLIENT_ID` zu einer AUTH-V2-Registrierung vom Typ
+„TV, devices & command line“ gehören. Eine Redirect-URI und ein Client-Secret
+sind für diesen Desktop-Ablauf nicht erforderlich. Nutzer mit einer alten
+Desktop-Sitzung müssen sich einmal neu verbinden.
+
+Nuvio speichert Access- und Refresh-Token gemeinsam pro Profil. Unter Windows
+schützt DPAPI sie mit dem aktuellen Windows-Benutzer. Beim Trennen löscht
+Nuvio die lokale Sitzung sofort und versucht, den Grant bei Simkl zu widerrufen.
+Bei fehlender Netzwerkverbindung lässt sich der Widerruf über die verbundenen
+Apps im Simkl-Konto nachholen. Ein Live-Test sollte Anmeldung, Neustart, Sync
+und Trennen prüfen und den Remote-Widerruf im Simkl-Konto bestätigen.
 
 MDBList verwendet weiter Device Authorization sowie seinen vorhandenen
 Refresh-/Revoke-Pfad und prüft MDBLIST_CLIENT_ID. Alle drei Karten benutzen
@@ -71,16 +79,17 @@ in 3m 12s bestätigt, einschließlich der korrigierten iOS-SourceSet-Konfigurati
 Die neuen Tests prüfen den öffentlichen Trakt-Client, secretfreie Payloads
 für Device-Token/Refresh/Revoke, Gerätecode-Erfolg/Fehler/Ablauf sowie die
 gemeinsame Button-Bedingung. Der Desktop-Test prüft den fehlenden Legacy-Secret-
-Wert. Vorhandene Simkl-PIN- und MDBList-Auth-/Store-Tests decken deren Flows ab.
+Wert. Die Simkl-Tests decken auch den neuen Device-/Token-Vertrag und die
+Windows-Speicherung ab. Die Live-Abnahme der Simkl-V2-Änderung steht aus.
 
 ```powershell
 Set-Location 'C:\Users\Alanp\Desktop\Chatgpt\Codex\Nuvio-Watch\NuvioDesktop'
-.\gradlew.bat :composeApp:desktopTest '--tests=*Trakt*Test' '--tests=*SimklPinAuthorizationTest' '--tests=*MdbListAuth*Test' '--tests=*TrackingConnectPolicyTest' '--project-prop=nuvio.webview2.dir=fork-maintenance/local/webview2-sdk/1.0.4078.44' --no-configuration-cache --console=plain
+.\gradlew.bat :composeApp:desktopTest '--tests=*Trakt*Test' '--tests=*Simkl*Test' '--tests=*MdbListAuth*Test' '--tests=*TrackingConnectPolicyTest' '--project-prop=nuvio.webview2.dir=fork-maintenance/local/webview2-sdk/1.0.4078.44' --no-configuration-cache --console=plain
 ```
 
 Nach erfolgreicher Testprüfung und Eintragen der eigenen Client-IDs kann lokal
-eine neue MSI gebaut werden. Version 0.1.52 liegt bereits im Ausgabeordner.
-Der folgende Vorschlag verwendet 0.1.53-auth-test.
+eine neue MSI gebaut werden. Der folgende Build verwendet die neue Testversion 0.1.55.
+Der folgende Vorschlag verwendet 0.1.55-simkl-v2-test.
 
 Vor dem Build die Readiness-Prüfung ausführen. Sie liest ausschließlich die
 vorgesehene lokale root/local.properties und gibt keine Werte aus.
@@ -94,7 +103,7 @@ Ein neues PowerShell-Fenster startet im Beispiel im oben angegebenen Repository.
 $ErrorActionPreference = 'Stop'
 .\fork-maintenance\check-tracking-readiness.ps1
 .\fork-maintenance\check-tracking-readiness.ps1 -RequireConfigured
-if (Test-Path '.\composeApp\build\compose\release-msis\Nuvio-Windows-x64-0.1.53-auth-test.msi') { throw 'Ziel-MSI existiert bereits. Eine neue Version waehlen.' }
+if (Test-Path '.\composeApp\build\compose\release-msis\Nuvio-Windows-x64-0.1.55-simkl-v2-test.msi') { throw 'Ziel-MSI existiert bereits. Eine neue Version waehlen.' }
 ```
 
 Der Schalter -RequireConfigured beendet die Prüfung bei fehlenden Werten
@@ -103,8 +112,8 @@ mit einem terminierenden Fehler. In einem Build-Skript zusätzlich am Anfang
 ausführen. Keine ExecutionPolicy global ändern.
 
 ```powershell
-.\gradlew.bat :composeApp:packageReleaseMsi '--project-prop=nuvio.desktop.versionName=0.1.53-auth-test' '--project-prop=nuvio.desktop.versionCode=153' '--project-prop=nuvio.party.browserOrigin=https://family-beta.nuvio-watch-friends.pages.dev' '--project-prop=nuvio.webview2.dir=fork-maintenance/local/webview2-sdk/1.0.4078.44' --no-configuration-cache --console=plain
-.\fork-maintenance\verify-msi.ps1 -MsiPath '.\composeApp\build\compose\release-msis\Nuvio-Windows-x64-0.1.53-auth-test.msi' -AllowPreviewOrigin
+.\gradlew.bat :composeApp:packageReleaseMsi '--project-prop=nuvio.desktop.versionName=0.1.55-simkl-v2-test' '--project-prop=nuvio.desktop.versionCode=155' '--project-prop=nuvio.party.browserOrigin=https://family-beta.nuvio-watch-friends.pages.dev' '--project-prop=nuvio.webview2.dir=fork-maintenance/local/webview2-sdk/1.0.4078.44' --no-configuration-cache --console=plain
+.\fork-maintenance\verify-msi.ps1 -MsiPath '.\composeApp\build\compose\release-msis\Nuvio-Windows-x64-0.1.55-simkl-v2-test.msi' -AllowPreviewOrigin
 ```
 
 Auf Windows zusätzlich jeden Anbieter mit fehlender und vorhandener ID prüfen,

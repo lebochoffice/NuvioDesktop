@@ -1,11 +1,15 @@
 [CmdletBinding()]
 param(
-    [string]$RepoPath = $(if (Test-Path (Join-Path (Split-Path -Parent $PSScriptRoot) 'gradlew.bat')) { Split-Path -Parent $PSScriptRoot } else { Join-Path (Split-Path -Parent $PSScriptRoot) 'NuvioDesktop' }),
+    [string]$RepoPath,
     [string]$WebView2Path,
     [switch]$Msi,
     [switch]$AllowUnconfiguredBuild
 )
 $ErrorActionPreference = 'Stop'
+if (!$PSBoundParameters.ContainsKey('RepoPath')) {
+    $parent = Split-Path -Parent $PSScriptRoot
+    $RepoPath = if (Test-Path -LiteralPath (Join-Path $parent 'gradlew.bat')) { $parent } else { Join-Path $parent 'NuvioDesktop' }
+}
 $repo = (Resolve-Path -LiteralPath $RepoPath).Path
 if (-not (Test-Path -LiteralPath (Join-Path $repo 'gradlew.bat'))) { throw 'Run this against the NuvioDesktop checkout.' }
 $previousGradleHome = $env:GRADLE_USER_HOME

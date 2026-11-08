@@ -1,13 +1,20 @@
 # Read-only Windows Installer database inspection; never invokes msiexec.
 [CmdletBinding()]
 param(
-    [string]$RepoPath = (Split-Path -Parent $PSScriptRoot),
+    [string]$RepoPath,
     [string]$MsiPath,
     # Test builds only: accept the feature-preview invitation origin.
-    [switch]$AllowPreviewOrigin
+    [switch]$AllowPreviewOrigin,
+    [switch]$RequirePartyProtocol,
+    [string]$InstalledExePath,
+    [switch]$ExpectForkFallback
 )
 $ErrorActionPreference = 'Stop'
+if (!$PSBoundParameters.ContainsKey('RepoPath')) {
+    $RepoPath = Split-Path -Parent $PSScriptRoot
+}
 $repo = (Resolve-Path -LiteralPath $RepoPath).Path
+if ($ExpectForkFallback -and !$InstalledExePath) { throw '-ExpectForkFallback requires -InstalledExePath.' }
 $msis = if ($MsiPath) { @(Get-Item -LiteralPath $MsiPath) } else { @(Get-ChildItem (Join-Path $repo 'composeApp/build/compose/release-msis') -Filter '*.msi') }
 if ($msis.Count -ne 1) { throw "Expected one published MSI, found $($msis.Count)" }
 $msi = $msis[0]
@@ -17,6 +24,10 @@ try {
     $bytes = New-Object byte[] 8
     if ($stream.Read($bytes, 0, 8) -ne 8 -or (-join ($bytes | ForEach-Object { $_.ToString('X2') })) -ne 'D0CF11E0A1B11AE1') { throw 'Not an MSI compound document' }
 } finally { $stream.Dispose() }
+if ($RequirePartyProtocol) {
+    & (Join-Path $PSScriptRoot 'register-windows-party-protocol.ps1') -MsiPath $msi.FullName -VerifyOnly
+}
+
 $installer = New-Object -ComObject WindowsInstaller.Installer
 $db = $installer.OpenDatabase($msi.FullName, 0)
 $view = $db.OpenView('SELECT `Property`, `Value` FROM `Property`')
@@ -96,11 +107,41 @@ try {
     if (-not $bridgeClassText.Contains('seekToExact')) { throw 'NativePlayerBridge.seekToExact missing from packaged application' }
 } finally { $zip.Dispose() }
 if (-not (Test-Path -LiteralPath (Join-Path $app 'runtime/bin/server/jvm.dll'))) { throw 'Packaged Java runtime missing' }
+
+# This optional section inspects the installed machine. It never launches a URI.
+if ($InstalledExePath) {
+    $exe = Get-Item -LiteralPath $InstalledExePath
+    if ($exe.PSIsContainer -or $exe.Name -ine 'Nuvio.exe') { throw 'Expected the installed Nuvio.exe.' }
+    $command = '"{0}" --party-link "%1"' -f $exe.FullName
+    $classes = 'Registry::HKEY_CLASSES_ROOT'
+    $capabilities = 'HKLM:\SOFTWARE\NuvioFamilyBeta\Capabilities'
+    function Assert-RegistryValue([string]$Path, [string]$Name, [string]$Expected) {
+        $key = Get-Item -LiteralPath $Path
+        if ($key.GetValueNames() -notcontains $Name -or $key.GetValue($Name) -ine $Expected) {
+            throw "Unexpected installed registry value '$Name' in $Path. Expected '$Expected'."
+        }
+    }
+    Assert-RegistryValue "$classes\Nuvio.FamilyBeta.Party" 'URL Protocol' ''
+    Assert-RegistryValue "$classes\Nuvio.FamilyBeta.Party\shell\open\command" '' $command
+    Assert-RegistryValue $capabilities 'ApplicationName' 'Nuvio Family Beta'
+    Assert-RegistryValue $capabilities 'ApplicationDescription' 'Open Nuvio watch party invitations.'
+    Assert-RegistryValue "$capabilities\URLAssociations" 'nuvio' 'Nuvio.FamilyBeta.Party'
+    Assert-RegistryValue 'HKLM:\SOFTWARE\RegisteredApplications' 'Nuvio Family Beta' 'Software\NuvioFamilyBeta\Capabilities'
+    $schema = Get-Item -LiteralPath "$classes\nuvio"
+    if ($schema.GetValueNames() -notcontains 'URL Protocol') { throw 'Installed nuvio scheme is missing its URL Protocol marker.' }
+    if ($ExpectForkFallback) {
+        Assert-RegistryValue "$classes\nuvio" 'NuvioFamilyBetaOwner' $command
+        Assert-RegistryValue "$classes\nuvio\shell\open\command" '' $command
+    }
+    Write-Host 'Installed registry verified. Open a party URI separately to verify Windows routing.'
+}
+
 $manifest = [ordered]@{
     file = $msi.Name; bytes = $msi.Length; sha256 = (Get-FileHash -LiteralPath $msi.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
     product = $properties['ProductName']; productVersion = $properties['ProductVersion']; signature = [string](Get-AuthenticodeSignature -LiteralPath $msi.FullName).Status
     appJar = $jars[0].Name; requiredNativeEntries = $required; watchInBrowser = $true; javaRuntimePresent = $true
     installedOrLaunched = $false; msiInspectedReadOnly = $true; stagedAppInspected = $true; msiJarMetadataMatchesStage = $true; publicBackendConfigured = $true; introDbConfigured = $true; browserInviteOrigin = $inviteOrigin; guestCommandSequencer = $true; exactPausedSeek = $true; sourceCommit = $env:GITHUB_SHA
+    conditionalPartyProtocolInspected = [bool]$RequirePartyProtocol; installedPartyRegistryInspected = [bool]$InstalledExePath
 }
 $path = Join-Path $msi.DirectoryName ($msi.BaseName + '-verification.json')
 $manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $path -Encoding utf8

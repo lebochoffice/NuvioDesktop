@@ -789,6 +789,8 @@ val windowsPlayerBridgeArch = when (System.getProperty("os.arch").lowercase()) {
     else -> "x64"
 }
 val windowsPlayerBridgeSource = layout.projectDirectory.file("src/desktopMain/native/windows/player_bridge.cpp")
+val windowsPartyMsiSource = layout.projectDirectory.file("src/desktopMain/native/windows/party_protocol_msi.cpp")
+val windowsPartyMsiDll = layout.buildDirectory.file("native/windows/party_protocol_msi.dll")
 val windowsPlayerBridgeOutput = layout.buildDirectory.file("native/windows/player_bridge.dll")
 val windowsPlayerBridgeImportLib = layout.buildDirectory.file("native/windows/player_bridge.lib")
 val windowsPlayerBridgePdb = layout.buildDirectory.file("native/windows/player_bridge.pdb")
@@ -905,6 +907,15 @@ val windowsPlayerBridgeCommand = if (missingWindowsPlayerBridgeInputs.isNotEmpty
         "D3d11.lib",
     ).joinToString(" ")
     val powershellCompileCommand = compileCommand.replace("\"", "__DQ__")
+    val msiDll = windowsPartyMsiDll.get().asFile
+    val partyMsiCompileCommand = listOf(
+        "cl", "/nologo", "/EHsc", "/std:c++17", "/MT", "/LD",
+        cmdQuote(windowsPartyMsiSource.asFile.absolutePath),
+        "/Fo${cmdQuote(msiDll.resolveSibling("party_protocol_msi.obj").absolutePath)}",
+        "/Fe${cmdQuote(msiDll.absolutePath)}",
+        "/link", "/IMPLIB:${cmdQuote(msiDll.resolveSibling("party_protocol_msi.lib").absolutePath)}",
+        "Msi.lib", "Advapi32.lib",
+    ).joinToString(" ").replace("\"", "__DQ__")
     val powershellCommand = """
         ${'$'}ErrorActionPreference = 'Stop'
         ${'$'}dq = [char]34
@@ -922,12 +933,15 @@ val windowsPlayerBridgeCommand = if (missingWindowsPlayerBridgeInputs.isNotEmpty
         ${'$'}vcvars = ([string]${'$'}vcvars).Trim()
         ${'$'}bat = ${psSingleQuote(windowsPlayerBridgeScript.get().asFile.absolutePath)}
         ${'$'}compile = ${psSingleQuote(powershellCompileCommand)}.Replace('__DQ__', ${'$'}dq)
+        ${'$'}compileMsi = ${psSingleQuote(partyMsiCompileCommand)}.Replace('__DQ__', ${'$'}dq)
         ${'$'}lines = @(
           '@echo off',
           ('set {0}VCVARS={1}{0}' -f ${'$'}dq, ${'$'}vcvars),
           ('call {0}%VCVARS%{0} >nul' -f ${'$'}dq),
           'if errorlevel 1 exit /b %errorlevel%',
           ${'$'}compile,
+          'if errorlevel 1 exit /b %errorlevel%',
+          ${'$'}compileMsi,
           'exit /b %ERRORLEVEL%'
         )
         Set-Content -LiteralPath ${'$'}bat -Value ${'$'}lines -Encoding ASCII
@@ -948,6 +962,7 @@ val buildWindowsPlayerBridge = tasks.register<Exec>("buildWindowsPlayerBridge") 
     notCompatibleWithConfigurationCache("Builds a host-local player bridge against WebView2 and libmpv for Windows.")
     enabled = isWindowsHost
     inputs.file(windowsPlayerBridgeSource)
+    inputs.file(windowsPartyMsiSource)
     if (windowsWebView2IncludeDir.exists()) {
         inputs.dir(windowsWebView2IncludeDir)
     }
@@ -957,11 +972,14 @@ val buildWindowsPlayerBridge = tasks.register<Exec>("buildWindowsPlayerBridge") 
     outputs.file(windowsPlayerBridgeOutput)
     outputs.file(windowsPlayerBridgeImportLib)
     outputs.file(windowsPlayerBridgePdb)
+    outputs.file(windowsPartyMsiDll)
     // Rebuild when the DLL is missing or older than player_bridge.cpp; a bare
     // "exists" check silently packaged a stale bridge after source changes.
     onlyIf {
         val output = windowsPlayerBridgeOutput.get().asFile
-        !output.exists() || windowsPlayerBridgeSource.asFile.lastModified() > output.lastModified()
+        val msiDll = windowsPartyMsiDll.get().asFile
+        !output.exists() || windowsPlayerBridgeSource.asFile.lastModified() > output.lastModified() ||
+            !msiDll.exists() || windowsPartyMsiSource.asFile.lastModified() > msiDll.lastModified()
     }
     commandLine(windowsPlayerBridgeCommand)
 }
@@ -1262,6 +1280,7 @@ kotlin {
                 implementation(libs.ksoup)
                 implementation(libs.sentry.jvm)
                 implementation(libs.jna)
+                implementation(libs.jnaplatform)
                 implementation(files("libs/nuvio-engine-jvm-0.1.6.jar"))
             }
         }
@@ -1482,6 +1501,22 @@ fun publishWindowsMsiOutput(release: Boolean) {
     val sourceMsi = defaultMsi.takeIf { it.exists() }
         ?: finalMsi.takeIf { it.exists() }
         ?: error("Expected Windows MSI output in ${outputDir.absolutePath}")
+
+    val protocolScript = rootProject.file("fork-maintenance/register-windows-party-protocol.ps1")
+    fun runProtocolStep(step: String, vararg options: String) {
+        val process = ProcessBuilder(
+            "powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+            "-File", protocolScript.absolutePath, "-MsiPath", sourceMsi.absolutePath, *options,
+        ).redirectErrorStream(true).start()
+        val output = process.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }.trim()
+        val exitCode = process.waitFor()
+        if (exitCode != 0) {
+            throw GradleException("Windows MSI party protocol $step failed (exit $exitCode).\n$output")
+        }
+        if (output.isNotEmpty()) logger.lifecycle(output)
+    }
+    runProtocolStep("registration", "-SchemaActionDll", windowsPartyMsiDll.get().asFile.absolutePath)
+    runProtocolStep("verification", "-VerifyOnly")
 
     if (sourceMsi.canonicalFile != finalMsi.canonicalFile) {
         sourceMsi.copyTo(finalMsi, overwrite = true)

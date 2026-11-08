@@ -1616,6 +1616,19 @@
   gap: 8px;
 }
 
+.party-playback-controls > h3 {
+  margin: 0;
+}
+
+.party-playback-controls > .party-switch-row {
+  padding-block: 6px;
+}
+
+.party-disclosure > summary:focus-visible {
+  outline: 2px solid var(--theme-accent);
+  outline-offset: 2px;
+}
+
 .party-stream-card {
   display: flex;
   align-items: center;

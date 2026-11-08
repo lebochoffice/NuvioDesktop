@@ -1,5 +1,6 @@
 package com.nuvio.app.features.party
 
+import com.nuvio.app.features.player.sanitizePlaybackHeaders
 import com.nuvio.app.features.streams.StreamBadge
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -130,12 +131,51 @@ class PartyStreamTest {
     }
 
     @Test
-    fun completeAccountKeysAreForbiddenInBothSourcesAndHeaders() {
+    fun detectsCompleteAccountKeysInSourcesAndHeaders() {
         val accountKey = "synthetic-account-secret"
         assertFalse(stream.containsAccountKey(accountKey))
         assertTrue(stream.copy(headers = mapOf("Authorization" to "Bearer $accountKey")).containsAccountKey(accountKey))
         assertTrue(stream.copy(browserHls = PartyBrowserHls("https://stream.example.test/a?token=synthetic%2Daccount%2Dsecret")).containsAccountKey(accountKey))
         assertFalse(stream.copy(browserHls = PartyBrowserHls("https://stream.example.test/a?token=scoped")).containsAccountKey(accountKey))
+    }
+
+    @Test
+    fun consentedOriginalKeepsPlaybackCredentialsForTheCurrentGuest() {
+        val original = stream.copy(
+            url = "https://cdn.example.com/movie.mkv?token=synthetic-account-key",
+            headers = mapOf(
+                "Authorization" to "Bearer synthetic-account-key",
+                "Cookie" to "session=synthetic-session",
+                "Referer" to "https://addon.example",
+                "Origin" to "https://addon.example",
+                "User-Agent" to "Synthetic Player",
+            ),
+        )
+        val host = ActiveParty(
+            id = "party", code = "UXZ83H", memberId = "host", hostMemberId = "host",
+            members = emptyList(), presence = emptyMap(), media = PartyMedia("movie", "tt1", "movie"),
+            maxMembers = 8, connected = true, sharing = true, browserSharing = true,
+        )
+        val guest = host.copy(memberId = "guest", sharing = false)
+        val browser = PartyBrowserHls("https://stream.example.test/master.m3u8")
+        val offer = assertNotNull(host.streamOffer(original, browser))
+        val wire = PartyApi.json.encodeToString(PartyStream.serializer(), offer)
+        val received = PartyApi.json.decodeFromString(PartyStream.serializer(), wire)
+        val item = assertNotNull(guest.desktopStreamFor(guest.media.key, received)).toStreamItem()
+        assertEquals(original.url, item.playableDirectUrl)
+        assertEquals(original.headers, item.behaviorHints.proxyHeaders?.request)
+        assertEquals(original.headers, sanitizePlaybackHeaders(item.behaviorHints.proxyHeaders?.request))
+        assertEquals(original.responseHeaders, item.behaviorHints.proxyHeaders?.response)
+        assertEquals(browser, received.browserHls)
+
+        val revoked = assertNotNull(host.copy(sharing = false).streamOffer(received, received.browserHls))
+        assertNull(guest.desktopStreamFor(guest.media.key, revoked))
+        assertEquals(browser, revoked.browserHls)
+        assertTrue(revoked.headers.isEmpty())
+        assertNull(guest.desktopStreamFor(guest.media.key, null))
+        assertNull(guest.desktopStreamFor(guest.media.key, original.copy(url = "file:///local/movie.mkv")))
+        assertNull(guest.desktopStreamFor("movie|tt2||", received))
+        assertNull(host.desktopStreamFor(host.media.key, received))
     }
 }
 

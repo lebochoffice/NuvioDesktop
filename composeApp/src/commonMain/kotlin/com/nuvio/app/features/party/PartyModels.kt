@@ -104,6 +104,13 @@ data class PartyStream(
 
 internal fun isShareableStreamUrl(url: String): Boolean = SHAREABLE_URL.containsMatchIn(url)
 
+internal fun ActiveParty?.desktopStreamFor(mediaKey: String, offer: PartyStream?): PartyStream? {
+    val party = this ?: return null
+    val stream = offer ?: return null
+    if (party.isHost || party.media.key != mediaKey || stream.mediaKey != mediaKey) return null
+    return stream.forDesktop()
+}
+
 // A single offer (or revocation) keeps both routes on the existing stream event.
 // Older Desktop clients ignore browser_hls; an empty top-level URL is not playable.
 internal fun ActiveParty.streamOffer(desktop: PartyStream?, browser: PartyBrowserHls?): PartyStream? {
@@ -117,8 +124,7 @@ internal fun ActiveParty.streamOffer(desktop: PartyStream?, browser: PartyBrowse
     }
 }
 
-// Reject the complete known account key in either transport, including headers.
-// Never log the JSON or the key; a rejected original cannot be silently stripped.
+// Detect a complete known account key when a sharing path requires that check.
 internal fun PartyStream.containsAccountKey(key: String): Boolean {
     if (key.isBlank()) return false
     fun textContains(value: String): Boolean = value.contains(key) ||
