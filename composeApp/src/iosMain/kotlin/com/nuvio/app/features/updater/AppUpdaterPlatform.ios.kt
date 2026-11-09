@@ -6,10 +6,15 @@ import nuvio.composeapp.generated.resources.Res
 import nuvio.composeapp.generated.resources.updates_not_available
 import org.jetbrains.compose.resources.getString
 
+internal actual fun windowsForkUpdateInstaller(): WindowsForkUpdateInstaller? = null
+
 actual object AppUpdaterPlatform {
     actual val isSupported: Boolean = false
     actual val isDebugBuild: Boolean = false
     actual val hasSingleUpdateChannel: Boolean = false
+    actual val isStatusOnlyForkUpdater: Boolean = false
+    actual fun getLastSuccessfulForkCheck(): Long? = null
+    actual fun setLastSuccessfulForkCheck(epochMillis: Long) = Unit
     // Upstream behaviour unchanged here; only the fork's desktop build enforces checksums.
     actual val requiresUpdateChecksum: Boolean = false
     actual fun verifyDownloadedUpdate(path: String, expectedSha256: String): Result<Unit> = Result.success(Unit)

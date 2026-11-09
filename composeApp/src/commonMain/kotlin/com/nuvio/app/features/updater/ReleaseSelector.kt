@@ -1,6 +1,16 @@
 package com.nuvio.app.features.updater
 
 internal object ReleaseSelector {
+    private val forkTag = Regex("^v?(\\d+\\.\\d+\\.\\d+)-watchparty$")
+
+    fun forkVersion(tag: String?): SemanticVersion? =
+        tag?.let(forkTag::matchEntire)?.groupValues?.get(1)?.let(VersionUtils::parse)
+
+    fun latestForkRelease(releases: List<GitHubReleaseDto>): GitHubReleaseDto? =
+        releases.filterNot { it.draft || it.prerelease }
+            .mapNotNull { release -> forkVersion(release.tagName)?.let { it to release } }
+            .maxByOrNull { it.first }?.second
+
     private val prereleaseNamePattern = Regex(
         "(?:^|[\\s._-])(alpha|beta|rc|preview)(?:[\\s._-]|$)",
         RegexOption.IGNORE_CASE

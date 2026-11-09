@@ -1,6 +1,7 @@
 package com.nuvio.app
 
 import com.nuvio.app.core.deeplink.AppDeepLinkRepository
+import com.nuvio.app.core.storage.windowsFamilyDataDirectory
 import com.nuvio.app.features.party.PARTY_CODE_LENGTH
 import com.nuvio.app.features.party.normalizePartyCode
 import io.ktor.http.Url
@@ -108,9 +109,10 @@ internal class WindowsPartyLinks private constructor(
 
     companion object {
         fun open(): WindowsPartyLinks? = runCatching {
-            val local = System.getenv("LOCALAPPDATA")?.takeIf(String::isNotBlank)?.let { Path.of(it) }
-                ?: Path.of(System.getProperty("user.home"), "AppData", "Local")
-            val directory = Files.createDirectories(local.resolve("NuvioFamilyBeta").resolve("party-links"))
+            val local = windowsFamilyDataDirectory(
+                System.getenv("LOCALAPPDATA"), Path.of(System.getProperty("user.home"), "AppData", "Local"),
+            )
+            val directory = Files.createDirectories(local.resolve("party-links"))
             val channel = FileChannel.open(directory.resolve("instance.lock"), CREATE, WRITE, NOFOLLOW_LINKS)
             val primary = try {
                 channel.tryLock() != null

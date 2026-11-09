@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="fork_updates_title">Updates</string>
+    <string name="fork_updates_installed">Installed Fork version: %1$s</string>
+    <string name="fork_updates_found">Latest Fork version found: %1$s</string>
+    <string name="fork_updates_checking">Checking for updates…</string>
+    <string name="fork_updates_not_checked">Not checked yet</string>
+    <string name="fork_updates_no_release">No matching recent release found</string>
+    <string name="fork_updates_unknown_version">Installed build cannot be compared with Fork releases</string>
+    <string name="fork_updates_available">New Fork release found</string>
+    <string name="fork_updates_current">No newer Fork release found</string>
+    <string name="fork_updates_last_check">Last successful Fork check (UTC): %1$s</string>
+    <string name="fork_updates_upstream">Official Nuvio (information only): %1$s</string>
+    <string name="fork_updates_changelog">Changelog</string>
+    <string name="fork_updates_check_now">Check for updates now</string>
+    <string name="fork_updates_install_disabled">Installation is not enabled yet</string>
+    <string name="fork_updates_network">Network unavailable. Try again later.</string>
+    <string name="fork_updates_rate_limit">GitHub rate limit reached. Try again later.</string>
+    <string name="fork_updates_github">Could not read GitHub releases. Try again later.</string>
+    <string name="fork_updates_download">Download update</string>
+    <string name="fork_updates_cancel_download">Cancel download</string>
+    <string name="fork_updates_install">Install update</string>
+    <string name="fork_updates_confirm_install">Install %1$s now? The Windows Installer will open.</string>
+    <string name="fork_updates_dismiss">Cancel</string>
+    <string name="fork_updates_downloading">Downloading the update…</string>
+    <string name="fork_updates_verifying">Verifying the installer and its signature…</string>
+    <string name="fork_updates_ready">Installer verified and ready.</string>
+    <string name="fork_updates_installing">Windows Installer is running…</string>
+    <string name="fork_updates_installed_restart_app">Update installed. Restart Nuvio Family.</string>
+    <string name="fork_updates_restart_windows">Update installed. Windows must be restarted.</string>
+    <string name="fork_updates_cancelled">Update cancelled.</string>
+    <string name="fork_updates_download_failed">Download failed. Check your connection and try again.</string>
+    <string name="fork_updates_verification_failed">Could not verify the installer. The file was rejected.</string>
+    <string name="fork_updates_install_failed">Windows Installer could not complete the update. Check the installation log.</string>
+    <string name="fork_updates_party_active">End or leave the Watch Party before installing.</string>
+    <string name="fork_updates_exit_code">Windows Installer code %1$d</string>
+    <string name="fork_updates_no_package">No eligible x64 installer for this installed version.</string>
+    <string name="fork_updates_signer_missing">Downloads are unavailable until the Fork signing certificate is configured.</string>
+</resources>

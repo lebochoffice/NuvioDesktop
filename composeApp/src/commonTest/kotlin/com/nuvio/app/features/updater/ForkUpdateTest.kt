@@ -9,6 +9,33 @@ import kotlin.test.assertTrue
 // Fork update contract: tags "v<core>-watchparty", one
 // "Nuvio-WatchParty-Windows-x64-<version>.msi" asset with a GitHub sha256 digest.
 class ForkUpdateTest {
+    @Test
+    fun `windows fork asset is bound to its approved release and digest`() {
+        val version = "0.1.63-watchparty"
+        val name = "Nuvio-WatchParty-Windows-x64-$version.msi"
+        val url = "https://github.com/lebochoffice/NuvioDesktop/releases/download/v$version/$name"
+        val asset = GitHubAssetDto(name, url, 100, digest = "sha256:${"a".repeat(64)}")
+        val release = GitHubReleaseDto(tagName = "v$version", body = "Changelog", assets = listOf(asset))
+        assertEquals("1.1.63", forkMsiProductVersion(release.tagName.orEmpty()))
+        assertEquals("1.1.63", forkMsiProductVersion(version))
+        assertNull(forkMsiProductVersion("v0.01.63-watchparty"))
+        assertNull(forkMsiProductVersion("v0.1.65536-watchparty"))
+        assertEquals("Changelog", windowsForkUpdate(release)?.notes)
+        assertEquals(url, windowsForkUpdate(release)?.assetUrl)
+        assertNull(windowsForkUpdate(release.copy(draft = true)))
+        assertNull(windowsForkUpdate(release.copy(prerelease = true)))
+        assertNull(windowsForkUpdate(release.copy(assets = listOf(asset, asset))))
+        for (invalid in listOf(
+            asset.copy(name = name.replace("x64", "arm64")),
+            asset.copy(browserDownloadUrl = url.replace("lebochoffice", "NuvioMedia")),
+            asset.copy(browserDownloadUrl = url.replace("v$version/", "v0.1.62-watchparty/")),
+            asset.copy(size = maximumForkMsiBytes + 1),
+            asset.copy(digest = null),
+        )) {
+            assertNull(windowsForkUpdate(release.copy(assets = listOf(invalid))))
+        }
+    }
+
     private val windowsSelector = AppUpdateAssetSelector(
         fileExtensions = listOf(".msi"),
         preferredNameFragments = listOf("x64", "windows", "win"),

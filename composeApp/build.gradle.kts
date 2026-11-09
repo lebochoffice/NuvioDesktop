@@ -518,7 +518,8 @@ val desktopReleaseVersionCode = (
     ?.toIntOrNull()
     ?: 1
 val desktopReleasePackageVersion = jpackageCompatibleVersion(desktopReleaseVersionName)
-val windowsMsiUpgradeUuid = "395990ee-9b8a-3548-922c-e7a23a495b8d"
+val windowsMsiProductName = "Nuvio Family"
+val windowsMsiUpgradeUuid = "dfe71c5b-c265-42ce-a025-396193575a13"
 val iosDistribution = (
     providers.gradleProperty("nuvio.ios.distribution").orNull
         ?: System.getenv("NUVIO_IOS_DISTRIBUTION")
@@ -1361,6 +1362,16 @@ tasks.matching {
     dependsOn(":desktopSentry:generateSentryDebugMetaPropertiesjava")
 }
 
+tasks.withType<org.gradle.language.jvm.tasks.ProcessResources>().matching {
+    it.name == "desktopProcessResources" || it.name == "processDesktopMainResources"
+}.configureEach {
+    from(listOf(rootProject.file("fork-maintenance/windows-msi-identity.ps1"),
+        rootProject.file("fork-maintenance/windows-update-trust.ps1"),
+        rootProject.file("fork-maintenance/verify-windows-update.ps1"))) {
+        into("fork-updater")
+    }
+}
+
 compose.desktop {
     application {
         mainClass = "com.nuvio.app.MainKt"
@@ -1381,7 +1392,7 @@ compose.desktop {
 
         nativeDistributions {
             targetFormats(TargetFormat.Dmg, TargetFormat.Msi, TargetFormat.Deb, TargetFormat.Rpm, TargetFormat.AppImage)
-            packageName = "Nuvio"
+            packageName = if (isWindowsHost) windowsMsiProductName else "Nuvio"
             packageVersion = desktopReleasePackageVersion
             vendor = "Nuvio Media"
             if (isMacHost) {
@@ -1437,7 +1448,7 @@ compose.desktop {
                 upgradeUuid = windowsMsiUpgradeUuid
                 shortcut = true
                 menu = true
-                menuGroup = "Nuvio"
+                menuGroup = windowsMsiProductName
             }
             linux {
                 iconFile.set(project.file("src/desktopMain/resources/icons/nuvio-app-icon-transparent.png"))
@@ -1458,6 +1469,8 @@ tasks.withType<AbstractJPackageTask>()
     .matching { it.name.endsWith("Msi") || it.name.endsWith("Exe") }
     .configureEach {
         freeArgs.add("--win-shortcut-prompt")
+        freeArgs.add("--install-dir")
+        freeArgs.add(windowsMsiProductName)
     }
 
 fun renameMacosDmgOutput(release: Boolean) {
@@ -1503,10 +1516,8 @@ fun publishWindowsMsiOutput(release: Boolean) {
     val distributionName = if (release) "main-release" else "main"
     val outputDir = layout.buildDirectory.dir("compose/binaries/$distributionName/msi").get().asFile
     val finalMsi = outputDir.resolve("Nuvio-Windows-$windowsPlayerBridgeArch-$desktopReleaseVersionName.msi")
-    val defaultMsi = outputDir.resolve("Nuvio-$desktopReleasePackageVersion.msi")
-    val sourceMsi = defaultMsi.takeIf { it.exists() }
-        ?: finalMsi.takeIf { it.exists() }
-        ?: error("Expected Windows MSI output in ${outputDir.absolutePath}")
+    val sourceMsi = outputDir.resolve("$windowsMsiProductName-$desktopReleasePackageVersion.msi")
+    check(sourceMsi.isFile) { "Expected Windows MSI output at ${sourceMsi.absolutePath}" }
 
     val protocolScript = rootProject.file("fork-maintenance/register-windows-party-protocol.ps1")
     fun runProtocolStep(step: String, vararg options: String) {

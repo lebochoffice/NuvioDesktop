@@ -21,6 +21,9 @@ expect object AppUpdaterPlatform {
     val isSupported: Boolean
     val isDebugBuild: Boolean
     val hasSingleUpdateChannel: Boolean
+    val isStatusOnlyForkUpdater: Boolean
+    fun getLastSuccessfulForkCheck(): Long?
+    fun setLastSuccessfulForkCheck(epochMillis: Long)
 
     fun getSupportedAbis(): List<String>
 

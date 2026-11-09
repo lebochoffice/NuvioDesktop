@@ -1,6 +1,7 @@
 package com.nuvio.app.features.updater
 
 import com.nuvio.app.features.addons.httpRequestRaw
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.serialization.SerialName
@@ -32,6 +33,12 @@ internal data class GitHubAssetDto(
 )
 
 internal class NoChannelReleaseException : IllegalStateException()
+
+internal enum class UpdateLookupError { Network, RateLimited, GitHub }
+
+internal data class ReleaseInfo(val tag: String, val notes: String, val update: AppUpdate? = null)
+
+internal data class ReleaseLookup(val release: ReleaseInfo? = null, val error: UpdateLookupError? = null)
 
 internal data class AppUpdateAssetCandidate(
     val name: String,
@@ -69,6 +76,43 @@ internal object AppUpdaterRepository {
     private val json = Json {
         ignoreUnknownKeys = true
         isLenient = true
+    }
+
+    /** The Windows status and download share the same release response. */
+    suspend fun lookupRelease(fork: Boolean): ReleaseLookup {
+        val repository = if (fork) forkUpdateRepository else "NuvioMedia/NuvioDesktop"
+        val response = try {
+            httpRequestRaw(
+                method = "GET",
+                url = "https://api.github.com/repos/$repository/releases?per_page=30",
+                headers = mapOf("Accept" to "application/vnd.github+json", "User-Agent" to "NuvioDesktop-WatchParty"),
+                body = "",
+                maxResponseBodyBytes = 4 * 1024 * 1024,
+            )
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            return ReleaseLookup(error = UpdateLookupError.Network)
+        }
+        currentCoroutineContext().ensureActive()
+        if (response.status == 429 || (response.status == 403 && response.headers.any { (name, value) ->
+                name.equals("x-ratelimit-remaining", ignoreCase = true) && value.trim() == "0" ||
+                    name.equals("retry-after", ignoreCase = true)
+            })
+        ) return ReleaseLookup(error = UpdateLookupError.RateLimited)
+        if (response.status !in 200..299) return ReleaseLookup(error = UpdateLookupError.GitHub)
+        val releases = try {
+            json.decodeFromString<List<GitHubReleaseDto>>(response.body)
+        } catch (_: IllegalArgumentException) {
+            return ReleaseLookup(error = UpdateLookupError.GitHub)
+        }
+        val release = if (fork) ReleaseSelector.latestForkRelease(releases) else releases
+            .filterNot(GitHubReleaseDto::draft)
+            .mapNotNull { item -> VersionUtils.parse(item.tagName)?.let { it to item } }
+            .maxByOrNull { it.first }?.second
+        return ReleaseLookup(release?.let { item ->
+            item.tagName?.let { ReleaseInfo(it, item.body.orEmpty(), if (fork) windowsForkUpdate(item) else null) }
+        })
     }
 
     suspend fun getLatestChannelUpdate(channel: UpdateChannel): Result<AppUpdate> = runCatching {

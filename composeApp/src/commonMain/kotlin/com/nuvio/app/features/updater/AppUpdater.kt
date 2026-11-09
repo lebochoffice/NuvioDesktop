@@ -6,6 +6,8 @@ import androidx.compose.runtime.rememberCoroutineScope
 import com.nuvio.app.core.build.AppFeaturePolicy
 import com.nuvio.app.core.i18n.localizedByteUnit
 import com.nuvio.app.core.ui.NuvioToastController
+import com.nuvio.app.features.party.PartyRepository
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
@@ -17,8 +19,10 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.TimeoutCancellationException
 import nuvio.composeapp.generated.resources.*
 import org.jetbrains.compose.resources.getString
+import kotlin.time.Clock
 
 data class AppUpdate(
     val tag: String,
@@ -45,6 +49,36 @@ data class AppUpdaterUiState(
     val isDebugTest: Boolean = false,
 )
 
+internal data class ForkUpdateStatus(
+    val checking: Boolean = false,
+    val fork: ReleaseLookup? = null,
+    val upstream: ReleaseLookup? = null,
+    val lastSuccessfulCheck: Long? = null,
+    val transfer: ForkUpdateTransfer = ForkUpdateTransfer.Idle,
+    val progress: Float? = null,
+    val installerExitCode: Int? = null,
+) {
+    val versionComparison: Int?
+        get() {
+            val installed = ReleaseSelector.forkVersion(AppUpdaterPlatform.currentVersionName) ?: return null
+            return ReleaseSelector.forkVersion(fork?.release?.tag)?.compareTo(installed)
+        }
+
+    val canUseUpdate: Boolean
+        get() {
+            if ((versionComparison ?: 0) <= 0) return false
+            val update = fork?.release?.update ?: return false
+            val target = forkMsiProductVersion(update.tag)?.let(VersionUtils::parse) ?: return false
+            val installed = forkMsiProductVersion(AppUpdaterPlatform.currentVersionName)?.let(VersionUtils::parse) ?: return false
+            return target > installed
+        }
+}
+
+internal enum class ForkUpdateTransfer {
+    Idle, Downloading, Verifying, Ready, Installing, Installed, RestartRequired,
+    Cancelled, InstallCancelled, DownloadFailed, VerificationFailed, InstallFailed, PartyActive,
+}
+
 class AppUpdaterController internal constructor(
     private val scope: CoroutineScope,
     private val preferences: UpdatePreferences = UpdatePreferences.shared,
@@ -52,10 +86,21 @@ class AppUpdaterController internal constructor(
 ) {
     private val _uiState = MutableStateFlow(AppUpdaterUiState(updateChannel = preferences.channel.value))
     val uiState: StateFlow<AppUpdaterUiState> = _uiState.asStateFlow()
+    private val _forkStatus = MutableStateFlow(ForkUpdateStatus(
+        lastSuccessfulCheck = if (AppUpdaterPlatform.isStatusOnlyForkUpdater) {
+            AppUpdaterPlatform.getLastSuccessfulForkCheck()
+        } else null,
+    ))
+    internal val forkStatus = _forkStatus.asStateFlow()
 
     private var autoCheckStarted = false
     private var updateCheckJob: Job? = null
     private var downloadJob: Job? = null
+    private val forkInstaller = windowsForkUpdateInstaller()
+    internal val canDownloadForkUpdate get() = forkInstaller?.canDownload == true
+    internal val isForkInstallationReleased get() = forkInstaller?.installationReleased == true
+    private var forkTransferJob: Job? = null
+    private var verifiedForkFile: Pair<AppUpdate, String>? = null
 
     init {
         scope.launch(start = CoroutineStart.UNDISPATCHED) {
@@ -80,7 +125,133 @@ class AppUpdaterController internal constructor(
             return
         }
         autoCheckStarted = true
-        checkForUpdates(force = false, showNoUpdateFeedback = false)
+        if (AppUpdaterPlatform.isStatusOnlyForkUpdater) {
+            scope.launch {
+                var failures = 0
+                while (true) {
+                    checkForkStatus()
+                    updateCheckJob?.join()
+                    val status = _forkStatus.value
+                    val failed = status.fork?.error != null || status.upstream?.error != null
+                    failures = if (failed) (failures + 1).coerceAtMost(5) else 0
+                    val minutes = when {
+                        !failed -> 12 * 60
+                        status.fork?.error == UpdateLookupError.RateLimited ||
+                            status.upstream?.error == UpdateLookupError.RateLimited -> 60
+                        else -> 5 * (1 shl (failures - 1))
+                    }
+                    delay(minutes * 60_000L)
+                }
+            }
+        } else checkForUpdates(force = false, showNoUpdateFeedback = false)
+    }
+
+    private fun checkForkStatus() {
+        if (updateCheckJob?.isActive == true || forkTransferJob?.isActive == true) return
+        updateCheckJob = scope.launch {
+            _forkStatus.update { it.copy(checking = true) }
+            try {
+                val fork = AppUpdaterRepository.lookupRelease(fork = true)
+                verifiedForkFile?.let { (update, path) ->
+                    if (update != fork.release?.update) {
+                        AppUpdaterPlatform.deleteDownloadedUpdate(path)
+                        verifiedForkFile = null
+                        _forkStatus.update { it.copy(transfer = ForkUpdateTransfer.Idle, progress = null) }
+                    }
+                }
+                val lastSuccess = if (fork.error == null) {
+                    Clock.System.now().toEpochMilliseconds().also(AppUpdaterPlatform::setLastSuccessfulForkCheck)
+                } else _forkStatus.value.lastSuccessfulCheck
+                _forkStatus.update { it.copy(fork = fork, lastSuccessfulCheck = lastSuccess) }
+                val upstream = AppUpdaterRepository.lookupRelease(fork = false)
+                _forkStatus.update { it.copy(upstream = upstream) }
+            } finally {
+                _forkStatus.update { it.copy(checking = false) }
+            }
+        }
+    }
+
+    internal fun downloadForkUpdate() {
+        val installer = forkInstaller ?: return
+        val status = _forkStatus.value
+        val update = status.fork?.release?.update ?: return
+        if (!installer.canDownload || !status.canUseUpdate || status.checking ||
+            status.transfer in setOf(ForkUpdateTransfer.Installed, ForkUpdateTransfer.RestartRequired) ||
+            verifiedForkFile != null || forkTransferJob?.isActive == true) return
+        forkTransferJob = scope.launch {
+            setForkTransfer(ForkUpdateTransfer.Downloading)
+            var path: String? = null
+            try {
+                val file = installer.download(update) { received, total ->
+                    _forkStatus.update { it.copy(progress = total?.let { size -> received.toFloat() / size }) }
+                }
+                path = file
+                setForkTransfer(ForkUpdateTransfer.Verifying)
+                installer.verify(update, file)
+                currentCoroutineContext().ensureActive()
+                verifiedForkFile = update to file
+                setForkTransfer(ForkUpdateTransfer.Ready)
+            } catch (_: TimeoutCancellationException) {
+                setForkTransfer(ForkUpdateTransfer.DownloadFailed)
+            } catch (cancelled: CancellationException) {
+                setForkTransfer(ForkUpdateTransfer.Cancelled)
+                throw cancelled
+            } catch (_: Exception) {
+                setForkTransfer(if (path == null) ForkUpdateTransfer.DownloadFailed else ForkUpdateTransfer.VerificationFailed)
+            } finally {
+                if (verifiedForkFile == null) path?.let(AppUpdaterPlatform::deleteDownloadedUpdate)
+            }
+        }
+    }
+
+    internal fun cancelForkDownload() {
+        if (_forkStatus.value.transfer in setOf(ForkUpdateTransfer.Downloading, ForkUpdateTransfer.Verifying)) {
+            forkTransferJob?.cancel()
+        }
+    }
+
+    internal fun confirmForkInstallation() {
+        val installer = forkInstaller ?: return
+        val (update, path) = verifiedForkFile ?: return
+        val status = _forkStatus.value
+        if (!installer.installationReleased || status.checking || !status.canUseUpdate ||
+            status.fork?.release?.update != update || forkTransferJob?.isActive == true) return
+        val partyActive = { PartyRepository.state.value.let { it.party != null || it.busy } }
+        if (partyActive()) {
+            setForkTransfer(ForkUpdateTransfer.PartyActive)
+            return
+        }
+        forkTransferJob = scope.launch {
+            setForkTransfer(ForkUpdateTransfer.Installing)
+            try {
+                val result = installer.install(update, path, partyActive)
+                setForkTransfer(when (result) {
+                    ForkInstallResult.Installed -> ForkUpdateTransfer.Installed
+                    ForkInstallResult.RestartRequired -> ForkUpdateTransfer.RestartRequired
+                    ForkInstallResult.Cancelled -> ForkUpdateTransfer.InstallCancelled
+                })
+                if (result != ForkInstallResult.Cancelled) {
+                    verifiedForkFile = null
+                    AppUpdaterPlatform.deleteDownloadedUpdate(path)
+                }
+            } catch (_: ForkInstallBlockedByParty) {
+                setForkTransfer(ForkUpdateTransfer.PartyActive)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                if (failure is ForkWindowsInstallerFailure) {
+                    setForkTransfer(ForkUpdateTransfer.InstallFailed, failure.exitCode)
+                } else {
+                    verifiedForkFile = null
+                    AppUpdaterPlatform.deleteDownloadedUpdate(path)
+                    setForkTransfer(ForkUpdateTransfer.VerificationFailed)
+                }
+            }
+        }
+    }
+
+    private fun setForkTransfer(transfer: ForkUpdateTransfer, installerExitCode: Int? = null) {
+        _forkStatus.update { it.copy(transfer = transfer, progress = null, installerExitCode = installerExitCode) }
     }
 
     fun checkForUpdates(force: Boolean, showNoUpdateFeedback: Boolean) {
@@ -93,6 +264,10 @@ class AppUpdaterController internal constructor(
             return
         }
 
+        if (AppUpdaterPlatform.isStatusOnlyForkUpdater) {
+            checkForkStatus()
+            return
+        }
         if (_uiState.value.isDownloading) return
         updateCheckJob?.cancel()
         val channel = preferences.channel.value
@@ -193,6 +368,7 @@ class AppUpdaterController internal constructor(
     }
 
     fun downloadUpdate() {
+        if (AppUpdaterPlatform.isStatusOnlyForkUpdater) return
         if (_uiState.value.isDownloading) return
         val update = _uiState.value.update ?: return
         if (_uiState.value.isDebugTest) {
@@ -276,6 +452,7 @@ class AppUpdaterController internal constructor(
     }
 
     fun installDownloadedUpdate() {
+        if (AppUpdaterPlatform.isStatusOnlyForkUpdater) return
         val updatePath = _uiState.value.downloadedUpdatePath ?: return
         if (!AppUpdaterPlatform.canInstallDownloadedUpdate()) {
             _uiState.update { state -> state.copy(showInstallPermissionDialog = true, showDialog = true) }
@@ -298,6 +475,7 @@ class AppUpdaterController internal constructor(
     }
 
     fun resumeInstallation() {
+        if (AppUpdaterPlatform.isStatusOnlyForkUpdater) return
         if (AppUpdaterPlatform.canInstallDownloadedUpdate()) {
             installDownloadedUpdate()
         } else {
