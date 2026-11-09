@@ -77,38 +77,51 @@ internal object DesktopWindowsForkUpdate : WindowsForkUpdateInstaller {
             .joinToString("\n") { name ->
                 checkNotNull(javaClass.getResourceAsStream("/fork-updater/$name")).bufferedReader().use { it.readText() }
             }
-        val payload = Base64.getEncoder().encode(script.toByteArray(Charsets.UTF_8))
-        // Only the fixed bootstrap goes on the Windows command line.
-        val bootstrap = "try { & ([ScriptBlock]::Create([Text.Encoding]::UTF8.GetString(" +
-            "[Convert]::FromBase64String([Console]::In.ReadToEnd())))) } catch { exit 1 }; exit 1"
-        val encoded = Base64.getEncoder().encodeToString(bootstrap.toByteArray(Charsets.UTF_16LE))
-        val process = ProcessBuilder(
-            systemTool("WindowsPowerShell/v1.0/powershell.exe"),
-            "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded,
-        ).redirectOutput(ProcessBuilder.Redirect.DISCARD).redirectError(ProcessBuilder.Redirect.DISCARD)
-            .apply {
-                environment()["PSModulePath"] = systemTool("WindowsPowerShell/v1.0/Modules")
-                environment()["NUVIO_VERIFY_UPDATE_PATH"] = file.absolutePath
-                environment()["NUVIO_VERIFY_UPDATE_SHA256"] = digest
-                environment()["NUVIO_VERIFY_UPDATE_VERSION"] = expected
-                environment()["NUVIO_VERIFY_INSTALLED_VERSION"] = installed
-                environment()["NUVIO_VERIFY_RUNNING_LAUNCHER"] = launcher.canonicalPath
-            }.start()
-        val input = FutureTask<Unit> {
-            process.outputStream.use { it.write(payload) }
-        }
-        try {
-            // Keep the process timeout effective even if the stdin pipe stops draining.
-            Thread(input, "nuvio-msi-verifier-stdin").apply { isDaemon = true }.start()
-            check(process.waitFor(90, TimeUnit.SECONDS))
-            input.get(5, TimeUnit.SECONDS)
-            check(process.exitValue() == 0)
-        } finally {
-            if (process.isAlive) process.destroyForcibly()
-            input.cancel(true)
-        }
+        runWindowsMsiVerifier(
+            script,
+            mapOf(
+                "NUVIO_VERIFY_UPDATE_PATH" to file.absolutePath,
+                "NUVIO_VERIFY_UPDATE_SHA256" to digest,
+                "NUVIO_VERIFY_UPDATE_VERSION" to expected,
+                "NUVIO_VERIFY_INSTALLED_VERSION" to installed,
+                "NUVIO_VERIFY_RUNNING_LAUNCHER" to launcher.canonicalPath,
+            ),
+        )
     }
-
-    private fun systemTool(path: String): String =
-        File(requireNotNull(System.getenv("SystemRoot")), "System32/$path").absolutePath
 }
+
+internal fun runWindowsMsiVerifier(
+    script: String,
+    variables: Map<String, String> = emptyMap(),
+    timeoutMillis: Long = 90_000,
+) {
+    val payload = Base64.getEncoder().encode(script.toByteArray(Charsets.UTF_8))
+    // Only the fixed bootstrap goes on the Windows command line.
+    val bootstrap = "try { & ([ScriptBlock]::Create([Text.Encoding]::UTF8.GetString(" +
+        "[Convert]::FromBase64String([Console]::In.ReadToEnd())))) } catch { exit 1 }; exit 1"
+    val encoded = Base64.getEncoder().encodeToString(bootstrap.toByteArray(Charsets.UTF_16LE))
+    val process = ProcessBuilder(
+        systemTool("WindowsPowerShell/v1.0/powershell.exe"),
+        "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded,
+    ).redirectOutput(ProcessBuilder.Redirect.DISCARD).redirectError(ProcessBuilder.Redirect.DISCARD)
+        .apply {
+            environment()["PSModulePath"] = systemTool("WindowsPowerShell/v1.0/Modules")
+            environment().putAll(variables)
+        }.start()
+    val input = FutureTask<Unit> {
+        process.outputStream.use { it.write(payload) }
+    }
+    try {
+        // Keep the process timeout effective even if the stdin pipe stops draining.
+        Thread(input, "nuvio-msi-verifier-stdin").apply { isDaemon = true }.start()
+        check(process.waitFor(timeoutMillis, TimeUnit.MILLISECONDS)) { "MSI verifier timed out." }
+        input.get(5, TimeUnit.SECONDS)
+        check(process.exitValue() == 0)
+    } finally {
+        if (process.isAlive) process.destroyForcibly()
+        input.cancel(true)
+    }
+}
+
+private fun systemTool(path: String): String =
+    File(requireNotNull(System.getenv("SystemRoot")), "System32/$path").absolutePath

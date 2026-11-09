@@ -13,6 +13,35 @@ import kotlin.test.assertTrue
 
 class ForkWindowsUpdateTest {
     @Test
+    fun `windows verifier reads a large UTF8 script and drains output`() {
+        assumeTrue(System.getProperty("os.name").startsWith("Windows", ignoreCase = true))
+        val script = "# payload padding\n".repeat(3000) + """
+            if ([int]('é'[0]) -ne 233) { exit 8 }
+            [Console]::Out.Write('x' * 65536)
+            [Console]::Error.Write('y' * 65536)
+            exit 0
+        """.trimIndent()
+        runWindowsMsiVerifier(script)
+    }
+
+    @Test
+    fun `windows verifier requires explicit successful exit`() {
+        assumeTrue(System.getProperty("os.name").startsWith("Windows", ignoreCase = true))
+        for (script in listOf("exit 7", "if (", "Write-Output 'no exit'")) {
+            assertFailsWith<IllegalStateException>(script) { runWindowsMsiVerifier(script) }
+        }
+    }
+
+    @Test
+    fun `windows verifier fails closed on timeout`() {
+        assumeTrue(System.getProperty("os.name").startsWith("Windows", ignoreCase = true))
+        val failure = assertFailsWith<IllegalStateException> {
+            runWindowsMsiVerifier("Start-Sleep -Seconds 30; exit 0", timeoutMillis = 2_000)
+        }
+        assertEquals("MSI verifier timed out.", failure.message)
+    }
+
+    @Test
     fun `windows downloads only follow HTTPS redirects to GitHub asset hosts`() {
         val initial = URI("https://github.com/lebochoffice/NuvioDesktop/releases/download/v0.1.63-watchparty/update.msi")
         assertTrue(isAllowedWindowsUpdateRedirect(URI("https://release-assets.githubusercontent.com/asset?signature=test"), initial))
