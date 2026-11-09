@@ -24,8 +24,11 @@ internal fun windowsForkUpdate(release: GitHubReleaseDto): AppUpdate? {
     return AppUpdate(tag, release.name ?: tag, release.body.orEmpty(), release.htmlUrl, name, url, asset.size, digest)
 }
 
-internal enum class ForkInstallResult { Installed, RestartRequired, Cancelled }
+internal enum class ForkInstallResult { HandedOff, Installed, RestartRequired, Cancelled }
 internal class ForkInstallBlockedByParty : IllegalStateException()
+internal class ForkInstallBlockedByPlayback : IllegalStateException()
+internal class ForkInstallBlockedBySettings : IllegalStateException()
+internal class ForkInstallBlockedByInstance : IllegalStateException()
 internal class ForkWindowsInstallerFailure(val exitCode: Int?) : IllegalStateException()
 
 internal interface WindowsForkUpdateInstaller {

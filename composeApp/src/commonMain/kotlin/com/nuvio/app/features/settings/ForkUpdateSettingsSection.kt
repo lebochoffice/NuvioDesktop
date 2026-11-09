@@ -39,7 +39,8 @@ internal fun ForkUpdateSettingsSection(isTablet: Boolean) {
     val downloading = transfer == ForkUpdateTransfer.Downloading || transfer == ForkUpdateTransfer.Verifying
     val busy = downloading || transfer == ForkUpdateTransfer.Installing
     val ready = transfer in setOf(ForkUpdateTransfer.Ready, ForkUpdateTransfer.PartyActive,
-        ForkUpdateTransfer.InstallFailed, ForkUpdateTransfer.InstallCancelled)
+        ForkUpdateTransfer.InstallFailed, ForkUpdateTransfer.InstallCancelled, ForkUpdateTransfer.PlaybackActive,
+        ForkUpdateTransfer.SettingsPending, ForkUpdateTransfer.OtherInstance)
     var confirm by remember(forkRelease?.update, transfer) { mutableStateOf(false) }
     val status = when {
         state.checking -> Res.string.fork_updates_checking
@@ -132,6 +133,9 @@ private fun ForkUpdateTransfer.messageRes() = when (this) {
     ForkUpdateTransfer.VerificationFailed -> Res.string.fork_updates_verification_failed
     ForkUpdateTransfer.InstallFailed -> Res.string.fork_updates_install_failed
     ForkUpdateTransfer.PartyActive -> Res.string.fork_updates_party_active
+    ForkUpdateTransfer.PlaybackActive -> Res.string.fork_updates_playback_active
+    ForkUpdateTransfer.SettingsPending -> Res.string.fork_updates_settings_pending
+    ForkUpdateTransfer.OtherInstance -> Res.string.fork_updates_other_instance
 }
 
 @Composable

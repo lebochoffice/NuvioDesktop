@@ -20,7 +20,7 @@
     <string name="fork_updates_download">Update herunterladen</string>
     <string name="fork_updates_cancel_download">Download abbrechen</string>
     <string name="fork_updates_install">Update installieren</string>
-    <string name="fork_updates_confirm_install">%1$s jetzt installieren? Der Windows Installer wird geöffnet.</string>
+    <string name="fork_updates_confirm_install">%1$s jetzt installieren? Speichere offene Einstellungen vorher. Nuvio Family wird vor dem Start des Windows Installers geschlossen.</string>
     <string name="fork_updates_dismiss">Abbrechen</string>
     <string name="fork_updates_downloading">Update wird heruntergeladen…</string>
     <string name="fork_updates_verifying">Installationspaket und Signatur werden geprüft…</string>
@@ -31,8 +31,12 @@
     <string name="fork_updates_cancelled">Update abgebrochen.</string>
     <string name="fork_updates_download_failed">Download fehlgeschlagen. Prüfe deine Verbindung und versuche es erneut.</string>
     <string name="fork_updates_verification_failed">Das Installationspaket konnte nicht verifiziert werden und wurde verworfen.</string>
-    <string name="fork_updates_install_failed">Windows Installer konnte das Update nicht abschließen. Prüfe das Installationsprotokoll.</string>
+    <string name="fork_updates_install_failed">Das Nuvio-Family-Update konnte nicht abgeschlossen werden.</string>
     <string name="fork_updates_party_active">Beende oder verlasse die Watch Party vor der Installation.</string>
+    <string name="fork_updates_playback_active">Schließe den Player, bevor du das Update installierst.</string>
+    <string name="fork_updates_settings_pending">Warte, bis deine Einstellungen gespeichert sind.</string>
+    <string name="fork_updates_other_instance">Schließe das andere Nuvio-Family-Fenster vor der Installation.</string>
+    <string name="fork_updates_installed_on_start">Nuvio Family wurde erfolgreich aktualisiert.</string>
     <string name="fork_updates_exit_code">Windows-Installer-Code %1$d</string>
     <string name="fork_updates_no_package">Kein geeignetes x64-Installationspaket für diese installierte Version.</string>
     <string name="fork_updates_signer_missing">Downloads sind erst verfügbar, wenn das Signaturzertifikat des Forks hinterlegt ist.</string>
