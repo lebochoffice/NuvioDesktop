@@ -29,26 +29,34 @@ try {
 } finally { $stream.Dispose() }
 & (Join-Path $PSScriptRoot 'register-windows-party-protocol.ps1') -MsiPath $msi.FullName -VerifyOnly
 
-$installer = New-Object -ComObject WindowsInstaller.Installer
-$db = $installer.OpenDatabase($msi.FullName, 0)
-$properties = Get-VerifiedFamilyMsiProperties $db $ExpectedProductVersion
-
 $app = Join-Path $repo "composeApp/build/compose/binaries/main-release/app/$familyMsiProductName"
 $jars = @(Get-ChildItem (Join-Path $app 'app') -Filter 'composeApp-desktop-*.jar')
 if ($jars.Count -ne 1) { throw 'Expected one packaged desktop application JAR' }
-# Bind the staged inspection to the selected MSI File table, rather than only
-# checking an unrelated staging directory. Cabinet bytes are not extracted.
-$view = $db.OpenView('SELECT `FileName`, `FileSize` FROM `File`')
-$view.Execute()
-$matchingJars = 0
-while ($record = $view.Fetch()) {
-    if ($record.StringData(1).Split('|')[-1] -eq $jars[0].Name) {
-        if ($record.IntegerData(2) -ne $jars[0].Length) { throw 'MSI application JAR size differs from staged JAR' }
-        $matchingJars++
-    }
-}
-$view.Close()
-if ($matchingJars -ne 1) { throw 'Selected MSI does not contain the staged application JAR name' }
+
+$installer = New-Object -ComObject WindowsInstaller.Installer
+try {
+    $db = $installer.OpenDatabase($msi.FullName, 0)
+    try {
+        $properties = Get-VerifiedFamilyMsiProperties $db $ExpectedProductVersion
+        # Bind the staged inspection to the selected MSI File table, rather than only
+        # checking an unrelated staging directory. Cabinet bytes are not extracted.
+        $view = $db.OpenView('SELECT `FileName`, `FileSize` FROM `File`')
+        try {
+            $view.Execute()
+            $matchingJars = 0
+            while ($record = $view.Fetch()) {
+                try {
+                    if ($record.StringData(1).Split('|')[-1] -eq $jars[0].Name) {
+                        if ($record.IntegerData(2) -ne $jars[0].Length) { throw 'MSI application JAR size differs from staged JAR' }
+                        $matchingJars++
+                    }
+                } finally { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($record) }
+            }
+        } finally { Close-MsiView $view }
+        if ($matchingJars -ne 1) { throw 'Selected MSI does not contain the staged application JAR name' }
+    } finally { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($db) }
+} finally { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($installer) }
+
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $zip = [IO.Compression.ZipFile]::OpenRead($jars[0].FullName)
 try {
