@@ -1523,7 +1523,9 @@ fun publishWindowsMsiOutput(release: Boolean) {
         val process = ProcessBuilder(
             "powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
             "-File", protocolScript.absolutePath, "-MsiPath", sourceMsi.absolutePath, *options,
-        ).redirectErrorStream(true).start()
+        ).apply {
+            environment().remove("PSModulePath")
+        }.redirectErrorStream(true).start()
         val output = process.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }.trim()
         val exitCode = process.waitFor()
         if (exitCode != 0) {
