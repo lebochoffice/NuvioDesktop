@@ -1,8 +1,12 @@
 # GitHub-hosted build only. No app launch, signing service, deployment or release.
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
-if ($env:GITHUB_REPOSITORY -ne 'lebochoffice/NuvioDesktop' -or $env:GITHUB_REF -ne 'refs/heads/Dev' -or $env:GITHUB_EVENT_NAME -ne 'workflow_dispatch') {
-    throw 'MSI CI is restricted to an explicit manual run on the personal fork Dev branch.'
+$approvedCandidatePush = $env:GITHUB_EVENT_NAME -eq 'push' -and
+    $env:GITHUB_WORKFLOW_REF -ceq 'lebochoffice/NuvioDesktop/.github/workflows/fork-release.yml@refs/heads/Dev' -and
+    $env:NUVIO_FORK_VERSION -cmatch '^0\.1\.(0|[1-9][0-9]{0,4})-watchparty\z'
+if ($env:GITHUB_REPOSITORY -ne 'lebochoffice/NuvioDesktop' -or $env:GITHUB_REF -ne 'refs/heads/Dev' -or
+    ($env:GITHUB_EVENT_NAME -ne 'workflow_dispatch' -and !$approvedCandidatePush)) {
+    throw 'MSI CI requires an approved Dev candidate push or an explicit manual Dev run.'
 }
 foreach ($name in @('NUVIO_SUPABASE_URL', 'NUVIO_SUPABASE_ANON_KEY', 'NUVIO_WEBVIEW2_DIR')) {
     if (-not [Environment]::GetEnvironmentVariable($name)) { throw "Required public configuration/build input missing: $name" }

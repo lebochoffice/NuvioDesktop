@@ -4,6 +4,11 @@ on:
   schedule:
     - cron: '23 7 * * *'
   workflow_dispatch:
+    inputs:
+      retry_pr:
+        description: 'Optional closed upstream PR number to retry the exact release'
+        type: string
+        required: false
 
 permissions:
   contents: read
@@ -21,16 +26,16 @@ jobs:
       contents: write
       pull-requests: write
     env:
-      GH_TOKEN: ${{ secrets.FORK_SYNC_TOKEN || github.token }}
-      # Off unless the owner sets the repository variable FORK_AUTO_MERGE=true.
-      FORK_AUTO_MERGE: ${{ vars.FORK_AUTO_MERGE || 'false' }}
+      # GitHub requires approval before running PR workflows created with this token.
+      GH_TOKEN: ${{ github.token }}
+      NUVIO_RETRY_PR: ${{ inputs.retry_pr }}
       GIT_LFS_SKIP_SMUDGE: '1'
     steps:
       - uses: actions/checkout@v6
         with:
           ref: Dev
           fetch-depth: 0
-          token: ${{ secrets.FORK_SYNC_TOKEN || github.token }}
-      - name: Integrate upstream changes on a checked branch and open a PR (no Dev push)
+          token: ${{ github.token }}
+      - name: Prepare a published upstream release for review
         shell: bash
         run: bash fork-maintenance/upstream-pr.sh

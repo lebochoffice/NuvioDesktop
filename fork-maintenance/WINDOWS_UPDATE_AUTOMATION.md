@@ -1,0 +1,17 @@
+# Windows update automation
+
+The scheduled review workflow uses published official release tags. It creates an integration draft or a report-only draft for conflicts and failed invariants. Review critical changes to the installer, updater, browser, party code, dependencies and workflows before allowing candidate code to run. The workflow never merges or publishes. GitHub can require an approval before running PR checks on a draft opened by GITHUB_TOKEN.
+
+The unsigned candidate workflow runs the existing browser and Windows checks on the exact Dev commit. It has no signing credentials and read-only repository permissions. Keep Dev protected by required checks and review. Configure the existing public NUVIO_SUPABASE_URL, NUVIO_SUPABASE_ANON_KEY and NUVIO_INTRODB_API_URL variables. Set FORK_WINDOWS_VERSION_FLOOR to at least the highest locally reserved 0.1.x version (default 0.1.72). Enable FORK_WINDOWS_CANDIDATES=true only after review. A candidate is not a tag reservation. A future publisher must serialize publication and recheck releases and tags. Confirm external Cloudflare triggers before allowing automatic Dev promotion.
+
+## Boundaries still to implement
+
+The current certificate key stays in the Windows certificate store. GitHub-hosted runners cannot use it. Do not export it to GitHub or attach a persistent self-hosted signing runner to the public fork. A fixed, reviewed local scheduled agent outside the checkout is the proposed path. It must only consume artifacts bound to the exact trusted workflow, successful run and attempt, approved Dev commit and verified provenance. It must never execute scripts from upstream, PRs or artifact archives. Use separate read-only retrieval and narrow publication credentials stored by the OS.
+
+Before signing, independently verify artifact integrity, MSI identity and actual executable payload policy. An MSI and a manifest from the same build are not independent proof. Then verify the signed MSI with the existing exact signer pin, timestamp and identity rules. Publish only the verified bytes, after matching the GitHub asset digest and version to the reviewed commit. Do not overwrite released assets or tags. Automated promotion and publication are not enabled here.
+
+The existing updater verifies the signed download, waits for app exit, rechecks the file and launches the system installer after confirmation. An unattended per-machine MSI still needs administrator rights. A future unattended path needs a separately provisioned and audited privileged installer boundary or managed deployment. Quiet UI does not grant elevation. Do not run the app or a public runner elevated or change UAC policy.
+
+## Acceptance sequence
+
+Start with automation disabled. Confirm a known upstream tag produces the intended draft and a conflict yields only a report. Enable candidate generation only after review, then confirm a reviewed Dev merge creates an unsigned artifact bound to its exact commit. Exercise the future signing and publication boundary with a controlled package, including rejection of changed bytes and wrong signer. Use the separately reviewed private bootstrap and a higher signed target to exercise discovery, verification, consent, installation and result display. Confirm profile preservation and unchanged registration of the separate Nuvio 1.1.58 installation. Test cancellation, active playback/party, reboot required and late failure against a recoverable backup. Keep installationReleased disabled for regular builds until the handoff is accepted.
