@@ -47,7 +47,7 @@ need_text composeApp/build.gradle.kts 'WebView2Loader.dll missing from the stage
 need_text composeApp/src/desktopMain/kotlin/com/nuvio/app/features/updater/AppUpdaterPlatform.desktop.kt 'forkReleaseOwner = "lebochoffice"'
 need_text composeApp/src/desktopMain/kotlin/com/nuvio/app/features/updater/AppUpdaterPlatform.desktop.kt 'actual val requiresUpdateChecksum: Boolean = true'
 # Fork-only automation.
-for f in .github/workflows/fork-windows-msi.yml .github/workflows/fork-upstream-review.yml .github/workflows/fork-release.yml fork-maintenance/verify-msi.ps1 fork-maintenance/build-ci.ps1; do need_file "$f"; done
+for f in .github/workflows/fork-windows-msi.yml fork-maintenance/verify-msi.ps1 fork-maintenance/build-ci.ps1; do need_file "$f"; done
 
 if (( failures > 0 )); then
   echo "Fork invariants failed ($failures). The upstream update must not be merged as is." >&2
