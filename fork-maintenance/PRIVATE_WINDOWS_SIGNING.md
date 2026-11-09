@@ -30,13 +30,13 @@ Keep the PFX and password out of Git, GitHub Secrets and release assets. If setu
 
 ## For each private MSI
 
-Complete MSI postprocessing first. Use a fresh unsigned Family MSI, its numeric Windows product version, the verified public pin, and an approved HTTPS RFC 3161 endpoint. Keep the MSI private.
+Complete MSI postprocessing first. Use a fresh unsigned Family MSI, its numeric Windows product version, the verified public pin, and an approved RFC 3161 endpoint. Prefer HTTPS when SignTool accepts it. If SignTool rejects HTTPS URLs, use the documented Microsoft endpoint below. It is the only HTTP endpoint the script accepts, with or without the trailing slash. Keep the MSI private.
 
     $ErrorActionPreference = 'Stop'
     $msi = 'C:\PrivateSigning\Nuvio-Family.msi'
     $version = '<MSI product version>'
     $pin = '<64-character public SHA-256 pin>'
-    $timestampUrl = '<approved HTTPS RFC 3161 endpoint>'
+    $timestampUrl = 'http://timestamp.acs.microsoft.com'
     .\fork-maintenance\verify-msi.ps1 -MsiPath $msi -ExpectedProductVersion $version
     .\fork-maintenance\sign-family-release.ps1 -MsiPath $msi -TimestampUrl $timestampUrl -LocalSignerSha256 $pin
     Get-FileHash -LiteralPath $msi -Algorithm SHA256
