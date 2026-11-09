@@ -73,4 +73,26 @@ foreach ($change in @(
     $invalid[$change.Key] = $change.Value
     Assert-Rejected { Assert-FamilyMsiIdentity $properties 'x64;1033' @($invalid, $newer) } 'MSI Upgrade table contains an unexpected*'
 }
+$sequence = @{
+    FindRelatedProducts = @{ Number = 25; Condition = '' }
+    JpFindRelatedProducts = @{ Number = 26; Condition = '' }
+    LaunchConditions = @{ Number = 27; Condition = '' }
+    CostInitialize = @{ Number = 800; Condition = '' }
+    InstallValidate = @{ Number = 1400; Condition = '' }
+    RemoveExistingProducts = @{ Number = 1401; Condition = '' }
+    InstallInitialize = @{ Number = 1500; Condition = '' }
+    InstallFiles = @{ Number = 4000; Condition = '' }
+}
+Assert-FamilyMsiLaunchSequence $sequence 'InstallExecuteSequence'
+foreach ($launch in @(@{ Number = 24; Condition = '' }, @{ Number = 27; Condition = 'Installed' })) {
+    $bad = $sequence.Clone()
+    $bad.LaunchConditions = $launch
+    Assert-Rejected { Assert-FamilyMsiLaunchSequence $bad 'InstallExecuteSequence' } 'MSI LaunchConditions must run unconditionally*'
+}
+$bad = $sequence.Clone()
+$bad.RemoveExistingProducts = @{ Number = 1501; Condition = '' }
+Assert-Rejected { Assert-FamilyMsiLaunchSequence $bad 'InstallExecuteSequence' } 'MSI RemoveExistingProducts must run between*'
+if ($familyMsiLaunchCondition -cne 'Installed OR NOT JP_DOWNGRADABLE_FOUND') {
+    throw 'Expected a launch condition that blocks a new package and permits maintenance.'
+}
 Write-Host 'Nuvio Family MSI identity policy checks passed.'

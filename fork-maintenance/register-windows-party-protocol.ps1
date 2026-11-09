@@ -2,7 +2,6 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$MsiPath,
-    [string]$SchemaActionDll,
     [switch]$VerifyOnly
 )
 
@@ -122,16 +121,6 @@ try {
             throw 'No safe MSI slot for RemoveExistingProducts between InstallValidate and InstallInitialize.'
         }
     }
-    $schemaAction = 'NuvioPartySchema'
-    $schemaSequence = $actions['RemoveRegistryValues'] - 1
-    if ($schemaSequence -le $actions['InstallInitialize'] -or
-        $schemaSequence -le $actions['CostFinalize'] -or
-        $schemaSequence -le $removeSequence -or
-        $schemaSequence -ge $actions['WriteRegistryValues'] -or
-        @($actions.Keys | Where-Object { $_ -ne $schemaAction -and $actions[$_] -eq $schemaSequence }).Count) {
-        throw 'No safe MSI slot for the schema action between upgrade removal and registry processing.'
-    }
-
     if (!$VerifyOnly) {
         $stage = 'scheduling RemoveExistingProducts after InstallValidate'
         Invoke-MsiStatement $db ('UPDATE `InstallExecuteSequence` SET `Sequence` = {0} WHERE `Action` = ''RemoveExistingProducts''' -f $removeSequence)
@@ -158,50 +147,29 @@ try {
                 if ($null -ne $record) { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($record) }
             } finally { Close-MsiView $upgrade }
         }
-        $stage = 'embedding the conditional URI schema action'
-        $dll = Get-Item -LiteralPath $SchemaActionDll
-        if ($dll.PSIsContainer -or !$dll.Length) { throw 'The native MSI schema action is missing or empty.' }
-        Invoke-MsiStatement $db 'DELETE FROM `InstallExecuteSequence` WHERE `Action` = ''NuvioPartySchema'''
-        Invoke-MsiStatement $db 'DELETE FROM `CustomAction` WHERE `Action` = ''NuvioPartySchema'''
-        Invoke-MsiStatement $db 'DELETE FROM `Binary` WHERE `Name` = ''NuvioPartySchema'''
+        $stage = 'authoring the declarative Family launch condition'
+        if (!(Test-MsiTable $db 'LaunchCondition')) {
+            Invoke-MsiStatement $db 'CREATE TABLE `LaunchCondition` (`Condition` CHAR(255) NOT NULL, `Description` CHAR(255) NOT NULL LOCALIZABLE PRIMARY KEY `Condition`)'
+        }
         $record = $installer.CreateRecord(2)
         try {
-            $record.StringData(1) = $schemaAction
-            $record.SetStream(2, $dll.FullName)
-            Invoke-MsiStatement $db 'INSERT INTO `Binary` (`Name`, `Data`) VALUES (?, ?)' $record
-        } finally { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($record) }
-        Invoke-MsiStatement $db 'INSERT INTO `CustomAction` (`Action`, `Type`, `Source`, `Target`) VALUES (''NuvioPartySchema'', 1, ''NuvioPartySchema'', ''NuvioPartySchema'')'
-        Invoke-MsiStatement $db ('INSERT INTO `InstallExecuteSequence` (`Action`, `Sequence`) VALUES (''NuvioPartySchema'', {0})' -f $schemaSequence)
-
-        $stage = 'authoring the Family version guard'
-        foreach ($table in $familyMsiVersionTables) {
-            Invoke-MsiStatement $db ('DELETE FROM `{0}` WHERE `Action` = ''NuvioFamilyBlockSameOrNewer''' -f $table)
-        }
-        Invoke-MsiStatement $db 'DELETE FROM `CustomAction` WHERE `Action` = ''NuvioFamilyBlockSameOrNewer'''
-        $record = $installer.CreateRecord(4)
-        try {
-            $record.StringData(1) = $familyMsiVersionGuard
-            $record.IntegerData(2) = 1
-            $record.StringData(3) = $schemaAction
-            $record.StringData(4) = $familyMsiVersionEntry
-            Invoke-MsiStatement $db 'INSERT INTO `CustomAction` (`Action`, `Type`, `Source`, `Target`) VALUES (?, ?, ?, ?)' $record
+            $record.StringData(1) = $familyMsiLaunchCondition
+            $record.StringData(2) = 'An equal or newer Nuvio Family version is already installed.'
+            Invoke-MsiStatement $db 'INSERT INTO `LaunchCondition` (`Condition`, `Description`) VALUES (?, ?)' $record
         } finally { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($record) }
 
         foreach ($table in $familyMsiVersionTables) {
             $sequence = Get-FamilyMsiSequence $db $table
-            $guardSequence = [Math]::Max([int]$sequence['FindRelatedProducts'].Number, [int]$sequence['JpFindRelatedProducts'].Number) + 1
-            if (@($sequence.Values | Where-Object { $_.Number -eq $guardSequence }).Count) {
-                throw "No safe MSI slot for the Family version guard in $table."
+            $find = $sequence['FindRelatedProducts']
+            if (!$find) { throw "Missing FindRelatedProducts in $table." }
+            $extended = $sequence['JpFindRelatedProducts']
+            $launchSequence = if ($extended) { [Math]::Max($find.Number, $extended.Number) + 1 } else { $find.Number + 1 }
+            if ($sequence.ContainsKey('LaunchConditions') -or
+                @($sequence.Values | Where-Object Number -eq $launchSequence).Count) {
+                throw "Unexpected LaunchConditions or occupied sequence slot in $table."
             }
-            $record = $installer.CreateRecord(3)
-            try {
-                $record.StringData(1) = $familyMsiVersionGuard
-                $record.StringData(2) = $familyMsiVersionCondition
-                $record.IntegerData(3) = $guardSequence
-                Invoke-MsiStatement $db ('INSERT INTO `{0}` (`Action`, `Condition`, `Sequence`) VALUES (?, ?, ?)' -f $table) $record
-            } finally { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($record) }
+            Invoke-MsiStatement $db ('INSERT INTO `{0}` (`Action`, `Sequence`) VALUES (''LaunchConditions'', {1})' -f $table, $launchSequence)
         }
-        $stage = 'verifying the authored Family version guard'
         $null = Get-VerifiedFamilyMsiProperties $db
 
         $stage = 'removing obsolete package rows'
@@ -229,29 +197,6 @@ try {
         Write-Host 'Windows party protocol: MSI registration committed.'
         return
     }
-
-    $stage = 'verifying the conditional URI schema action'
-    if ($actions[$schemaAction] -ne $schemaSequence) { throw 'Missing or misplaced URI schema action.' }
-    $v = $db.OpenView('SELECT `Type`, `Source`, `Target` FROM `CustomAction` WHERE `Action` = ''NuvioPartySchema''')
-    try {
-        $v.Execute()
-        $r = $v.Fetch()
-        if (!$r) { throw 'Missing NuvioPartySchema custom action.' }
-        try {
-            if ($r.IntegerData(1) -ne 1 -or $r.StringData(2) -cne $schemaAction -or $r.StringData(3) -cne $schemaAction) {
-                throw 'Incorrect NuvioPartySchema custom action contract.'
-            }
-        } finally { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($r) }
-    } finally { Close-MsiView $v }
-    $v = $db.OpenView('SELECT `Data` FROM `Binary` WHERE `Name` = ''NuvioPartySchema''')
-    try {
-        $v.Execute()
-        $r = $v.Fetch()
-        if (!$r) { throw 'Missing embedded NuvioPartySchema DLL.' }
-        try {
-            if ($r.DataSize(1) -le 0) { throw 'Empty embedded NuvioPartySchema DLL.' }
-        } finally { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($r) }
-    } finally { Close-MsiView $v }
 
     $stage = 'verifying committed registry contract'
     $v = $db.OpenView('SELECT `Registry`, `Root`, `Key`, `Name`, `Value`, `Component_` FROM `Registry`')
@@ -283,7 +228,7 @@ try {
         }
         if ($entry.Component -cne $component) { throw "Registry row $id does not belong to the $familyMsiLauncher component." }
     }
-    Write-Host 'Windows party protocol: conditional schema action and Nuvio Family association verified in the MSI. Installed behavior requires a live check.'
+    Write-Host 'Windows party protocol: Family-only association verified in the MSI. Installed behavior requires a live check.'
 } catch {
     $failure = $_.Exception.ToString()
     $detail = Get-MsiErrorDetail

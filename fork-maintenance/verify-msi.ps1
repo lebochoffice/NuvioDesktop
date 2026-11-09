@@ -8,7 +8,6 @@ param(
     # Retained for older invocations. Package protocol verification is always on.
     [switch]$RequirePartyProtocol,
     [string]$InstalledExePath,
-    [switch]$ExpectForkFallback,
     [string]$ExpectedProductVersion
 )
 $ErrorActionPreference = 'Stop'
@@ -17,7 +16,6 @@ if (!$PSBoundParameters.ContainsKey('RepoPath')) {
     $RepoPath = Split-Path -Parent $PSScriptRoot
 }
 $repo = (Resolve-Path -LiteralPath $RepoPath).Path
-if ($ExpectForkFallback -and !$InstalledExePath) { throw '-ExpectForkFallback requires -InstalledExePath.' }
 $msis = if ($MsiPath) { @(Get-Item -LiteralPath $MsiPath) } else { @(Get-ChildItem (Join-Path $repo 'composeApp/build/compose/release-msis') -Filter '*.msi') }
 if ($msis.Count -ne 1) { throw "Expected one published MSI, found $($msis.Count)" }
 $msi = $msis[0]
@@ -134,12 +132,6 @@ if ($InstalledExePath) {
     Assert-RegistryValue $capabilities 'ApplicationDescription' 'Open Nuvio watch party invitations.'
     Assert-RegistryValue "$capabilities\URLAssociations" 'nuvio' $familyMsiProgId
     Assert-RegistryValue 'HKLM:\SOFTWARE\RegisteredApplications' $familyMsiProductName $familyMsiCapabilities
-    $schema = Get-Item -LiteralPath "$classes\nuvio"
-    if ($schema.GetValueNames() -notcontains 'URL Protocol') { throw 'Installed nuvio scheme is missing its URL Protocol marker.' }
-    if ($ExpectForkFallback) {
-        Assert-RegistryValue "$classes\nuvio" $familyMsiSchemaOwner $command
-        Assert-RegistryValue "$classes\nuvio\shell\open\command" '' $command
-    }
     Write-Host 'Installed registry verified. Open a party URI separately to verify Windows routing.'
 }
 
@@ -149,7 +141,7 @@ $manifest = [ordered]@{
     upgradeCode = $properties['UpgradeCode']; productCode = $properties['ProductCode']; architecture = 'x64'
     appJar = $jars[0].Name; requiredNativeEntries = $required; watchInBrowser = $true; javaRuntimePresent = $true
     installedOrLaunched = $false; msiInspectedReadOnly = $true; stagedAppInspected = $true; msiJarMetadataMatchesStage = $true; publicBackendConfigured = $true; introDbConfigured = $true; browserInviteOrigin = $inviteOrigin; guestCommandSequencer = $true; exactPausedSeek = $true; sourceCommit = $env:GITHUB_SHA
-    conditionalPartyProtocolInspected = $true; installedPartyRegistryInspected = [bool]$InstalledExePath
+    familyPartyRegistryInspected = $true; installedPartyRegistryInspected = [bool]$InstalledExePath
 }
 $path = Join-Path $msi.DirectoryName ($msi.BaseName + '-verification.json')
 $manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $path -Encoding utf8
