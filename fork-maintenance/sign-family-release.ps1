@@ -1,10 +1,17 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$MsiPath,
-    [Parameter(Mandatory = $true)][string]$TimestampUrl
+    [Parameter(Mandatory = $true)][string]$TimestampUrl,
+    [ValidatePattern('^[a-f0-9]{64}\z')][string]$LocalSignerSha256
 )
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'windows-update-trust.ps1')
+if ($PSBoundParameters.ContainsKey('LocalSignerSha256')) {
+    if ($familySignerSha256 -and $familySignerSha256 -cne $LocalSignerSha256) {
+        throw 'The local signer differs from the configured Fork signer.'
+    }
+    $familySignerSha256 = $LocalSignerSha256
+}
 if ($familySignerSha256 -cnotmatch '^[a-f0-9]{64}\z') { throw 'The trusted Fork signing certificate pin is not configured.' }
 $timestamp = [uri]$TimestampUrl
 if (!$timestamp.IsAbsoluteUri -or $timestamp.Scheme -ne 'https' -or !$timestamp.Host -or $timestamp.UserInfo) {
