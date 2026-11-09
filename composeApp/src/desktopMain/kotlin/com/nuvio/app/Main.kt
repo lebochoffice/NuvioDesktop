@@ -111,7 +111,9 @@ fun main(args: Array<String>) {
             onDispose { forkUpdater?.closeApplication = null }
         }
         LaunchedEffect(Unit) {
-            val (outcome, exitCode) = runCatching { forkUpdater?.takeResult() }.getOrNull() ?: return@LaunchedEffect
+            if (!isWindows) return@LaunchedEffect
+            val (outcome, exitCode) = runCatching { DesktopWindowsForkUpdate.takeResult() }.getOrNull()
+                ?: return@LaunchedEffect
             val message = getString(when (outcome) {
                 ForkInstallResult.Installed -> Res.string.fork_updates_installed_on_start
                 ForkInstallResult.RestartRequired -> Res.string.fork_updates_restart_windows

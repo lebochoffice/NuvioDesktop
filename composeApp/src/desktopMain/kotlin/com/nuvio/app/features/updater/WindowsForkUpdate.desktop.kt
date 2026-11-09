@@ -1,5 +1,6 @@
 package com.nuvio.app.features.updater
 
+import com.nuvio.app.core.build.AppVersionConfig
 import com.nuvio.app.core.storage.DesktopStorage
 import com.nuvio.app.features.settings.AppIconRepository
 import com.sun.nio.file.ExtendedOpenOption.NOSHARE_DELETE
@@ -25,8 +26,8 @@ import kotlin.coroutines.resume
 import kotlin.coroutines.suspendCoroutine
 
 internal object DesktopWindowsForkUpdate : WindowsForkUpdateInstaller {
-    // Release decision after signed MSI acceptance. No environment or UI override.
-    override val installationReleased = false
+    // Build-time opt-in for the private test bootstrap. No runtime override.
+    override val installationReleased = AppVersionConfig.DESKTOP_MSI_HANDOFF_TEST
     var closeApplication: (() -> Unit)? = null // Accessed on the desktop event thread.
     var playerOpen = false // Set and read on the desktop event thread.
     private val handoffRoot get() = DesktopStorage.cacheDir.resolve("update-handoff")
@@ -40,16 +41,20 @@ internal object DesktopWindowsForkUpdate : WindowsForkUpdateInstaller {
     fun takeResult(): Pair<ForkInstallResult?, Int?>? {
         val result = handoffRoot.resolve("result")
         if (!Files.isRegularFile(result, NOFOLLOW_LINKS) || Files.size(result) > 128) return null
-        val fields = Files.readString(result).trim().split('|')
-        if (fields.size != 3) return null
-        Files.delete(result)
-        val outcome = when (fields[0]) {
-            "installed" -> ForkInstallResult.Installed
-            "restart" -> ForkInstallResult.RestartRequired
-            "cancelled" -> ForkInstallResult.Cancelled
-            else -> null
+        // The target build can report the previous handoff even with installation disabled.
+        // The helper holds the exclusive lease while it installs and records the result.
+        return holdStartupLease().use {
+            val fields = Files.readString(result).trim().split('|')
+            if (fields.size != 3) return null
+            Files.delete(result)
+            val outcome = when (fields[0]) {
+                "installed" -> ForkInstallResult.Installed
+                "restart" -> ForkInstallResult.RestartRequired
+                "cancelled" -> ForkInstallResult.Cancelled
+                else -> null
+            }
+            outcome to fields[2].toIntOrNull()
         }
-        return outcome to fields[2].toIntOrNull()
     }
     override val canDownload: Boolean by lazy {
         val trust = javaClass.getResourceAsStream("/fork-updater/windows-update-trust.ps1")

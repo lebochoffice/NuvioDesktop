@@ -46,6 +46,9 @@ abstract class GenerateRuntimeConfigsTask : DefaultTask() {
     abstract val desktopAppVersionCode: Property<Int>
 
     @get:Input
+    abstract val desktopMsiHandoffTest: Property<Boolean>
+
+    @get:Input
     abstract val supabaseUrl: Property<String>
 
     @get:Input
@@ -262,6 +265,7 @@ abstract class GenerateRuntimeConfigsTask : DefaultTask() {
                 |    const val VERSION_CODE = ${appVersionCode.get()}
                 |    const val DESKTOP_VERSION_NAME = "${desktopAppVersionName.get()}"
                 |    const val DESKTOP_VERSION_CODE = ${desktopAppVersionCode.get()}
+                |    const val DESKTOP_MSI_HANDOFF_TEST = ${desktopMsiHandoffTest.get()}
                 |}
                 """.trimMargin()
             )
@@ -616,6 +620,17 @@ val partyShareWorkerValue: String = providers.gradleProperty("nuvio.party.shareW
     }
 }
 
+val desktopMsiHandoffTestValue = when (providers.gradleProperty("nuvio.desktop.testMsiHandoff").orNull) {
+    null, "false" -> false
+    "true" -> {
+        require(desktopReleaseVersionName == "0.1.71-watchparty") {
+            "The MSI handoff test opt-in is reserved for the private 0.1.71-watchparty bootstrap."
+        }
+        true
+    }
+    else -> throw GradleException("nuvio.desktop.testMsiHandoff must be true or false.")
+}
+
 val generateRuntimeConfigs = tasks.register<GenerateRuntimeConfigsTask>("generateRuntimeConfigs") {
     outputDir.set(generatedRuntimeConfigDir)
     // NUVIO_BROWSER_PARTY_BRIDGE_V1: optional file must be unset if absent.
@@ -626,6 +641,7 @@ val generateRuntimeConfigs = tasks.register<GenerateRuntimeConfigsTask>("generat
     appVersionCode.set(releaseAppVersionCode)
     desktopAppVersionName.set(desktopReleaseVersionName)
     desktopAppVersionCode.set(desktopReleaseVersionCode)
+    desktopMsiHandoffTest.set(desktopMsiHandoffTestValue)
     supabaseUrl.set(runtimeConfigValue("NUVIO_SUPABASE_URL"))
     supabaseAnonKey.set(runtimeConfigValue("NUVIO_SUPABASE_ANON_KEY"))
     supabaseFallbackUrl.set(runtimeConfigValue("NUVIO_SUPABASE_FALLBACK_URL"))
