@@ -1470,8 +1470,6 @@ tasks.withType<AbstractJPackageTask>()
     .matching { it.name.endsWith("Msi") || it.name.endsWith("Exe") }
     .configureEach {
         freeArgs.add("--win-shortcut-prompt")
-        freeArgs.add("--install-dir")
-        freeArgs.add(windowsMsiProductName)
     }
 
 fun renameMacosDmgOutput(release: Boolean) {
