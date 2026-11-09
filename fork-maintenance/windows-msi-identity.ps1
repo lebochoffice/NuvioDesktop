@@ -4,10 +4,7 @@ $familyMsiUpgradeCode = [guid]'dfe71c5b-c265-42ce-a025-396193575a13'
 $familyMsiLauncher = "$familyMsiProductName.exe"
 $familyMsiProgId = 'Nuvio.Family.Party'
 $familyMsiCapabilities = 'Software\NuvioFamily\Capabilities'
-$familyMsiSchemaOwner = 'NuvioFamilyOwner'
-$familyMsiVersionGuard = 'NuvioFamilyBlockSameOrNewer'
-$familyMsiVersionCondition = 'NOT (REMOVE = "ALL")'
-$familyMsiVersionEntry = 'NuvioFamilyCheckVersion'
+$familyMsiLaunchCondition = 'Installed OR NOT JP_DOWNGRADABLE_FOUND'
 $familyMsiVersionTables = @('InstallUISequence', 'InstallExecuteSequence')
 
 function Close-MsiView($View) {
@@ -75,60 +72,80 @@ function Get-FamilyMsiSequence($Database, [ValidateSet('InstallUISequence', 'Ins
     return $sequence
 }
 
-function Assert-FamilyMsiVersionGuard($Database) {
-    $view = $Database.OpenView('SELECT `Type`, `Source`, `Target` FROM `CustomAction` WHERE `Action` = ''NuvioFamilyBlockSameOrNewer''')
+function Test-MsiTable($Database, [string]$Name) {
+    $view = $Database.OpenView(('SELECT `Name` FROM `_Tables` WHERE `Name` = ''{0}''' -f $Name))
     try {
         [void]$view.Execute()
         $record = $view.Fetch()
-        if (!$record) { throw 'Missing MSI action blocking equal or newer Nuvio Family releases.' }
-        try {
-            if ($record.IntegerData(1) -ne 1 -or $record.StringData(2) -cne 'NuvioPartySchema' -or
-                $record.StringData(3) -cne $familyMsiVersionEntry) {
-                throw 'Incorrect MSI version guard action.'
-            }
-        } finally { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($record) }
+        if (!$record) { return $false }
+        try { return $true }
+        finally { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($record) }
     } finally { Close-MsiView $view }
+}
 
-    $view = $Database.OpenView('SELECT `Data` FROM `Binary` WHERE `Name` = ''NuvioPartySchema''')
+function Assert-FamilyMsiLaunchSequence($Sequence, [string]$Table) {
+    $find = $Sequence['FindRelatedProducts']
+    $extended = $Sequence['JpFindRelatedProducts']
+    $launch = $Sequence['LaunchConditions']
+    if (!$find -or $find.Number -le 0 -or $find.Condition -or !$launch -or
+        $launch.Condition -or $launch.Number -le $find.Number -or
+        ($extended -and ($extended.Condition -or $extended.Number -le $find.Number -or $extended.Number -ge $launch.Number)) -or
+        @($Sequence.Values | Where-Object Number -eq $launch.Number).Count -ne 1) {
+        throw "MSI LaunchConditions must run unconditionally after upgrade detection in $Table."
+    }
+    foreach ($name in @('CostInitialize', 'InstallValidate', 'InstallInitialize', 'RemoveExistingProducts', 'InstallFiles')) {
+        $action = $Sequence[$name]
+        if (($Table -eq 'InstallExecuteSequence' -and !$action) -or
+            ($action -and $action.Number -le $launch.Number)) {
+            throw "MSI LaunchConditions must precede $name in $Table."
+        }
+    }
+    if ($Table -eq 'InstallExecuteSequence') {
+        $validate = $Sequence['InstallValidate']
+        $remove = $Sequence['RemoveExistingProducts']
+        $initialize = $Sequence['InstallInitialize']
+        if ($validate.Condition -or $remove.Condition -or $initialize.Condition -or
+            $remove.Number -le $validate.Number -or $remove.Number -ge $initialize.Number -or
+            @($Sequence.Values | Where-Object Number -eq $remove.Number).Count -ne 1) {
+            throw 'MSI RemoveExistingProducts must run between InstallValidate and InstallInitialize.'
+        }
+    }
+}
+
+function Assert-FamilyMsiDeclarativeGuard($Database) {
+    $found = $false
+    $view = $Database.OpenView('SELECT `Condition` FROM `LaunchCondition`')
     try {
         [void]$view.Execute()
-        $record = $view.Fetch()
-        if (!$record) { throw 'Missing embedded MSI version guard DLL.' }
-        try {
-            if ($record.DataSize(1) -le 0) { throw 'Empty embedded MSI version guard DLL.' }
-        } finally { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($record) }
+        while ($record = $view.Fetch()) {
+            try { if ($record.StringData(1) -ceq $familyMsiLaunchCondition) { $found = $true } }
+            finally { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($record) }
+        }
     } finally { Close-MsiView $view }
+    if (!$found) { throw 'Missing MSI launch condition blocking equal or newer Nuvio Family releases.' }
 
     foreach ($table in $familyMsiVersionTables) {
         $sequence = Get-FamilyMsiSequence $Database $table
-        $find = $sequence['FindRelatedProducts']
-        $extended = $sequence['JpFindRelatedProducts']
-        $guard = $sequence[$familyMsiVersionGuard]
-        if ($table -eq 'InstallExecuteSequence') {
-            $validate = $sequence['InstallValidate']
-            $remove = $sequence['RemoveExistingProducts']
-            $initialize = $sequence['InstallInitialize']
-            # Family packages use the early removal window supported by Windows Installer.
-            if (!$validate -or !$remove -or !$initialize -or $validate.Number -le 0 -or
-                $validate.Condition -or $remove.Condition -or $initialize.Condition -or
-                $remove.Number -le $validate.Number -or $remove.Number -ge $initialize.Number -or
-                @($sequence.Values | Where-Object { $_.Number -eq $remove.Number }).Count -ne 1) {
-                throw 'MSI RemoveExistingProducts must run between InstallValidate and InstallInitialize.'
-            }
+        if ($sequence.ContainsKey('NuvioFamilyBlockSameOrNewer') -or $sequence.ContainsKey('NuvioPartySchema')) {
+            throw "Unexpected legacy native Family action in $table."
         }
-        if (!$find -or $find.Number -le 0 -or $find.Condition -or !$guard -or
-            $guard.Condition -cne $familyMsiVersionCondition -or $guard.Number -le $find.Number -or
-            ($extended -and ($extended.Condition -or $extended.Number -le $find.Number -or $extended.Number -ge $guard.Number))) {
-            throw "MSI version guard must run after detection in $table."
-        }
-        foreach ($action in @('LaunchConditions', 'RemoveExistingProducts', 'InstallInitialize', 'InstallFiles')) {
-            $later = $sequence[$action]
-            if (($table -eq 'InstallExecuteSequence' -and $action -ne 'LaunchConditions' -and !$later) -or
-                ($later -and $later.Number -le $guard.Number)) {
-                throw "MSI version guard must precede $action in $table."
-            }
-        }
+        Assert-FamilyMsiLaunchSequence $sequence $table
     }
+    foreach ($sql in @(
+        'SELECT `Action` FROM `CustomAction` WHERE `Action` = ''NuvioFamilyBlockSameOrNewer'' OR `Action` = ''NuvioPartySchema'' OR `Source` = ''NuvioPartySchema''',
+        'SELECT `Name` FROM `Binary` WHERE `Name` = ''NuvioPartySchema'''
+    )) {
+        $view = $Database.OpenView($sql)
+        try {
+            [void]$view.Execute()
+            $record = $view.Fetch()
+            if ($record) {
+                try { throw 'Unexpected legacy native Family action or DLL in MSI.' }
+                finally { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($record) }
+            }
+        } finally { Close-MsiView $view }
+    }
+    if (Test-MsiTable $Database 'RemoveRegistry') { throw 'Unexpected MSI RemoveRegistry table.' }
 }
 
 function Get-VerifiedFamilyMsiProperties($Database, [string]$ExpectedProductVersion, [switch]$BeforeUpgradePolicy) {
@@ -163,7 +180,7 @@ function Get-VerifiedFamilyMsiProperties($Database, [string]$ExpectedProductVers
         })
     } finally { Close-MsiView $view }
     Assert-FamilyMsiIdentity $properties $template $rules $ExpectedProductVersion -BeforeUpgradePolicy:$BeforeUpgradePolicy
-    if (!$BeforeUpgradePolicy) { Assert-FamilyMsiVersionGuard $Database }
+    if (!$BeforeUpgradePolicy) { Assert-FamilyMsiDeclarativeGuard $Database }
 
     $view = $Database.OpenView('SELECT `DefaultDir`, `Directory_Parent` FROM `Directory` WHERE `Directory` = ''INSTALLDIR''')
     try {

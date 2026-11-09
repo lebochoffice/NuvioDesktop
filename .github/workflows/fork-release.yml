@@ -131,7 +131,7 @@ jobs:
           $hash = (Get-FileHash -LiteralPath $asset -Algorithm SHA256).Hash.ToLowerInvariant()
           if ($manifest.sha256 -cne $hash -or $manifest.sourceCommit -cne $env:FORK_SHA -or
               $manifest.browserInviteOrigin -cne 'https://nuvio-watch-friends.pages.dev' -or
-              $manifest.conditionalPartyProtocolInspected -ne $true -or $manifest.architecture -cne 'x64' -or
+              $manifest.familyPartyRegistryInspected -ne $true -or $manifest.architecture -cne 'x64' -or
               $manifest.signature -cne 'Valid') {
             throw 'Release artifact differs from the verified production-origin x64 MSI.'
           }
