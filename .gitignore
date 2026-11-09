@@ -42,3 +42,9 @@ iosApp/Configuration/DeviceSigning.local.json
 
 # Local MPVKit iOS build environment (sparse APFS image, see MPVKit docs)
 .mpvkit-build.sparseimage
+
+# Private Windows signing material
+*.[pP][fF][xX]
+*.[pP]12
+*.[pP][vV][kK]
+Nuvio-Family-Private-Signing/
