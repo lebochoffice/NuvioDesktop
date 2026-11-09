@@ -1,0 +1,38 @@
+# Windows signing readiness
+
+The existing developer and unsigned MSI build tasks remain available. The hosted release workflow fails before packaging until the executable inventory is tied to the actual MSI payload and a signer has been approved. An outer MSI signature does not sign its payload or executable custom actions. Keep the updater installation gate closed during this work.
+
+## Inventory an existing build
+
+Use Windows PowerShell 5.1 and pass the app-image and MSI from the same build. Omit AppImage for MSI-only diagnostics. Capture JSON outside Git. The MSI is opened read-only. PE streams are inspected using a temporary file and are never executed.
+
+    .\fork-maintenance\get-windows-pe-inventory.ps1 -AppImage '<app-image>' -MsiPath '<MSI>' |
+        Set-Content -LiteralPath '<private-output>/windows-pe-inventory.json' -Encoding utf8
+
+The report identifies PE files by their location in the image, JAR or Binary table, including SHA-256, Authenticode status/type, signer and timestamp presence. MSI actions and their sequence and dialog references are listed separately. The inventory is not an execution trace or a signed provenance statement. File-sourced actions and other non-Binary executable actions must be mapped to the actual MSI File table and payload before release. Compare the actual MSI payload with the image, and verify embedded streams independently. Catalog trust on the inventory host is not proof of portable embedded trust. A nested JAR currently stops the scan instead of being silently omitted.
+
+Known gaps from existing artifacts: the 1.1.69 Launcher and JpCaDll are unsigned. The inspected 1.1.68 image also has an unsigned Skiko DLL and contains unsigned player_bridge.dll and nuvio_engine.dll in its app JAR. The inventory also found unsigned JNA, Jansi and QuickJS resources. Some are for architectures other than x64, so determine actual loadability before the release policy classifies them. The 1.1.69 MSI inventory reports Valid for the two WiX PE streams on the inventory host. Treat these findings as a starting list, not a release allowlist. Record source revision, dependency coordinates and license for each file. Preserve valid vendor signatures and bytes. For unsigned third-party files, obtain a vendor-signed build or confirm provenance, license and signer authorization before proceeding.
+
+## Provider boundary and packaging order
+
+1. Build the Windows native inputs from the approved source and inventory them. Own DLLs that are extracted from JARs must be signed before JAR assembly. Inventory and preserve valid vendor-signed dependencies.
+2. Create the jpackage app-image. Sign the finished launcher and other approved unsigned PE files in a private staging copy after all binary edits. Package that exact image with the existing app-image input. Hash it again at the handoff so task regeneration or substitution fails closed.
+3. Resolve every executable action through CustomAction, MSI sequences and ControlEvent. JpCaDll in 1.1.69 supplies both FindRelatedProductsEx and CheckInstallDir. OpenJDK copies the default wixhelper.dll from an internal resource, so a same-name resource-directory file is not a supported replacement. The candidate integration is a pinned, reviewed main.wxs override that references a verified staged helper explicitly. Prove it with the exact JDK/WiX build by comparing the embedded Binary stream with the signed input. Do not ship a source override until that comparison and the dialog/upgrade behavior are established.
+4. The provider adapter receives an explicit list of file identifiers, unsigned SHA-256 values, intended signer identity and timestamp requirements. It returns signed copies and post-sign SHA-256 values under the same identifiers. A local certificate-store signer or a supported external service can implement this contract. The verifier independently checks Authenticode, timestamp and approved signer for each output. Fail for missing, extra or changed files, unresolved action sources, and unexpected signatures. For vendor files require the expected publisher and the approved dependency hash, with no rewriting. No signer credentials belong in the manifest or Git.
+5. After MSI postprocessing, inventory the actual cabinet payload, embedded JAR contents and CustomAction sources and compare them with the approved signed inputs. Re-run the existing MSI identity, launch-condition, upgrade and protocol checks. Sign the outer MSI last, verify its signature, timestamp and exact pin, then compute its final SHA-256. Keep publication separate and approval-gated.
+
+No provider adapter or MSI stream replacement is wired in this phase. The release job stays blocked until payload verification is implemented and the selected signer and replacement path are proven. Ordinary developer builds do not depend on a certificate.
+
+## Identity, migration and approval
+
+The updater pins the SHA-256 of the DER leaf certificate. A new signer or certificate renewal changes this pin. A service that rotates leaf certificates needs a separately reviewed durable publisher/profile identity and trusted chain verification, not a relaxed match. Install a separately trusted bootstrap with the new trust policy before offering packages signed by the new identity. The existing self-signed pin stays unchanged in this phase.
+
+A major upgrade can execute the cached older package during removal. An older package with blocked code is a separate migration case. Validate clean install, app start and native playback, repair, uninstall and a real old-to-new upgrade under enabled Smart App Control. Also verify equal/newer blocking, rollback and preservation of profiles and foreign protocol associations. Do not offer automatic upgrades from an unverified baseline.
+
+## Open source signing eligibility
+
+- The repository has a GPL-3.0 license file. That does not establish OSI-approved source and redistribution terms for all shipped components. In particular, the Windows engine DLL and engine JVM JAR are consumed as prebuilts. Their source, licensing and reproducible build chain need evidence. Audit the other bundled components and any system-library exemptions.
+- SignPath Foundation requires an already released and documented open-source project, source-verifiable artifacts, manual signing approval and its code-signing policy. It restricts signing third-party binaries and requires additional proof for modified upstream forks, including signed upstream builds and ancestry. GitHub identifies this repository as a fork of NuvioMedia/NuvioDesktop. Signed upstream Windows ancestry and coverage of the fork release remain unverified. Do not assume Foundation approval covers a privately used fork or permits re-signing jpackage, WiX or Skiko binaries. Obtain a written eligibility decision for the complete Windows package.
+- Certum Open Source is a paid product for developers sharing software as free and open source. Its cloud listing starts at EUR 49 and was marked unavailable when reviewed. A public repository alone does not demonstrate eligibility for the privately distributed build or every bundled binary. Confirm terms and availability with Certum before planning around it.
+
+References: [SignPath Foundation conditions](https://signpath.org/terms), [Certum Open Source](https://shop.certum.eu/open-source-code-signing-on-simplysign.html), [OpenJDK WiX resource handling](https://github.com/openjdk/jdk21u/blob/master/src/jdk.jpackage/windows/classes/jdk/jpackage/internal/WixUiFragmentBuilder.java), [Microsoft Smart App Control signing requirements](https://learn.microsoft.com/en-us/windows/apps/develop/smart-app-control/code-signing-for-smart-app-control).
