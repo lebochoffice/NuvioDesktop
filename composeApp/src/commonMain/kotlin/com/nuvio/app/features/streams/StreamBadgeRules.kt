@@ -187,8 +187,6 @@ internal object StreamBadgeRulesParser {
 }
 
 object StreamBadgeMatcher {
-    private val WHITESPACE_PATTERN = Regex("\\s+")
-
     fun compile(rules: StreamBadgeRules): List<CompiledStreamBadgeFilter> {
         if (!rules.hasImport) return emptyList()
         return rules.normalized().imports.filter { it.isActive }.flatMap { import ->
@@ -208,7 +206,6 @@ object StreamBadgeMatcher {
                         borderColor = filter.borderColor,
                     ),
                     regex = regex,
-                    groupId = filter.groupId,
                 )
             }
         }
@@ -229,38 +226,9 @@ object StreamBadgeMatcher {
     fun matchedBadges(candidates: List<String>, filters: List<CompiledStreamBadgeFilter>): List<StreamBadge> {
         if (filters.isEmpty() || candidates.isEmpty()) return emptyList()
 
-        val normalized = candidates.map { it.replace(WHITESPACE_PATTERN, " ") }
         val matched = linkedMapOf<String, StreamBadge>()
         filters.forEach { filter ->
-            if (normalized.any { candidate -> filter.regex.containsMatchIn(candidate) }) {
-                val key = filter.badge.dedupeKey()
-                if (key !in matched) matched[key] = filter.badge
-            }
-        }
-        return matched.values.toList()
-    }
-
-    /**
-     * Two-phase badge matching for the player.
-     * @see [matchedBadges] for the single-phase stream list variant.
-     */
-    fun matchedPlayerBadges(
-        playbackCandidate: String?,
-        metaCandidates: List<String>,
-        filters: List<CompiledStreamBadgeFilter>
-    ): List<StreamBadge> {
-        if (filters.isEmpty()) return emptyList()
-        val playback = playbackCandidate?.replace(WHITESPACE_PATTERN, " ")
-        val meta = metaCandidates.map { it.replace(WHITESPACE_PATTERN, " ") }
-        val playbackHits = filters.map { playback != null && it.regex.containsMatchIn(playback) }
-        val coveredGroups = filters.filterIndexed { i, f -> playbackHits[i] && f.groupId.isNotBlank() }
-            .mapTo(hashSetOf()) { it.groupId }
-        val matched = linkedMapOf<String, StreamBadge>()
-        filters.forEachIndexed { i, filter ->
-            val hit = playbackHits[i] ||
-                (filter.groupId.isBlank() || filter.groupId !in coveredGroups) &&
-                meta.any { filter.regex.containsMatchIn(it) }
-            if (hit) {
+            if (candidates.any { candidate -> filter.regex.containsMatchIn(candidate) }) {
                 val key = filter.badge.dedupeKey()
                 if (key !in matched) matched[key] = filter.badge
             }
@@ -295,7 +263,7 @@ object StreamBadgeMatcher {
             stream.sourceName,
             stream.addonName,
         )
-            .map { it.replace(WHITESPACE_PATTERN, " ").trim() }
+            .map { it.trim() }
             .filter { it.isNotBlank() }
             .distinct()
 
@@ -311,7 +279,6 @@ data class CompiledStreamBadgeFilter(
     val name: String,
     val badge: StreamBadge,
     val regex: Regex,
-    val groupId: String = "",
 )
 
 private fun StreamBadge.dedupeKey(): String =

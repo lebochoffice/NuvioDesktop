@@ -75,8 +75,6 @@ actual fun PlatformPlayerSurface(
     PlayerSettingsRepository.ensureLoaded()
     val playerSettings by PlayerSettingsRepository.uiState.collectAsStateWithLifecycle()
     val latestPlayerSettings = rememberUpdatedState(playerSettings)
-    var subtitleText by remember(sourceUrl) { mutableStateOf("") }
-    var subtitleStyle by remember { mutableStateOf(SubtitleStyleState.DEFAULT) }
 
     val bridge = remember {
         NuvioPlayerBridgeFactory.create()
@@ -284,7 +282,6 @@ actual fun PlatformPlayerSurface(
             }
 
             override fun applySubtitleStyle(style: SubtitleStyleState) {
-                subtitleStyle = style
                 bridge.applySubtitleStyle(
                     textColor = style.textColor.toMpvColorString(),
                     backgroundColor = style.backgroundColor.toMpvColorString(),
@@ -294,7 +291,6 @@ actual fun PlatformPlayerSurface(
                     fontSize = style.toMpvSubtitleFontSize(),
                     subPos = style.toMpvSubtitlePosition(),
                     stripSdh = style.stripSdh,
-                    styledOverlay = style.usesStyledOverlay,
                 )
             }
         }
@@ -366,9 +362,7 @@ actual fun PlatformPlayerSurface(
 
     // Cleanup
     DisposableEffect(bridge) {
-        bridge.setSubtitleTextHandler { subtitleText = it }
         onDispose {
-            bridge.setSubtitleTextHandler(null)
             bridge.destroy()
         }
     }
@@ -398,7 +392,6 @@ actual fun PlatformPlayerSurface(
             },
             interactive = false,
         )
-        StyledSubtitleOverlay(subtitleText, subtitleStyle)
         
         if (useNativeController) {
             var isPlayingLocal by remember { mutableStateOf(playWhenReady) }

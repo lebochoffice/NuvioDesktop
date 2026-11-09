@@ -62,7 +62,6 @@ import nuvio.composeapp.generated.resources.compose_player_playing
 import nuvio.composeapp.generated.resources.episodes_season
 import nuvio.composeapp.generated.resources.episodes_specials
 import org.jetbrains.compose.resources.stringResource
-import com.nuvio.app.core.i18n.localizedEpisodeTitle
 
 @Composable
 fun PlayerEpisodesPanel(
@@ -404,7 +403,7 @@ private fun EpisodeRow(
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
             Text(
-                text = localizedEpisodeTitle(episode.title, episode.episode) ?: episode.title,
+                text = episode.title,
                 color = tokens.colors.textPrimary,
                 style = MaterialTheme.typography.titleMedium,
                 maxLines = 1,

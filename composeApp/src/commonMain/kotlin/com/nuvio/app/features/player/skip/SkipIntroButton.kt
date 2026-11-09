@@ -69,10 +69,7 @@ fun SkipIntroButton(
     var manuallyDismissed by remember { mutableStateOf(false) }
     val progress = remember { Animatable(0f) }
 
-    // Reset auto-hide and progress when interval category changes (opening/ending/recap),
-    // but not when the same category switches provider (e.g. op[aniskip] -> intro[chapters]).
-    val intervalCategory = interval?.type?.let { segmentCategory(it) }
-    LaunchedEffect(intervalCategory) {
+    LaunchedEffect(interval?.startTime, interval?.type) {
         autoHidden = false
         manuallyDismissed = false
         progress.snapTo(0f)

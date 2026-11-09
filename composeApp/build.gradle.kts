@@ -1345,17 +1345,6 @@ tasks.matching {
     dependsOn(":desktopSentry:generateSentryDebugMetaPropertiesjava")
 }
 
-tasks.withType<org.gradle.language.jvm.tasks.ProcessResources>().matching {
-    it.name == "desktopProcessResources" || it.name == "processDesktopMainResources"
-}.configureEach {
-    from(listOf(rootProject.file("fork-maintenance/windows-msi-identity.ps1"),
-        rootProject.file("fork-maintenance/windows-update-trust.ps1"),
-        rootProject.file("fork-maintenance/verify-windows-update.ps1"),
-        rootProject.file("fork-maintenance/install-windows-update.ps1"))) {
-        into("fork-updater")
-    }
-}
-
 compose.desktop {
     application {
         mainClass = "com.nuvio.app.MainKt"

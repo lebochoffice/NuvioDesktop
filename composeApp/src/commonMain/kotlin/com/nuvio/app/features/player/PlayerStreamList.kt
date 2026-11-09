@@ -43,7 +43,8 @@ internal fun PlayerStreamList(
         end = 8.dp,
         bottom = 8.dp,
     ),
-    currentStream: PlayerCurrentStream? = null,
+    currentStreamUrl: String? = null,
+    currentStreamName: String? = null,
     currentLabel: String? = null,
 ) {
     val debridSettings by remember {
@@ -87,9 +88,6 @@ internal fun PlayerStreamList(
 
         else -> {
             val streamKeys = remember(streams) { streams.stablePlayerKeys() }
-            val currentStreamIndex = remember(streams, currentStream) {
-                streams.currentPlayerStreamIndex(currentStream)
-            }
             val formatStreamSize = rememberStreamSizeLabelFormat()
             CompositionLocalProvider(LocalStreamSizeLabelFormat provides formatStreamSize) {
             LazyColumn(
@@ -100,7 +98,7 @@ internal fun PlayerStreamList(
                 itemsIndexed(
                     items = streams,
                     key = { index, _ -> streamKeys[index] },
-                ) { index, stream ->
+                ) { _, stream ->
                     StreamCard(
                         stream = stream,
                         enabled = stream.isSelectableForPlayback(debridSettings.canResolvePlayableLinks),
@@ -109,7 +107,7 @@ internal fun PlayerStreamList(
                         showFileSizeBadges = streamBadgeSettings.showFileSizeBadges,
                         showAddonLogo = streamBadgeSettings.showAddonLogo,
                         badgePlacement = streamBadgeSettings.badgePlacement,
-                        isCurrent = index == currentStreamIndex,
+                        isCurrent = stream.isCurrentPlayerStream(currentStreamUrl, currentStreamName),
                         currentLabel = currentLabel,
                         onClick = { onStreamSelected(stream) },
                     )

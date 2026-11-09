@@ -37,7 +37,6 @@ internal class SidecarSubtitleController(
     private val scope: CoroutineScope,
     private val getPlayer: () -> Player?,
     private val getSubtitleDelayMs: () -> Int = { 0 },
-    private val presentCues: (List<Cue>) -> List<Cue> = { it },
 ) {
     private var sidecarSubtitleJob: Job? = null
     private var sidecarGenerationCounter = 0L
@@ -45,8 +44,6 @@ internal class SidecarSubtitleController(
     var activeSidecarSubtitleKey: String? = null
         private set
     var sidecarTimedCues: List<CuesWithTiming> = emptyList()
-        private set
-    var subtitleMimeType: String? = null
         private set
     private var lastSidecarCueSignature: Long? = null
     private var exoSubtitleViewRef: WeakReference<SubtitleView>? = null
@@ -89,7 +86,6 @@ internal class SidecarSubtitleController(
         sidecarSubtitleJob?.cancel()
         sidecarSubtitleJob = null
         activeSidecarSubtitleKey = null
-        subtitleMimeType = null
         activeSidecarGeneration = 0L
         AutoSyncSyncedSubtitle.clear() // AutoSync hook
         sidecarTimedCues = emptyList()
@@ -97,7 +93,7 @@ internal class SidecarSubtitleController(
         if (clearView) {
             postToSubtitleView { view ->
                 view.setTag(R.id.player_view_sidecar_generation_tag, null)
-                view.setCues(presentCues(emptyList()))
+                view.setCues(emptyList())
             }
         }
     }
@@ -112,7 +108,6 @@ internal class SidecarSubtitleController(
 
         val subtitleKey = url
         val urlMimeHint = PlayerSubtitleUtils.mimeTypeFromUrl(url)
-        subtitleMimeType = urlMimeHint
 
         sidecarSubtitleJob?.cancel()
         val generation = ++sidecarGenerationCounter
@@ -123,12 +118,12 @@ internal class SidecarSubtitleController(
         resetSidecarCursor()
         postToSubtitleView { view ->
             view.setTag(R.id.player_view_sidecar_generation_tag, generation)
-            view.setCues(presentCues(emptyList()))
+            view.setCues(emptyList())
         }
         fun isCurrent() =
             activeSidecarSubtitleKey == subtitleKey && activeSidecarGeneration == generation
 
-        sidecarSubtitleJob = scope.launch(Dispatchers.Main.immediate) {
+        sidecarSubtitleJob = scope.launch {
             try {
                 val rawBody = rawBodyLoader?.invoke() ?: withContext(Dispatchers.IO) {
                     httpGetTextWithHeaders(url = url, headers = headers)
@@ -151,13 +146,12 @@ internal class SidecarSubtitleController(
                     sidecarTimedCues = emptyList()
                     postToSubtitleView { view ->
                         view.setTag(R.id.player_view_sidecar_generation_tag, null)
-                        view.setCues(presentCues(emptyList()))
+                        view.setCues(emptyList())
                     }
                     return@launch
                 }
 
                 sidecarTimedCues = parseResult.cues
-                subtitleMimeType = parseResult.effectiveMime
                 Log.d(
                     SIDECAR_TAG,
                     "Sidecar subtitle ready url=$url cues=${parseResult.cues.size} mime=${parseResult.effectiveMime} source=${parseResult.source} (buffer preserved)"
@@ -180,7 +174,7 @@ internal class SidecarSubtitleController(
                 sidecarTimedCues = emptyList()
                 postToSubtitleView { view ->
                     view.setTag(R.id.player_view_sidecar_generation_tag, null)
-                    view.setCues(presentCues(emptyList()))
+                    view.setCues(emptyList())
                 }
             }
         }
@@ -203,7 +197,7 @@ internal class SidecarSubtitleController(
                 activeSidecarGeneration == currentGeneration &&
                 view.getTag(R.id.player_view_sidecar_generation_tag) == currentGeneration
             ) {
-                view.setCues(presentCues(active))
+                view.setCues(active)
             }
         }
     }
@@ -316,7 +310,7 @@ internal class SidecarSubtitleController(
         renderSidecarCuesAtCurrentPosition()
 
         if (urlChanged) {
-            sidecarSubtitleJob = scope.launch(Dispatchers.Main.immediate) {
+            sidecarSubtitleJob = scope.launch {
                 while (
                     isActive &&
                     activeSidecarSubtitleKey == newUrl &&
