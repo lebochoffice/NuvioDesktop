@@ -14,8 +14,10 @@ if ($PSBoundParameters.ContainsKey('LocalSignerSha256')) {
 }
 if ($familySignerSha256 -cnotmatch '^[a-f0-9]{64}\z') { throw 'The trusted Fork signing certificate pin is not configured.' }
 $timestamp = [uri]$TimestampUrl
-if (!$timestamp.IsAbsoluteUri -or $timestamp.Scheme -ne 'https' -or !$timestamp.Host -or $timestamp.UserInfo) {
-    throw 'An approved HTTPS RFC 3161 timestamp endpoint is required.'
+$microsoftHttpTimestamp = @('http://timestamp.acs.microsoft.com', 'http://timestamp.acs.microsoft.com/') -ccontains $TimestampUrl
+if (!$timestamp.IsAbsoluteUri -or !$timestamp.Host -or $timestamp.UserInfo -or
+    ($timestamp.Scheme -ne 'https' -and !$microsoftHttpTimestamp)) {
+    throw 'Use an approved HTTPS RFC 3161 endpoint or the exact Microsoft HTTP timestamp endpoint.'
 }
 
 $sha256 = [Security.Cryptography.SHA256]::Create()
