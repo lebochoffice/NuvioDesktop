@@ -1,6 +1,6 @@
 # Bundled after the identity and trust scripts. All input comes from the calling process.
 $ErrorActionPreference = 'Stop'
-try {
+function Get-VerifiedFamilyUpdate {
     $msi = $env:NUVIO_VERIFY_UPDATE_PATH
     if ((Get-FileHash -LiteralPath $msi -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:NUVIO_VERIFY_UPDATE_SHA256) {
         throw 'Update checksum does not match the release.'
@@ -30,8 +30,6 @@ try {
         if ($launcher.PSIsContainer -or $launcher.FullName -ine $env:NUVIO_VERIFY_RUNNING_LAUNCHER) {
             throw 'The running launcher does not match the installed Nuvio Family product.'
         }
+        return $properties
     } finally { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($installer) }
-    exit 0
-} catch {
-    exit 1
 }

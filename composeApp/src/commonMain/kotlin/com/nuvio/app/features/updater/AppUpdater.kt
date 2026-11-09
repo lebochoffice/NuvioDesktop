@@ -76,7 +76,8 @@ internal data class ForkUpdateStatus(
 
 internal enum class ForkUpdateTransfer {
     Idle, Downloading, Verifying, Ready, Installing, Installed, RestartRequired,
-    Cancelled, InstallCancelled, DownloadFailed, VerificationFailed, InstallFailed, PartyActive,
+    Cancelled, InstallCancelled, DownloadFailed, VerificationFailed, InstallFailed, PartyActive, PlaybackActive,
+    SettingsPending, OtherInstance,
 }
 
 class AppUpdaterController internal constructor(
@@ -226,16 +227,23 @@ class AppUpdaterController internal constructor(
             try {
                 val result = installer.install(update, path, partyActive)
                 setForkTransfer(when (result) {
+                    ForkInstallResult.HandedOff -> ForkUpdateTransfer.Installing
                     ForkInstallResult.Installed -> ForkUpdateTransfer.Installed
                     ForkInstallResult.RestartRequired -> ForkUpdateTransfer.RestartRequired
                     ForkInstallResult.Cancelled -> ForkUpdateTransfer.InstallCancelled
                 })
-                if (result != ForkInstallResult.Cancelled) {
+                if (result != ForkInstallResult.Cancelled && result != ForkInstallResult.HandedOff) {
                     verifiedForkFile = null
                     AppUpdaterPlatform.deleteDownloadedUpdate(path)
                 }
             } catch (_: ForkInstallBlockedByParty) {
                 setForkTransfer(ForkUpdateTransfer.PartyActive)
+            } catch (_: ForkInstallBlockedByPlayback) {
+                setForkTransfer(ForkUpdateTransfer.PlaybackActive)
+            } catch (_: ForkInstallBlockedBySettings) {
+                setForkTransfer(ForkUpdateTransfer.SettingsPending)
+            } catch (_: ForkInstallBlockedByInstance) {
+                setForkTransfer(ForkUpdateTransfer.OtherInstance)
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (failure: Exception) {
