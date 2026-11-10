@@ -992,6 +992,7 @@ internal fun MainAppContent(
             resumeProgressFraction: Float?,
             manualSelection: Boolean,
             startFromBeginning: Boolean,
+            hostSoloReturnToken: Long? = null,
         ) {
             val targetResumePositionMs = if (startFromBeginning) 0L else (resumePositionMs ?: 0L)
             val targetResumeProgressFraction = if (startFromBeginning) null else resumeProgressFraction
@@ -1070,6 +1071,7 @@ internal fun MainAppContent(
                     resumeProgressFraction = targetResumeProgressFraction,
                     manualSelection = manualSelection,
                     startFromBeginning = startFromBeginning,
+                    hostSoloReturnToken = hostSoloReturnToken,
                 ),
             )
             navController.navigate(
@@ -1077,7 +1079,7 @@ internal fun MainAppContent(
             )
         }
 
-        fun openPartyMedia(media: PartyMedia) {
+        fun openPartyMedia(media: PartyMedia, hostSoloReturnToken: Long? = null) {
             val resumePositionMs = PartyRepository.playback.value
                 ?.takeIf { PartyRepository.state.value.party?.media?.key == media.key &&
                     (it.mediaKey == null || it.mediaKey == media.key) }
@@ -1101,6 +1103,7 @@ internal fun MainAppContent(
                 resumeProgressFraction = null,
                 manualSelection = true,
                 startFromBeginning = resumePositionMs == null,
+                hostSoloReturnToken = hostSoloReturnToken,
             )
         }
 
@@ -1732,7 +1735,7 @@ internal fun MainAppContent(
                         PartyScreen(
                             initialCode = route.code,
                             onBack = onBack,
-                            onWatch = ::openPartyMedia,
+                            onWatch = { media -> openPartyMedia(media) },
                         )
                     }
                 }

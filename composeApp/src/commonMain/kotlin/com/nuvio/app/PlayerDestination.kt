@@ -28,7 +28,7 @@ internal fun PlayerDestination(
     launchExternalPlayer: (ExternalPlayerIntentResult.Success) -> Boolean,
     openExternalStreamUrl: (String) -> Boolean,
     onSystemBackHandlerChanged: (PlayerRoute, (() -> Unit)?) -> Unit,
-    onOpenPartyMedia: (PartyMedia) -> Unit,
+    onOpenPartyMedia: (PartyMedia, Long?) -> Unit,
 ) {
     val popBack = rememberGuardedPopBackStack(
         navController = navController,
@@ -98,6 +98,7 @@ internal fun PlayerDestination(
         initialProgressFraction = launch.initialProgressFraction,
         contentLanguage = launch.contentLanguage,
         launchId = route.launchId,
+        hostSoloReturnToken = launch.hostSoloReturnToken,
         sourceFilename = launch.sourceFilename,
         stream = launch.stream,
         onBack = onBack,

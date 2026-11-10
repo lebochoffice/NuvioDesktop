@@ -50,6 +50,8 @@ import kotlin.time.Duration.Companion.minutes
 import kotlin.time.Duration.Companion.seconds
 import kotlin.time.TimeMark
 
+internal data class HostSoloReturn(val token: Long, val media: PartyMedia)
+
 @OptIn(ExperimentalCoroutinesApi::class)
 object PartyRepository {
     private val log = Logger.withTag("Party")
@@ -60,6 +62,12 @@ object PartyRepository {
 
     private val _state = MutableStateFlow(PartyUiState())
     val state: StateFlow<PartyUiState> = _state.asStateFlow()
+
+    private val _hostSolo = MutableStateFlow(false)
+    internal val hostSolo = _hostSolo.asStateFlow()
+    private val _hostSoloReturn = MutableStateFlow<HostSoloReturn?>(null)
+    internal val hostSoloReturn = _hostSoloReturn.asStateFlow()
+    private var nextHostSoloReturn = 0L
 
     private val _playback = MutableStateFlow<PartyPlayback?>(null)
     val playback: StateFlow<PartyPlayback?> = _playback.asStateFlow()
@@ -116,6 +124,7 @@ object PartyRepository {
 
     fun startCountdown(seconds: Int) {
         scope.launch {
+            if (_hostSolo.value) return@launch
             val party = _state.value.party ?: return@launch
             if (!party.isHost) return@launch
             val length = seconds.coerceIn(PARTY_COUNTDOWN_MIN_S, PARTY_COUNTDOWN_MAX_S)
@@ -155,6 +164,7 @@ object PartyRepository {
     private var sessionScope: CoroutineScope? = null
     private var sessionJob: Job? = null
     private var persistJob: Job? = null
+    private var mediaSwitchSession: CoroutineScope? = null
     private var presenceJob: Job? = null
     private var localPresence: PartyPresence? = null
     private var waitStartedAt: TimeMark? = null
@@ -255,7 +265,7 @@ object PartyRepository {
         val requestedIn = _state.value.party ?: return
         scope.launch {
             val party = _state.value.party ?: return@launch
-            if (!party.isHost || party.id != requestedIn.id || party.memberId != requestedIn.memberId) return@launch
+            if (_hostSolo.value || !party.isHost || party.id != requestedIn.id || party.memberId != requestedIn.memberId) return@launch
             if ((if (browser) party.browserSharing else party.sharing) == enabled) return@launch
             val next = if (browser) party.copy(browserSharing = enabled) else party.copy(sharing = enabled)
             updateParty { next }
@@ -267,18 +277,58 @@ object PartyRepository {
         }
     }
 
+    internal suspend fun enterHostSolo(expected: ActiveParty): Boolean = withContext(dispatcher) {
+        val party = _state.value.party ?: return@withContext false
+        val playback = _playback.value ?: return@withContext false
+        if (!party.connected || !party.isHost || party.id != expected.id || party.memberId != expected.memberId ||
+            _hostSolo.value || party.sharing || party.browserSharing || _sharedStream.value != null ||
+            _countdown.value != null || (playback.mediaKey != null && playback.mediaKey != party.media.key)
+        ) return@withContext false
+        _hostSolo.value = true
+        localPresence = null
+        updateLocalStatus(party, PartyMemberStatus.Browsing, null, null, false)
+        true
+    }
+
+    internal suspend fun requestHostSoloReturn(): HostSoloReturn? = withContext(dispatcher) {
+        val party = _state.value.party ?: return@withContext null
+        if (!_hostSolo.value || !party.isHost || !party.connected ||
+            (mediaSwitchSession != null && mediaSwitchSession === sessionScope)
+        ) return@withContext null
+        HostSoloReturn(++nextHostSoloReturn, party.media).also { _hostSoloReturn.value = it }
+    }
+
+    internal suspend fun failHostSoloReturn(request: HostSoloReturn): Boolean = withContext(dispatcher) {
+        _hostSoloReturn.compareAndSet(request, null)
+    }
+
+    internal suspend fun completeHostSoloReturn(request: HostSoloReturn, applied: PartyPlayback): Boolean =
+        withContext(dispatcher) {
+            val party = _state.value.party ?: return@withContext false
+            if (!_hostSolo.value || !party.isHost || !party.connected || party.media.key != request.media.key ||
+                (mediaSwitchSession != null && mediaSwitchSession === sessionScope) ||
+                _playback.value != applied || !_hostSoloReturn.compareAndSet(request, null)
+            ) return@withContext false
+            _hostSolo.value = false
+            true
+        }
+
     fun shareStream(partyId: String, memberId: String, mediaKey: String, desktop: PartyStream?, browser: PartyBrowserHls?) {
+        if (_hostSolo.value) return
         scope.launch {
             val party = _state.value.party ?: return@launch
-            if (!party.isHost || party.id != partyId || party.memberId != memberId || party.media.key != mediaKey) return@launch
+            if (_hostSolo.value || !party.isHost || party.id != partyId || party.memberId != memberId || party.media.key != mediaKey) return@launch
             val offer = party.streamOffer(desktop, browser)
             if (offer != _sharedStream.value) sendStream(offer)
         }
     }
 
     fun publishPlayback(paused: Boolean, positionMs: Long, rate: Float) {
+        if (_hostSolo.value) return
         val at = clock.nowMs()
-        scope.launch { publish(paused = paused, positionMs = positionMs, rate = rate, waiting = false, at = at) }
+        scope.launch {
+            if (!_hostSolo.value) publish(paused = paused, positionMs = positionMs, rate = rate, waiting = false, at = at)
+        }
     }
 
     /**
@@ -296,7 +346,9 @@ object PartyRepository {
     }
 
     fun publishMedia(media: PartyMedia, positionMs: Long) {
+        if (_hostSolo.value) return
         scope.launch {
+            if (_hostSolo.value) return@launch
             val party = _state.value.party ?: return@launch
             if (media == party.media || !party.isHost) return@launch
             val sameContent = media.key == party.media.key
@@ -314,22 +366,71 @@ object PartyRepository {
         }
     }
 
+    // Desktop title changes are explicit. Keep the previous state until the
+    // existing media update RPC confirms the new title.
+    internal suspend fun publishMedia(
+        expected: ActiveParty,
+        media: PartyMedia,
+        positionMs: Long,
+        paused: Boolean,
+        rate: Float,
+    ): Boolean = withContext(dispatcher) {
+        val session = sessionScope ?: return@withContext false
+        val party = _state.value.party ?: return@withContext false
+        if (!party.isHost || !party.connected || party.id != expected.id || party.memberId != expected.memberId ||
+            party.media.key != expected.media.key || party.media.key == media.key ||
+            mediaSwitchSession === session
+        ) return@withContext false
+
+        mediaSwitchSession = session
+        try {
+            persistJob?.cancel()
+            val next = nextPlayback(party, paused, positionMs, rate, waiting = false, mediaKey = media.key, at = clock.nowMs())
+            val snapshot = runRemote { PartyApi.update(party.id, deviceId(), media, next) } ?: return@withContext false
+            if (sessionScope !== session) return@withContext false
+            applySnapshot(snapshot)
+            val confirmed = _state.value.party
+            val switched = snapshot.error == null && snapshot.party?.media?.key == media.key &&
+                confirmed != null && confirmed.isHost && confirmed.memberId == party.memberId &&
+                confirmed.media.key == media.key
+            if (switched) _hostSoloReturn.value = null
+            switched
+        } finally {
+            if (mediaSwitchSession === session) {
+                mediaSwitchSession = null
+                if (sessionScope === session && _state.value.party?.media?.key == party.media.key) schedulePersist()
+            }
+        }
+    }
+
+    internal suspend fun resumeHostAfterMediaSwitch(expected: ActiveParty, mediaKey: String) = withContext(dispatcher) {
+        val party = _state.value.party ?: return@withContext
+        if (party.isHost && party.connected && party.id == expected.id && party.memberId == expected.memberId &&
+            party.media.key == mediaKey && _playback.value?.mediaKey == mediaKey && _hostSoloReturn.value == null
+        ) _hostSolo.value = false
+    }
+
     fun setLocalStatus(status: PartyMemberStatus, mediaKey: String?, behindMs: Long? = null, solo: Boolean = false) {
+        if (_hostSolo.value) return
         scope.launch {
             val party = _state.value.party ?: return@launch
-            // Keep the last position report; a status change does not clear it.
-            val previous = localPresence?.takeIf { it.mediaKey == mediaKey }
-            val next = PartyPresence(memberId = party.memberId, status = status, mediaKey = mediaKey, behindMs = behindMs,
-                positionMs = previous?.positionMs, positionAt = previous?.positionAt, playing = previous?.playing, solo = solo.takeIf { it })
-            if (next == localPresence) return@launch
-            localPresence = next
-            if (status == PartyMemberStatus.Ready) ignoredWaiting.remove(party.memberId)
-            updateParty { it.copy(presence = it.presence + (party.memberId to next)) }
-            presenceJob?.cancel()
-            presenceJob = sessionScope?.launch {
-                delay(250)
-                runCatching { channel?.send("status", encodePresence(next)) }
-            }
+            if (!_hostSolo.value) updateLocalStatus(party, status, mediaKey, behindMs, solo)
+        }
+    }
+
+    private fun updateLocalStatus(party: ActiveParty, status: PartyMemberStatus, mediaKey: String?, behindMs: Long?, solo: Boolean) {
+        // Keep the last position report; a status change does not clear it.
+        val previous = localPresence?.takeIf { it.mediaKey == mediaKey }
+        val next = PartyPresence(memberId = party.memberId, status = status, mediaKey = mediaKey, behindMs = behindMs,
+            positionMs = previous?.positionMs, positionAt = previous?.positionAt, playing = previous?.playing, solo = solo.takeIf { it })
+        if (next == localPresence) return
+        localPresence = next
+        if (status == PartyMemberStatus.Ready) ignoredWaiting.remove(party.memberId)
+        updateParty { it.copy(presence = it.presence + (party.memberId to next)) }
+        presenceJob?.cancel()
+        presenceJob = sessionScope?.launch {
+            delay(250)
+            runCatching { channel?.send("status", encodePresence(next)) }
         }
     }
 
@@ -340,7 +441,9 @@ object PartyRepository {
      * clients.
      */
     fun reportPosition(positionMs: Long, playing: Boolean) {
+        if (_hostSolo.value) return
         scope.launch {
+            if (_hostSolo.value) return@launch
             val party = _state.value.party ?: return@launch
             val base = localPresence?.takeIf { it.mediaKey == party.media.key } ?: return@launch
             val next = base.copy(positionMs = positionMs.coerceAtLeast(0L), positionAt = clock.nowMs(), playing = playing)
@@ -425,12 +528,15 @@ object PartyRepository {
         PartyChat.start(PartyChatRoom(party.id, party.memberId, party.members))
     }
 
-    private suspend fun stopSession() {
+    private suspend fun stopSession(keepHostSolo: Boolean = false) {
+        _hostSoloReturn.value = null
+        if (!keepHostSolo) _hostSolo.value = false
         sessionJob?.cancel()
         sessionJob = null
         sessionScope = null
         persistJob?.cancel()
         persistJob = null
+        mediaSwitchSession = null
         presenceJob = null
         val closingChannel = channel
         channel = null
@@ -779,6 +885,7 @@ object PartyRepository {
     )
 
     private fun schedulePersist() {
+        if (mediaSwitchSession != null && mediaSwitchSession === sessionScope) return
         persistJob?.cancel()
         persistJob = sessionScope?.launch {
             delay(PERSIST_DELAY)
@@ -871,8 +978,10 @@ object PartyRepository {
                         return@withLock
                     }
                     val playback = _playback.value
-                    stopSession()
+                    val keepHostSolo = _hostSolo.value && rejoined.id == party.id && rejoined.isHost
+                    stopSession(keepHostSolo = keepHostSolo)
                     startSession(rejoined, playback)
+                    if (keepHostSolo) updateLocalStatus(rejoined, PartyMemberStatus.Browsing, null, null, false)
                 }
             } finally {
                 rejoining = false
@@ -884,6 +993,10 @@ object PartyRepository {
 
     private fun updateParty(transform: (ActiveParty) -> ActiveParty) {
         _state.update { state -> state.party?.let { state.copy(party = transform(it)) } ?: state }
+        if (_state.value.party?.isHost != true) {
+            _hostSoloReturn.value = null
+            _hostSolo.value = false
+        }
         val request = _mediaRequest.value ?: return
         if (_state.value.party?.let(request::isCurrent) != true) _mediaRequest.compareAndSet(request, null)
     }

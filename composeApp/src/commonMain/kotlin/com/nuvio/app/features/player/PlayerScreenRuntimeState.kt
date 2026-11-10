@@ -348,6 +348,8 @@ internal class PlayerScreenRuntime(
     var partyRateNudge: Float? = null
     var partyPreviousKey: String? = null
     var partyOpeningRequestedSource = false
+    var hostSoloReturnOpened = false
+    var hostSoloActionPending = false
     var partyAppInBackground = false
     var playbackSnapshotMark: TimeMark? = null
     var pendingSeekTarget: Pair<Long, TimeMark>? = null

@@ -827,7 +827,7 @@ const closeAndSendParty = (type, value = 0) => {
 const buildPartyContent = party => {
   if (partyView === "smart") return buildPartySmart(party);
   const content = partyElement("div", "party-content");
-  if (party.isHost && Number.isInteger(party.hlsSuggestionId)) content.appendChild(buildPartyHlsSuggestion(party));
+  if (party.isHost && !party.hostSolo && Number.isInteger(party.hlsSuggestionId)) content.appendChild(buildPartyHlsSuggestion(party));
   const behind = String(party.behindTitle || "").trim();
   if (behind) {
     const section = partyElement("div", "party-section party-card");
@@ -840,24 +840,26 @@ const buildPartyContent = party => {
   overview.appendChild(buildPartyCode(party));
   overview.appendChild(buildPartyMembers(party));
   content.appendChild(overview);
+  if (party.isHost) {
+    content.appendChild(partyButtonElement(party.hostSolo ? "Zur Party" : "Allein schauen",
+      "compact", "hostSolo", () => send("partyHostSolo", 0)));
+  }
 
-  // Different title than the party: what happens to me vs. to everyone.
   const nowWatching = String(party.nowWatching || "").trim();
-  if (nowWatching) {
+  if (party.isHost && party.hostDifferentTitle) {
+    const section = partyElement("div", "party-section party-card party-switch-card");
+    section.appendChild(partyElement("p", "party-card-title", "Anderer Titel erkannt"));
+    section.appendChild(partyElement("p", "party-text", "Du schaust jetzt einen anderen Film oder eine andere Folge."));
+    section.appendChild(partyCompactButton("Gäste mitnehmen", "switch", () => send("partySwitch", 0), "primary"));
+    section.appendChild(partyCompactButton("Alleine weiterschauen", "keepWatchingAlone",
+      () => send("partyHostKeepWatchingAlone", 0)));
+    content.appendChild(section);
+  } else if (nowWatching) {
     const section = partyElement("div", "party-section party-card party-switch-card");
     section.appendChild(partyElement("p", "party-card-title", "Anderer Titel"));
     section.appendChild(partyElement("p", "party-text", nowWatching));
-    section.appendChild(partyIconTextButton("icon-party", partyLabel("watchWithParty"), "primary", "watch", () => closeAndSendParty("partyWatch")));
-    const switchLabel = String(party.switchLabel || "").trim();
-    if (switchLabel) {
-      section.appendChild(partyElement("div", "party-divider"));
-      section.appendChild(partyIconTextButton("icon-swap", switchLabel, "", "switch", () => showPartyConfirm({
-        title: partyLabel("switchTitle"),
-        message: party.switchMessage,
-        confirmLabel: partyLabel("switchConfirm"),
-        danger: false,
-        onConfirm: () => send("partySwitch", 0),
-      })));
+    if (!party.hostSolo) {
+      section.appendChild(partyIconTextButton("icon-party", partyLabel("watchWithParty"), "primary", "watch", () => closeAndSendParty("partyWatch")));
     }
     if (party.mediaRequestAction) {
       section.appendChild(partyElement("div", "party-divider"));
@@ -872,7 +874,7 @@ const buildPartyContent = party => {
       const request = partyElement("div", "party-section party-card");
       request.appendChild(partyElement("p", "party-card-title", party.mediaRequestTitle));
       request.appendChild(partyElement("p", "party-text", party.mediaRequestNotice));
-      if (party.mediaRequestChooseSource) {
+      if (party.mediaRequestChooseSource && !party.hostSolo) {
         request.appendChild(partyButtonElement(party.mediaRequestChooseSource, "compact", "chooseRequestedSource",
           () => closeAndSendParty("partyChooseRequestedSource", party.mediaRequestId)));
       }
@@ -881,7 +883,7 @@ const buildPartyContent = party => {
       content.appendChild(request);
     }
     content.appendChild(partyElement("div", "party-divider"));
-    content.appendChild(buildPartyHostSettings(party));
+    if (!party.hostSolo) content.appendChild(buildPartyHostSettings(party));
   }
   if (!party.isHost && party.hostOnly) {
     const note = partyElement("div", "party-host-only-note");
@@ -890,7 +892,7 @@ const buildPartyContent = party => {
     content.appendChild(note);
   }
   if (party.isHost) {
-    content.appendChild(buildPartyBrowserShare(party));
+    if (!party.hostSolo) content.appendChild(buildPartyBrowserShare(party));
     content.appendChild(partyElement("div", "party-divider"));
     const playback = partyElement("section", "party-playback-controls");
     playback.appendChild(partyElement("h3", "party-label", partyLabel("playbackControls", "Playback controls")));

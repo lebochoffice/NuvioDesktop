@@ -68,6 +68,7 @@ import com.nuvio.app.features.party.message
 import com.nuvio.app.features.party.UnreadBadge
 import com.nuvio.app.features.party.messageRes
 import com.nuvio.app.features.party.partyMediaKey
+import com.nuvio.app.features.streams.PlaybackAvailability
 import com.nuvio.app.isDesktop
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
@@ -96,7 +97,7 @@ internal val PlayerScreenRuntime.partyKey: String
     get() = partyMediaKey(parentMetaType, parentMetaId, activeSeasonNumber, activeEpisodeNumber)
 
 internal val PlayerScreenRuntime.isPartySynced: Boolean
-    get() = PartyRepository.state.value.party?.media?.key == partyKey
+    get() = !hostSoloReturnOpened && !PartyRepository.hostSolo.value && PartyRepository.state.value.party?.media?.key == partyKey
 
 internal val PlayerScreenRuntime.isPartyControlLocked: Boolean
     get() = PartyRepository.state.value.party?.blocksManualPlayback(partyKey, partySolo) == true
@@ -127,14 +128,83 @@ internal fun PlayerScreenRuntime.openPartyPanel() {
 }
 
 internal fun PlayerScreenRuntime.switchPartyMedia() {
-    PartyRepository.publishMedia(currentPartyMedia(), positionMs = playbackSnapshot.positionMs)
+    if (!isDesktop) {
+        PartyRepository.publishMedia(currentPartyMedia(), positionMs = playbackSnapshot.positionMs)
+        return
+    }
+    if (hostSoloReturnOpened || hostSoloActionPending) return
+    val party = PartyRepository.state.value.party?.takeIf { it.isHost } ?: return
+    val media = currentPartyMedia()
+    if (media.key == party.media.key) return
+    val snapshot = playbackSnapshot
+    if (!initialLoadCompleted || snapshot.isLoading || snapshot.isEnded || errorMessage != null || playerController == null) {
+        showPartyMessage("Warte, bis der neue Titel zur Wiedergabe bereit ist.")
+        return
+    }
+
+    val positionMs = currentPlaybackPositionMs()
+    hostSoloActionPending = true
+    scope.launch {
+        try {
+            if (!PartyRepository.publishMedia(party, media, positionMs, !snapshot.isPlaying, snapshot.playbackSpeed)) {
+                showPartyMessage("Der Titelwechsel wurde von der Party nicht bestätigt.")
+                return@launch
+            }
+            if (PartyRepository.hostSolo.value && partyKey == media.key) {
+                PartyRepository.resumeHostAfterMediaSwitch(party, media.key)
+            }
+        } finally {
+            hostSoloActionPending = false
+        }
+    }
 }
 
 internal fun PlayerScreenRuntime.watchWithParty() {
     val media = PartyRepository.state.value.party?.media ?: return
     showPartyPanel = false
     flushWatchProgress()
-    args.onOpenPartyMedia(media)
+    args.onOpenPartyMedia(media, null)
+}
+
+internal fun PlayerScreenRuntime.toggleHostSolo(keepWatchingAlone: Boolean = false) {
+    if (!isDesktop || hostSoloReturnOpened || hostSoloActionPending) return
+    hostSoloActionPending = true
+    scope.launch {
+        try {
+            val party = PartyRepository.state.value.party?.takeIf { it.isHost } ?: return@launch
+            if (keepWatchingAlone && (PartyRepository.hostSolo.value || party.media.key == partyKey)) return@launch
+            if (!PartyRepository.hostSolo.value) {
+                if (party.sharing || party.browserSharing || PartyRepository.sharedStream.value != null || familySharePartyId != null) {
+                    showPartyMessage("Aktive Streamfreigaben benötigen den Party-Player. Beende die Freigabe vor „Allein schauen“.")
+                    return@launch
+                }
+                if (!PartyRepository.enterHostSolo(party)) {
+                    showPartyMessage("Allein schauen ist nur bei verbundener, bereiter Party ohne Countdown oder Streamfreigabe möglich.")
+                    return@launch
+                }
+                clearPartyNudge()
+                return@launch
+            }
+            val request = PartyRepository.requestHostSoloReturn()
+            if (request == null) {
+                showPartyMessage("Die Party ist noch nicht verbunden. Versuche die Rückkehr erneut.")
+                return@launch
+            }
+            val media = request.media
+            if (!PlaybackAvailability.current().canStream(media.type, media.videoId ?: media.metaId)) {
+                PartyRepository.failHostSoloReturn(request)
+                showPartyMessage("Für den Party-Titel ist keine Wiedergabequelle verfügbar. Du schaust weiterhin allein.")
+                return@launch
+            }
+            hostSoloReturnOpened = true
+            partyOpeningRequestedSource = true
+            showPartyPanel = false
+            flushWatchProgress()
+            args.onOpenPartyMedia(media, request.token)
+        } finally {
+            hostSoloActionPending = false
+        }
+    }
 }
 
 internal fun PlayerScreenRuntime.catchUpWithParty() {
@@ -375,7 +445,8 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
     val party = partyState.party
     val partyId = party?.id
     val key = partyKey
-    val sharingHost = party?.takeIf { it.isHost && it.media.key == key }
+    val hostSolo by PartyRepository.hostSolo.collectAsState()
+    val sharingHost = party?.takeIf { it.isHost && !hostSolo && !hostSoloReturnOpened && it.media.key == key }
     val desktopOffer = if (sharingHost?.sharing == true) currentPartyStream() else null
     val browserOffer = if (sharingHost?.browserSharing == true) currentPartyBrowserHls() else null
     val browserSharing = sharingHost?.browserSharing == true
@@ -539,7 +610,7 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
     // TorBox links with the key now go directly through the party state, so
     // the family share service is not used (a leftover share is revoked).
     val familyUrl: String? = null
-    val familyHost = partyState.party?.isHost == true && partyState.party?.media?.key == key
+    val familyHost = sharingHost != null
     // Republish when members change, so kicked or departed members lose their grants at once.
     val familyMembers = partyState.party?.members.orEmpty().map { it.id }.sorted()
     LaunchedEffect(partyId, key, browserSharing, familyUrl, familyHost, familyMembers) {
@@ -599,15 +670,19 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
         val previous = partyPreviousKey
         partyPreviousKey = key
         val party = PartyRepository.state.value.party ?: return@LaunchedEffect
-        if (previous != null && previous != key && party.media.key == previous) {
+        if (!isDesktop && !hostSoloReturnOpened && !PartyRepository.hostSolo.value &&
+            previous != null && previous != key && party.media.key == previous
+        ) {
             PartyRepository.publishMedia(currentPartyMedia(), positionMs = 0L)
         }
     }
 
     LaunchedEffect(Unit) {
         PartyRepository.events.collect { event ->
-            if (isDesktop) showPartyMessage(event.message())
-            if (event is PartyEvent.MediaChanged) handlePartyMediaChange(event.media)
+            val hostAlreadyWatching = event is PartyEvent.MediaChanged && event.media.key == partyKey &&
+                PartyRepository.state.value.party?.isHost == true
+            if (isDesktop && !hostAlreadyWatching) showPartyMessage(event.message())
+            if (event is PartyEvent.MediaChanged && !PartyRepository.hostSolo.value) handlePartyMediaChange(event.media)
         }
     }
 
@@ -653,10 +728,68 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
         var exactSeekFor: Pair<Long, String?>? = null
         var lastPausedPosition: Long? = null
         var wasBehind = false
+        var returnToken: Long? = null
+        var returnStarted: TimeMark? = null
+        var returnRevision: PartyPlayback? = null
         while (isActive) {
             delay(PARTY_TICK)
             val party = PartyRepository.state.value.party ?: break
+            if (hostSoloReturnOpened) continue
             val snapshot = playbackSnapshot
+            if (PartyRepository.hostSolo.value) {
+                clearPartyNudge()
+                val request = PartyRepository.hostSoloReturn.value
+                    ?.takeIf { it.token == args.hostSoloReturnToken } ?: continue
+                if (returnToken != request.token) {
+                    returnToken = request.token
+                    returnStarted = clock.markNow()
+                    returnRevision = null
+                }
+                val started = checkNotNull(returnStarted)
+                if (errorMessage != null || snapshot.isEnded || party.media.key != request.media.key ||
+                    partyKey != request.media.key || started.elapsedNow().inWholeMilliseconds > 30_000L
+                ) {
+                    if (PartyRepository.failHostSoloReturn(request)) {
+                        showPartyMessage("Rückkehr fehlgeschlagen. Du schaust weiterhin allein.")
+                    }
+                    continue
+                }
+                if (!party.connected || !initialLoadCompleted || snapshot.isLoading) continue
+                val controller = playerController ?: continue
+                val target = PartyRepository.playback.value ?: continue
+                if (target.mediaKey != null && target.mediaKey != partyKey) continue
+                val expected = PartySync.expectedPositionMs(target, PartyRepository.nowMs(), snapshot.durationMs)
+                if (returnRevision != target) {
+                    returnRevision = target
+                    try {
+                        controller.setPlaybackSpeed(target.rate)
+                        if (abs(snapshot.positionMs - expected) > PartySync.PAUSED_TOLERANCE_MS) {
+                            controller.seekToExact(expected)
+                        }
+                        applyPartyPaused(target.paused, force = true)
+                    } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                        throw cancelled
+                    } catch (_: Exception) {
+                        if (PartyRepository.failHostSoloReturn(request)) {
+                            showPartyMessage("Rückkehr fehlgeschlagen. Du schaust weiterhin allein.")
+                        }
+                    }
+                    continue
+                }
+                if (PartySync.pendingApply(target.paused, shouldPlay, snapshot.isPlaying, snapshot.positionMs - expected) != PendingApply.Applied ||
+                    abs(snapshot.playbackSpeed - target.rate) > 0.01f
+                ) continue
+                lastSeq = target.seq to target.memberId
+                lastPlayback = target
+                lastSeek = clock.markNow()
+                awaitingApply = null
+                mismatchSince = null
+                lastStatus = null
+                if (PartyRepository.completeHostSoloReturn(request, target)) {
+                    target.commandId?.let { PartyRepository.reportApplied(it, target.seq) }
+                }
+                continue
+            }
             val awayFromPlayback = partyAppInBackground &&
                 (playerController as? PlayerSystemControlSource)?.keepsPlaybackInBackground != true
             val resumedFromBackground = wasInBackground && !partyAppInBackground
@@ -914,7 +1047,11 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
             val othersWatching = party.presence.values.any {
                 it.memberId != party.memberId && it.mediaKey == party.media.key && it.status != PartyMemberStatus.Browsing
             }
-            if (!partyOpeningRequestedSource && party.media.key == partyKey && playback != null && !playback.paused && !othersWatching) {
+            // Guests keep the old timeline while the desktop host chooses what to do with a new title.
+            val desktopHostWithGuests = isDesktop && party.isHost && party.members.any { it.id != party.memberId }
+            if (!PartyRepository.hostSolo.value && !partyOpeningRequestedSource && party.media.key == partyKey &&
+                playback != null && !playback.paused && !othersWatching && !desktopHostWithGuests
+            ) {
                 PartyRepository.publishPlayback(paused = true, positionMs = playbackSnapshot.positionMs, rate = playback.rate)
             }
             PartyRepository.setLocalStatus(PartyMemberStatus.Browsing, null)

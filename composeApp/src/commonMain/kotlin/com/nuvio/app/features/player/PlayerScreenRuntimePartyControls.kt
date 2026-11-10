@@ -74,10 +74,6 @@ import nuvio.composeapp.generated.resources.party_sign_in_required
 import nuvio.composeapp.generated.resources.party_start_action
 import nuvio.composeapp.generated.resources.party_start_description
 import nuvio.composeapp.generated.resources.party_start_title
-import nuvio.composeapp.generated.resources.party_switch
-import nuvio.composeapp.generated.resources.party_switch_confirm
-import nuvio.composeapp.generated.resources.party_switch_message
-import nuvio.composeapp.generated.resources.party_switch_title
 import nuvio.composeapp.generated.resources.party_tab_chat
 import nuvio.composeapp.generated.resources.party_tab_party
 import nuvio.composeapp.generated.resources.party_title
@@ -95,6 +91,7 @@ import kotlin.io.encoding.ExperimentalEncodingApi
 internal fun PlayerScreenRuntime.rememberPartyControlsState(): PlayerControlPartyState {
     val partyState by PartyRepository.state.collectAsStateWithLifecycle()
     val playback by PartyRepository.playback.collectAsStateWithLifecycle()
+    val hostSolo by PartyRepository.hostSolo.collectAsStateWithLifecycle()
     val available by PartyRepository.available.collectAsStateWithLifecycle()
     val hlsSuggestion by PartyRepository.hlsSuggestion.collectAsStateWithLifecycle()
     val mediaRequest by PartyRepository.mediaRequest.collectAsStateWithLifecycle()
@@ -239,7 +236,6 @@ internal fun PlayerScreenRuntime.rememberPartyControlsState(): PlayerControlPart
     } else {
         PlayerControlChatState(unread = unread)
     }
-    val canSwitch = elsewhere && party.isHost
     val canRequestSwitch = activeStream != null && !playbackSnapshot.isLoading && !playbackSnapshot.isEnded &&
         party.canRequestMedia(playerMedia)
     val currentRequest = mediaRequest?.takeIf { it.isCurrent(party) }
@@ -247,8 +243,9 @@ internal fun PlayerScreenRuntime.rememberPartyControlsState(): PlayerControlPart
     val pendingSuggestion = hlsSuggestion?.takeIf { party.isHost && !elsewhere && it.mediaKey == party.media.key }
     return base.copy(
         active = true,
-        synced = !elsewhere,
+        synced = !elsewhere && !hostSolo,
         solo = partySolo,
+        hostSolo = hostSolo,
         code = party.code,
         connected = party.connected,
         isHost = party.isHost,
@@ -271,7 +268,7 @@ internal fun PlayerScreenRuntime.rememberPartyControlsState(): PlayerControlPart
             else -> ""
         },
         countdownActive = countdown?.mediaKey == party.media.key,
-        countdownAvailable = party.isHost && !elsewhere && party.members.size > 1 && countdown == null && playback?.paused != false,
+        countdownAvailable = party.isHost && !hostSolo && !elsewhere && party.members.size > 1 && countdown == null && playback?.paused != false,
         countdownSeconds = partyCountdownSeconds,
         countdownReadiness = if (party.isHost && !elsewhere) countdownReadiness(party, nowMs, playback) else "",
         smartStatus = members.firstOrNull { it.id == party.memberId }?.status.orEmpty(),
@@ -287,7 +284,7 @@ internal fun PlayerScreenRuntime.rememberPartyControlsState(): PlayerControlPart
             "$partyStatLastCorrection vor ${((nowMs - at).coerceAtLeast(0L) / 1000L)} s"
         }.orEmpty(),
         canSyncMe = !party.isHost && !elsewhere,
-        canSyncAll = party.isHost && !elsewhere && party.members.size > 1,
+        canSyncAll = party.isHost && !hostSolo && !elsewhere && party.members.size > 1,
         syncAllStatus = partySyncAllAt?.takeIf { party.isHost && nowMs - it < SYNC_ALL_STATUS_MS }
             ?.let { requestedAt -> syncAllSummary(party, playback, nowMs, nowMs - requestedAt) }.orEmpty(),
         hlsPhase = when {
@@ -348,8 +345,7 @@ internal fun PlayerScreenRuntime.rememberPartyControlsState(): PlayerControlPart
         members = members,
         behindTitle = selfBehindMs?.let { stringResource(Res.string.party_behind_title, formatPlaybackTime(it)) }.orEmpty(),
         nowWatching = if (elsewhere) stringResource(Res.string.party_now_watching, party.media.displayTitle()) else "",
-        switchLabel = if (canSwitch) stringResource(Res.string.party_switch, playerMedia.displayTitle()) else "",
-        switchMessage = if (canSwitch) stringResource(Res.string.party_switch_message, playerMedia.displayTitle()) else "",
+        hostDifferentTitle = elsewhere && party.isHost,
         mediaRequestAction = if (canRequestSwitch) stringResource(Res.string.party_media_request_action) else "",
         mediaRequestId = currentRequest?.id,
         mediaRequestTitle = if (currentRequest != null) stringResource(Res.string.party_media_request_received,
@@ -475,7 +471,9 @@ internal fun PlayerScreenRuntime.handlePartyControlsEvent(type: String, value: D
             torboxManualFile = null; torboxManualFor = null; torboxManualName = ""; torboxLinkAuto = false
             torboxChoicesStatus = ""
         }
-        "partyWatch" -> watchWithParty()
+        "partyWatch" -> if (!PartyRepository.hostSolo.value) watchWithParty()
+        "partyHostSolo" -> toggleHostSolo()
+        "partyHostKeepWatchingAlone" -> toggleHostSolo(keepWatchingAlone = true)
         "partySwitch" -> switchPartyMedia()
         "partyRequestMedia" -> {
             val party = PartyRepository.state.value.party
@@ -495,11 +493,11 @@ internal fun PlayerScreenRuntime.handlePartyControlsEvent(type: String, value: D
             val party = PartyRepository.state.value.party
             val media = party?.let { PartyRepository.mediaRequest.value?.mediaForOwnSelection(value, it) }
             if (media != null) {
-                if (PlaybackAvailability.current().canStream(media.type, media.videoId ?: media.metaId)) {
+                if (!PartyRepository.hostSolo.value && PlaybackAvailability.current().canStream(media.type, media.videoId ?: media.metaId)) {
                     partyOpeningRequestedSource = true
                     showPartyPanel = false
                     flushWatchProgress()
-                    args.onOpenPartyMedia(media)
+                    args.onOpenPartyMedia(media, null)
                 } else scope.launch { showPartyMessage(getString(Res.string.playback_unavailable_message)) }
             }
         }
@@ -567,8 +565,6 @@ private fun partyControlLabels(): Map<String, String> = mapOf(
     "shareTitle" to stringResource(Res.string.party_share_title),
     "shareDescription" to stringResource(Res.string.party_share_description),
     "watchWithParty" to stringResource(Res.string.party_watch_with_party),
-    "switchTitle" to stringResource(Res.string.party_switch_title),
-    "switchConfirm" to stringResource(Res.string.party_switch_confirm),
     "catchUp" to stringResource(Res.string.party_catch_up),
     "leave" to stringResource(Res.string.party_leave),
     "end" to stringResource(Res.string.party_end),

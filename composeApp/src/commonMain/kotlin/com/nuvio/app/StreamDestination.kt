@@ -209,6 +209,7 @@ internal fun StreamDestination(
         }
         val playerLaunch = PlayerLaunch(
             profileId = launch.profileId,
+            hostSoloReturnToken = launch.hostSoloReturnToken,
             title = launch.title,
             sourceUrl = sentinelUrl,
             sourceHeaders = emptyMap(),
@@ -333,6 +334,7 @@ internal fun StreamDestination(
             }
             val playerLaunch = PlayerLaunch(
                 profileId = launch.profileId,
+                hostSoloReturnToken = launch.hostSoloReturnToken,
                 title = launch.title,
                 sourceUrl = cached.url,
                 sourceHeaders = sanitizePlaybackHeaders(cached.requestHeaders),
@@ -509,6 +511,7 @@ internal fun StreamDestination(
         }
         val playerLaunch = PlayerLaunch(
             profileId = launch.profileId,
+            hostSoloReturnToken = launch.hostSoloReturnToken,
             title = launch.title,
             sourceUrl = sourceUrl,
             sourceHeaders = sanitizePlaybackHeaders(stream.behaviorHints.proxyHeaders?.request),
@@ -705,6 +708,7 @@ internal fun StreamDestination(
         }
         val playerLaunch = PlayerLaunch(
             profileId = launch.profileId,
+            hostSoloReturnToken = launch.hostSoloReturnToken,
             title = launch.title,
             sourceUrl = sourceUrl,
             sourceHeaders = sanitizePlaybackHeaders(stream.behaviorHints.proxyHeaders?.request),
