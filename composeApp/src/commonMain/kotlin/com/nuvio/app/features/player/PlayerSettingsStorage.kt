@@ -2,7 +2,16 @@ package com.nuvio.app.features.player
 
 import kotlinx.serialization.json.JsonObject
 
+internal enum class PartyCorrectionPreference(val key: String) {
+    AutoSync("party_auto_sync"),
+    AutoSeek("party_auto_seek"),
+    TempoNudge("party_tempo_nudge"),
+}
+
 internal expect object PlayerSettingsStorage {
+    internal fun loadPartyCorrectionPreference(preference: PartyCorrectionPreference): Boolean
+    internal fun savePartyCorrectionPreference(preference: PartyCorrectionPreference, enabled: Boolean)
+
     fun loadPendingExternalPlayback(): String?
     fun savePendingExternalPlayback(value: String?)
     fun loadPlaybackBrightness(): Float?

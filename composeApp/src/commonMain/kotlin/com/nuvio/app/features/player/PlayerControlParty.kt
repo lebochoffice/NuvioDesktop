@@ -35,8 +35,10 @@ data class PlayerControlPartyState(
     val countdownActive: Boolean = false,
     val countdownSeconds: Int = 3,
     val countdownReadiness: String = "",
-    // "Intelligente Wiedergabe": live values of the own player and the expert option.
+    // "Intelligente Wiedergabe": live values and local correction preferences.
     val smartStatus: String = "",
+    val smartAutoSyncEnabled: Boolean = true,
+    val smartAutoSeekEnabled: Boolean = true,
     val smartNudgeActive: Boolean = false,
     val smartNudgeEnabled: Boolean = true,
     val smartSeeks: Int = 0,

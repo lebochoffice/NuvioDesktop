@@ -448,9 +448,24 @@ const buildPartySmart = party => {
 
   const auto = partyElement("div", "party-card");
   auto.appendChild(partyElement("p", "party-card-title", "Automatik"));
-  auto.appendChild(partyElement("p", "party-detail", "Puffern, Mini-Korrekturen und Seek-Korrekturen laufen automatisch."));
+  const autoSync = party.smartAutoSyncEnabled !== false;
+  const autoSeek = party.smartAutoSeekEnabled !== false;
+  const tempo = party.smartNudgeEnabled !== false;
+  let explanation;
+  if (!autoSync) {
+    explanation = "Automatische Korrekturen sind aus. Party-Befehle und manuelles Synchronisieren bleiben verfügbar.";
+  } else if (autoSeek && tempo) {
+    explanation = "Kleine Abweichungen werden per Tempo ausgeglichen, größere per Seek.";
+  } else if (autoSeek) {
+    explanation = "Abweichungen werden nur per Seek korrigiert.";
+  } else if (tempo) {
+    explanation = "Kleine Abweichungen werden nur per Tempo ausgeglichen.";
+  } else {
+    explanation = "Seek- und Tempo-Korrekturen sind aus.";
+  }
+  auto.appendChild(partyElement("p", "party-detail", explanation));
   auto.appendChild(partySmartRow("Mein Status", String(party.smartStatus || "–")));
-  auto.appendChild(partySmartRow("Tempo-Korrektur", party.smartNudgeActive ? "aktiv" : party.smartNudgeEnabled ? "bereit" : "aus"));
+  auto.appendChild(partySmartRow("Tempo-Korrektur", autoSync && tempo ? (party.smartNudgeActive ? "aktiv" : "bereit") : "aus"));
   auto.appendChild(partySmartRow("Korrekturen", `${Number(party.smartSeeks) || 0} Seek · ${Number(party.smartNudges) || 0} Tempo`));
   auto.appendChild(partySmartRow("Puffern", `${Number(party.smartBuffering) || 0}×`));
   auto.appendChild(partySmartRow("Seek-Vorlauf", `${Number(party.smartSeekLeadMs) || 0} ms`));
@@ -461,13 +476,16 @@ const buildPartySmart = party => {
 
   const expert = partyElement("div", "party-card");
   expert.appendChild(partyElement("p", "party-card-title", "Experte"));
-  expert.appendChild(buildPartySwitch("smartNudge", "Mini-Korrekturen per Tempo", "Aus: nur Seek-Korrekturen bei größerer Abweichung.", party.smartNudgeEnabled !== false, "partySmartNudge"));
+  expert.appendChild(buildPartySwitch("autoSync", "Automatische Synchronisierung", "", autoSync, "partyAutoSync"));
+  expert.appendChild(buildPartySwitch("autoSeek", "Automatische Seek-Korrekturen", "", autoSeek, "partyAutoSeek", !autoSync));
+  expert.appendChild(buildPartySwitch("smartNudge", "Mini-Korrekturen per Tempo", "", tempo, "partySmartNudge", !autoSync));
   content.appendChild(expert);
   return content;
 };
 
-const buildPartySwitch = (key, title, description, checked, eventType) => {
+const buildPartySwitch = (key, title, description, checked, eventType, disabled = false) => {
   const row = partyAction(partyElement("button", "party-switch-row"), key, () => {
+    if (row.disabled) return;
     const next = row.getAttribute("aria-checked") !== "true";
     const apply = () => {
     row.setAttribute("aria-checked", String(next));
@@ -488,6 +506,7 @@ const buildPartySwitch = (key, title, description, checked, eventType) => {
       });
     } else apply();
   });
+  row.disabled = disabled;
   row.setAttribute("role", "switch");
   row.setAttribute("aria-checked", String(Boolean(checked)));
   const copy = partyElement("span", "party-switch-copy");

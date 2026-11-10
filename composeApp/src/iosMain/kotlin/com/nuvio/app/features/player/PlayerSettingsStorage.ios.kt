@@ -17,6 +17,9 @@ import kotlinx.serialization.json.put
 import platform.Foundation.NSUserDefaults
 
 actual object PlayerSettingsStorage {
+    internal actual fun loadPartyCorrectionPreference(preference: PartyCorrectionPreference): Boolean = true
+    internal actual fun savePartyCorrectionPreference(preference: PartyCorrectionPreference, enabled: Boolean) = Unit
+
     private const val pendingExternalPlaybackKey = "pending_external_playback"
     private const val playbackBrightnessKey = "playback_brightness"
     private const val useLegacyPlayerLayoutKey = "use_legacy_player_layout"

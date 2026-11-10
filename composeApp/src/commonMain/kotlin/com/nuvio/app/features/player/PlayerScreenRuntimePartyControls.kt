@@ -25,6 +25,7 @@ import com.nuvio.app.features.party.presenceState
 import com.nuvio.app.features.party.rememberProfileAvatar
 import com.nuvio.app.features.party.statusRes
 import com.nuvio.app.features.streams.PlaybackAvailability
+import com.nuvio.app.isDesktop
 import nuvio.composeapp.generated.resources.Res
 import nuvio.composeapp.generated.resources.action_cancel
 import nuvio.composeapp.generated.resources.action_close
@@ -275,6 +276,8 @@ internal fun PlayerScreenRuntime.rememberPartyControlsState(): PlayerControlPart
         countdownReadiness = if (party.isHost && !elsewhere) countdownReadiness(party, nowMs, playback) else "",
         smartStatus = members.firstOrNull { it.id == party.memberId }?.status.orEmpty(),
         smartNudgeActive = partyRateNudge != null,
+        smartAutoSyncEnabled = partyAutoSync,
+        smartAutoSeekEnabled = partyAutoSeek,
         smartNudgeEnabled = partySmartNudge,
         smartSeeks = partyStatSeeks,
         smartNudges = partyStatNudges,
@@ -518,7 +521,20 @@ internal fun PlayerScreenRuntime.handlePartyControlsEvent(type: String, value: D
             if (party?.isHost == true && party.media.key == partyKey) PartyRepository.startCountdown(partyCountdownSeconds)
         }
         "partyCountdownCancel" -> if (PartyRepository.state.value.party?.isHost == true) PartyRepository.cancelCountdown()
-        "partySmartNudge" -> partySmartNudge = value >= 0.5
+        "partyAutoSync" -> if (isDesktop) {
+            partyAutoSync = value >= 0.5
+            if (!partyAutoSync) clearPartyNudge()
+            PlayerSettingsStorage.savePartyCorrectionPreference(PartyCorrectionPreference.AutoSync, partyAutoSync)
+        }
+        "partyAutoSeek" -> if (isDesktop && partyAutoSync) {
+            partyAutoSeek = value >= 0.5
+            PlayerSettingsStorage.savePartyCorrectionPreference(PartyCorrectionPreference.AutoSeek, partyAutoSeek)
+        }
+        "partySmartNudge" -> if (isDesktop && partyAutoSync) {
+            partySmartNudge = value >= 0.5
+            if (!partySmartNudge) clearPartyNudge()
+            PlayerSettingsStorage.savePartyCorrectionPreference(PartyCorrectionPreference.TempoNudge, partySmartNudge)
+        }
         "partyLeave" -> leaveParty()
         "partyEnd" -> endParty()
         "partyChatVisible" -> partyChatVisible = value >= 0.5

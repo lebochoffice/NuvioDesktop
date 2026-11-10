@@ -18,6 +18,9 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 
 actual object PlayerSettingsStorage {
+    internal actual fun loadPartyCorrectionPreference(preference: PartyCorrectionPreference): Boolean = true
+    internal actual fun savePartyCorrectionPreference(preference: PartyCorrectionPreference, enabled: Boolean) = Unit
+
     private const val preferencesName = "nuvio_player_settings"
     private const val pendingExternalPlaybackKey = "pending_external_playback"
     private const val playbackBrightnessKey = "playback_brightness"

@@ -300,7 +300,9 @@ internal class PlayerScreenRuntime(
     var partyCountdownSeconds by mutableStateOf(3)
     // "Intelligente Wiedergabe": expert option and live counters of the
     // existing sync loop (display only; they never steer playback).
-    var partySmartNudge by mutableStateOf(true)
+    var partyAutoSync by mutableStateOf(PlayerSettingsStorage.loadPartyCorrectionPreference(PartyCorrectionPreference.AutoSync))
+    var partyAutoSeek by mutableStateOf(PlayerSettingsStorage.loadPartyCorrectionPreference(PartyCorrectionPreference.AutoSeek))
+    var partySmartNudge by mutableStateOf(PlayerSettingsStorage.loadPartyCorrectionPreference(PartyCorrectionPreference.TempoNudge))
     var partyStatSeeks by mutableStateOf(0)
     var partyStatNudges by mutableStateOf(0)
     var partyStatBuffering by mutableStateOf(0)

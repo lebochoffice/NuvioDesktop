@@ -17,6 +17,12 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 
 internal actual object PlayerSettingsStorage {
+    internal actual fun loadPartyCorrectionPreference(preference: PartyCorrectionPreference): Boolean =
+        loadBoolean(preference.key) ?: true
+
+    internal actual fun savePartyCorrectionPreference(preference: PartyCorrectionPreference, enabled: Boolean) =
+        saveBoolean(preference.key, enabled)
+
     private const val pendingExternalPlaybackKey = "pending_external_playback"
     private const val playbackBrightnessKey = "playback_brightness"
     private const val useLegacyPlayerLayoutKey = "use_legacy_player_layout"

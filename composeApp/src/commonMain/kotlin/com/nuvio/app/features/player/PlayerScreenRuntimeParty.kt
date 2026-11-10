@@ -629,6 +629,8 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
         var lastSeek: TimeMark? = null
         var lastCorrection: TimeMark? = null
         var lastSeq: Pair<Long, String?>? = null
+        var lastPlayback: PartyPlayback? = null
+        var revisionNeedsPosition = false
         // Revision from another member (e.g. a browser guest command the host
         // sequenced) that the local player has not reached yet (seek/HLS/
         // network). Until it is reached, superseded by a newer revision or by a
@@ -739,8 +741,17 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
             }
             val expected = PartySync.expectedPositionMs(playback, PartyRepository.nowMs(), snapshot.durationMs)
             val identity = playback.seq to playback.memberId
+            val allowDriftSeek = partyAutoSync && partyAutoSeek
             if (identity != lastSeq) {
                 val forced = lastSeq == null
+                // Legacy revisions have no action type. A change to the party timeline
+                // is a remote jump; local distance from an unchanged timeline is drift.
+                val timelineJump = lastPlayback?.let { previous ->
+                    abs(playback.positionMs - PartySync.expectedPositionMs(previous, playback.at)) >
+                        PartySync.PAUSED_TOLERANCE_MS
+                } ?: false
+                revisionNeedsPosition = forced || playback.commandId != null || timelineJump
+                lastPlayback = playback
                 lastSeq = identity
                 applyPartyPaused(playback.paused, force = forced)
                 // A revision the host sequenced from a guest command is published
@@ -748,7 +759,9 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
                 val own = playback.actorId == party.memberId && !forced
                 awaitingApply = if (own) null else playback
                 applyRetries = 0
-                if ((!own || playback.paused) && abs(snapshot.positionMs - expected) > PartySync.PAUSED_TOLERANCE_MS) {
+                if ((allowDriftSeek || revisionNeedsPosition) && (!own || playback.paused) &&
+                    abs(snapshot.positionMs - expected) > PartySync.PAUSED_TOLERANCE_MS
+                ) {
                     // Paused: frame-accurate, so everyone shows the chosen frame
                     // (keyframe seeks miss by up to a GOP); playing keeps the
                     // fast keyframe seek with the measured lead.
@@ -773,7 +786,8 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
 
             val pending = awaitingApply
             if (pending != null) {
-                when (PartySync.pendingApply(pending.paused, shouldPlay, snapshot.isPlaying, snapshot.positionMs - expected)) {
+                val pendingDrift = if (allowDriftSeek || revisionNeedsPosition) snapshot.positionMs - expected else 0L
+                when (PartySync.pendingApply(pending.paused, shouldPlay, snapshot.isPlaying, pendingDrift)) {
                     // A real local action changed the intent; it was published on its own.
                     PendingApply.Superseded -> awaitingApply = null
                     PendingApply.Applied -> {
@@ -829,7 +843,7 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
             val settled = lastSeek?.let { it.elapsedNow() > SEEK_SETTLE } ?: true
             val stablePosition = lastPausedPosition?.let { abs(it - snapshot.positionMs) <= POSITION_STABLE_MS } == true
             lastPausedPosition = snapshot.positionMs.takeIf { playback.paused && !snapshot.isPlaying }
-            if (PartySync.shouldConfirmPausedPosition(
+            if ((allowDriftSeek || revisionNeedsPosition) && PartySync.shouldConfirmPausedPosition(
                     isHost = party.isHost,
                     playback = playback,
                     isPlaying = snapshot.isPlaying,
@@ -844,6 +858,10 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
                 PartyRepository.publishPlayback(paused = true, positionMs = snapshot.positionMs, rate = playback.rate)
                 continue
             }
+            if (!partyAutoSync) {
+                measureSeekLead = false
+                continue
+            }
             val due = lastCorrection?.let { it.elapsedNow() >= CORRECTION_INTERVAL } ?: true
             if (!settled || !due) continue
             lastCorrection = clock.markNow()
@@ -855,6 +873,10 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
             }
             when (val correction = PartySync.correction(snapshot.positionMs, expected, playback, partyRateNudge != null, allowNudge = partySmartNudge)) {
                 is PartyCorrection.Seek -> {
+                    if (!allowDriftSeek) {
+                        clearPartyNudge(playback)
+                        continue
+                    }
                     partyLog.i { "Seeking $drift ms back into sync with ${seekLeadMs} ms lead" }
                     partyStatSeeks += 1
                     partyStatLastCorrection = "Seek-Korrektur"
@@ -900,7 +922,7 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
     }
 }
 
-private fun PlayerScreenRuntime.clearPartyNudge(playback: PartyPlayback? = PartyRepository.playback.value) {
+internal fun PlayerScreenRuntime.clearPartyNudge(playback: PartyPlayback? = PartyRepository.playback.value) {
     if (partyRateNudge == null) return
     partyRateNudge = null
     playerController?.setPlaybackSpeed(playback?.rate ?: 1f)

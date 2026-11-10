@@ -598,6 +598,11 @@
   text-align: left;
 }
 
+.party-switch-row:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 .party-switch-copy {
   flex: 1 1 auto;
   min-width: 0;
