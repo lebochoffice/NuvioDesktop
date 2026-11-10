@@ -3,11 +3,12 @@
 param(
     [Parameter(Mandatory = $true)][string]$MsiPath,
     [switch]$VerifyOnly,
-    [switch]$WatchPartyTest
+    [switch]$WatchPartyTest,
+    [switch]$A40Fork
 )
 
 $ErrorActionPreference = 'Stop'
-. (Join-Path $PSScriptRoot 'windows-msi-identity.ps1') -WatchPartyTest:$WatchPartyTest
+. (Join-Path $PSScriptRoot 'windows-msi-identity.ps1') -WatchPartyTest:$WatchPartyTest -A40Fork:$A40Fork
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 $msi = Get-Item -LiteralPath $MsiPath
 if ($msi.Extension -ne '.msi' -or $msi.PSIsContainer) { throw 'Expected a generated MSI file.' }
@@ -192,11 +193,39 @@ try {
                 try { $insert.Execute($record) } finally { Close-MsiView $insert }
             } finally { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($record) }
         }
+        if ($A40Fork) {
+            $stage = 'isolating A40 product name and desktop shortcut'
+            Invoke-MsiStatement $db 'UPDATE `Property` SET `Value` = ''Nuvio A40-Fork'' WHERE `Property` = ''ProductName'''
+            Invoke-MsiStatement $db 'INSERT INTO `Directory` (`Directory`, `Directory_Parent`, `DefaultDir`) VALUES (''A40DesktopFolder'', ''DesktopFolder'', ''Nuvio-A40-Fork'')'
+            Invoke-MsiStatement $db 'UPDATE `Shortcut` SET `Directory_` = ''A40DesktopFolder'' WHERE `Directory_` = ''DesktopFolder'''
+        }
         $stage = 'committing MSI transaction'
         $db.Commit()
         # Gradle starts a fresh process for read-only verification after this writer exits.
         Write-Host 'Windows party protocol: MSI registration committed.'
         return
+    }
+
+    if ($A40Fork) {
+        $stage = 'verifying isolated A40 shortcuts'
+        $v = $db.OpenView('SELECT `Shortcut`.`Name`, `Shortcut`.`Target`, `Directory`.`Directory_Parent`, `Directory`.`DefaultDir` FROM `Shortcut`, `Directory` WHERE `Shortcut`.`Directory_` = `Directory`.`Directory`')
+        try {
+            [void]$v.Execute()
+            $found = @()
+            while ($rec = $v.Fetch()) {
+                try {
+                    if ($rec.StringData(1).Split('|')[-1] -cne 'Nuvio' -or $rec.StringData(2) -cne ('[#{0}]' -f $file) -or
+                        $rec.StringData(4).Split('|')[-1] -cne 'Nuvio-A40-Fork' -or
+                        $rec.StringData(3) -notin @('DesktopFolder', 'ProgramMenuFolder')) {
+                        throw 'A40 shortcut collides with another Nuvio installation.'
+                    }
+                    $found += $rec.StringData(3)
+                } finally { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($rec) }
+            }
+            if ($found.Count -ne 2 -or 'DesktopFolder' -notin $found -or 'ProgramMenuFolder' -notin $found) {
+                throw 'Expected one desktop and one Start menu A40 shortcut.'
+            }
+        } finally { Close-MsiView $v }
     }
 
     $stage = 'verifying committed registry contract'
@@ -207,14 +236,14 @@ try {
         while ($r = $v.Fetch()) {
             try {
                 $key = $r.StringData(3)
-                if ($WatchPartyTest -and ($key -match '^(?:Software\\Classes\\)?Nuvio\.Family\.Party(?:\\|$)|^Software\\NuvioFamily(?:\\|$)' -or
+                if (($WatchPartyTest -or $A40Fork) -and ($key -match '^(?:Software\\Classes\\)?Nuvio\.Family\.Party(?:\\|$)|^Software\\NuvioFamily(?:\\|$)' -or
                     ($key -ieq 'Software\RegisteredApplications' -and $r.StringData(4) -ieq 'Nuvio Family'))) {
                     throw "Unexpected Family registry entry in the test MSI: $key"
                 }
                 if ($key -match '^(?:Software\\Classes\\)?nuvio(?:\\|$)') {
                     throw "Unexpected shared protocol key in MSI: $key"
                 }
-                if ($key -match '(?:^|\\)UrlAssociations\\(?:nuvio|nuvio-watch-test)\\UserChoice(?:\\|$)') {
+                if ($key -match '(?:^|\\)UrlAssociations\\(?:nuvio|nuvio-watch-test|nuvio-a40)\\UserChoice(?:\\|$)') {
                     throw 'MSI must not set the Windows user default for nuvio://.'
                 }
                 $actual[$r.StringData(1)] = @{

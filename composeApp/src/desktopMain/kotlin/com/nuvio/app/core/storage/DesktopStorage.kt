@@ -11,7 +11,12 @@ import java.util.Properties
 import kotlin.io.path.exists
 
 internal val windowsWatchPartyTest = System.getProperty("nuvio.windows.watchPartyTest") == "true"
-internal val windowsProductName = if (windowsWatchPartyTest) "NUVIO Watch Party Test" else "Nuvio Family"
+internal val windowsA40Fork = System.getProperty("nuvio.windows.a40Fork") == "true"
+internal val windowsProductName = when {
+    windowsA40Fork -> "Nuvio A40-Fork"
+    windowsWatchPartyTest -> "NUVIO Watch Party Test"
+    else -> "Nuvio Family"
+}
 
 internal fun windowsFamilyDataDirectory(configuredBase: String?, fallbackBase: Path): Path =
     (configuredBase?.takeIf(String::isNotBlank)?.let(Paths::get) ?: fallbackBase).resolve(windowsProductName)

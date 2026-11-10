@@ -1,5 +1,6 @@
 package com.nuvio.app.features.settings
 
+import com.nuvio.app.core.storage.windowsA40Fork
 import com.nuvio.app.core.storage.windowsWatchPartyTest
 import com.nuvio.app.features.player.desktop.DesktopHostOs
 import java.nio.file.Files
@@ -19,7 +20,7 @@ internal object WindowsAppShortcutIconUpdater {
     }
 
     private fun update(icon: AppIconOption) {
-        if (DesktopHostOs.current != DesktopHostOs.WINDOWS || windowsWatchPartyTest) return
+        if (DesktopHostOs.current != DesktopHostOs.WINDOWS || windowsWatchPartyTest || windowsA40Fork) return
         runCatching {
             val resource = "icons/app-icon-${icon.key}-transparent.ico"
             val localAppData = knownFolder("LocalApplicationData") ?: return@runCatching

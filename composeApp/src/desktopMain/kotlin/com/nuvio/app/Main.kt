@@ -20,6 +20,8 @@ import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
 import androidx.compose.ui.unit.dp
 import com.nuvio.app.core.deeplink.handleAppUrl
+import com.nuvio.app.core.build.AppVersionConfig
+import com.nuvio.app.core.storage.windowsA40Fork
 import com.nuvio.app.core.storage.windowsProductName
 import com.nuvio.app.core.storage.windowsWatchPartyTest
 import com.nuvio.app.core.diagnostics.SentryInitializer
@@ -146,6 +148,7 @@ fun main(args: Array<String>) {
             },
             title = when {
                 smokePlayerUrl != null -> "Nuvio Player Smoke"
+                isWindows && windowsA40Fork -> "Nuvio ${AppVersionConfig.DESKTOP_VERSION_NAME.replaceFirst('-', ' ')}"
                 isWindows && windowsWatchPartyTest -> windowsProductName
                 else -> "Nuvio"
             },

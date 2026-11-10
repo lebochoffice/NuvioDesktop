@@ -479,7 +479,9 @@ std::wstring localAppDataDirectory(const wchar_t *name) {
     }
     std::wstring directory(localAppData);
     CoTaskMemFree(localAppData);
-#ifdef NUVIO_WATCH_PARTY_TEST
+#if defined(NUVIO_A40_FORK)
+    directory += L"\\Nuvio A40-Fork\\";
+#elif defined(NUVIO_WATCH_PARTY_TEST)
     directory += L"\\NUVIO Watch Party Test\\";
 #else
     directory += L"\\Nuvio Family\\";

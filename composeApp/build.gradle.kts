@@ -518,14 +518,30 @@ val desktopReleaseVersionCode = (
     ?.takeIf { it.isNotBlank() }
     ?.toIntOrNull()
     ?: 1
-val desktopReleasePackageVersion = jpackageCompatibleVersion(desktopReleaseVersionName)
+val windowsA40Fork = providers.gradleProperty("nuvio.windows.a40Fork").orNull == "true"
+val desktopReleasePackageVersion = if (windowsA40Fork) {
+    val version = providers.gradleProperty("nuvio.windows.a40MsiVersion").get()
+    require(Regex("[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,5}").matches(version) &&
+        version == jpackageCompatibleVersion(version)) { "A40-Fork requires an explicit numeric MSI version." }
+    version
+} else jpackageCompatibleVersion(desktopReleaseVersionName)
 val windowsWatchPartyTest = providers.gradleProperty("nuvio.windows.watchPartyTest").orNull == "true"
-require(!windowsWatchPartyTest || System.getProperty("os.name").contains("win", ignoreCase = true)) {
-    "The Watch Party test identity is Windows-only."
+require(!(windowsA40Fork && windowsWatchPartyTest)) { "Choose only one Windows packaging identity." }
+require(!(windowsWatchPartyTest || windowsA40Fork) || System.getProperty("os.name").contains("win", ignoreCase = true)) {
+    "The selected packaging identity is Windows-only."
 }
 if (windowsWatchPartyTest) layout.buildDirectory.set(layout.projectDirectory.dir("build/windows-watch-party-test"))
-val windowsMsiProductName = if (windowsWatchPartyTest) "NUVIO Watch Party Test" else "Nuvio Family"
-val windowsMsiUpgradeUuid = if (windowsWatchPartyTest) "716bf1a3-9f38-48ac-9dd9-cea658938116" else "dfe71c5b-c265-42ce-a025-396193575a13"
+if (windowsA40Fork) layout.buildDirectory.set(layout.projectDirectory.dir("build/windows-a40-fork"))
+val windowsMsiProductName = when {
+    windowsA40Fork -> "Nuvio"
+    windowsWatchPartyTest -> "NUVIO Watch Party Test"
+    else -> "Nuvio Family"
+}
+val windowsMsiUpgradeUuid = when {
+    windowsA40Fork -> "e3bc93a6-7e5c-4a95-a902-bdc61b8324e3"
+    windowsWatchPartyTest -> "716bf1a3-9f38-48ac-9dd9-cea658938116"
+    else -> "dfe71c5b-c265-42ce-a025-396193575a13"
+}
 val iosDistribution = (
     providers.gradleProperty("nuvio.ios.distribution").orNull
         ?: System.getenv("NUVIO_IOS_DISTRIBUTION")
@@ -884,6 +900,7 @@ val windowsPlayerBridgeCommand = if (missingWindowsPlayerBridgeInputs.isNotEmpty
     val compileCommand = listOfNotNull(
         "cl",
         "/DNUVIO_WATCH_PARTY_TEST".takeIf { windowsWatchPartyTest },
+        "/DNUVIO_A40_FORK".takeIf { windowsA40Fork },
         "/nologo",
         "/EHsc",
         "/std:c++17",
@@ -1359,6 +1376,7 @@ compose.desktop {
             ?: System.getenv("NUVIO_DESKTOP_SMOKE_PLAYER_URL")
         jvmArgs += listOfNotNull(
             "-Dnuvio.windows.watchPartyTest=true".takeIf { windowsWatchPartyTest },
+            "-Dnuvio.windows.a40Fork=true".takeIf { windowsA40Fork },
             "-Dapple.awt.application.appearance=NSAppearanceNameDarkAqua",
             // Keep AWT from loading its own GTK (Swing L&F/file dialogs): the
             // bridge owns the process's GTK via initGtkEarly (skoruppa's fix).
@@ -1375,7 +1393,7 @@ compose.desktop {
             targetFormats(TargetFormat.Dmg, TargetFormat.Msi, TargetFormat.Deb, TargetFormat.Rpm, TargetFormat.AppImage)
             packageName = if (isWindowsHost) windowsMsiProductName else "Nuvio"
             packageVersion = desktopReleasePackageVersion
-            vendor = "Nuvio Media"
+            vendor = if (windowsA40Fork) "Nuvio A40 Fork" else "Nuvio Media"
             if (isMacHost) {
                 appResourcesRootDir.set(macosPlayerAppResourcesRoot)
             }
@@ -1429,7 +1447,7 @@ compose.desktop {
                 upgradeUuid = windowsMsiUpgradeUuid
                 shortcut = true
                 menu = true
-                menuGroup = windowsMsiProductName
+                menuGroup = if (windowsA40Fork) "Nuvio-A40-Fork" else windowsMsiProductName
             }
             linux {
                 iconFile.set(project.file("src/desktopMain/resources/icons/nuvio-app-icon-transparent.png"))
@@ -1450,6 +1468,7 @@ tasks.withType<AbstractJPackageTask>()
     .matching { it.name.endsWith("Msi") || it.name.endsWith("Exe") }
     .configureEach {
         freeArgs.add("--win-shortcut-prompt")
+        if (windowsA40Fork) freeArgs.addAll("--install-dir", "Nuvio-A40-Fork")
     }
 
 fun renameMacosDmgOutput(release: Boolean) {
@@ -1494,12 +1513,19 @@ fun publishWindowsMsiOutput(release: Boolean) {
 
     val distributionName = if (release) "main-release" else "main"
     val outputDir = layout.buildDirectory.dir("compose/binaries/$distributionName/msi").get().asFile
-    val finalMsi = outputDir.resolve("Nuvio-Windows-$windowsPlayerBridgeArch-$desktopReleaseVersionName.msi")
+    val finalMsi = outputDir.resolve(
+        if (windowsA40Fork) "Nuvio-$desktopReleaseVersionName.msi"
+        else "Nuvio-Windows-$windowsPlayerBridgeArch-$desktopReleaseVersionName.msi",
+    )
     val sourceMsi = outputDir.resolve("$windowsMsiProductName-$desktopReleasePackageVersion.msi")
     check(sourceMsi.isFile) { "Expected Windows MSI output at ${sourceMsi.absolutePath}" }
 
     val protocolScript = rootProject.file("fork-maintenance/register-windows-party-protocol.ps1")
-    val identityOptions = if (windowsWatchPartyTest) arrayOf("-WatchPartyTest") else emptyArray<String>()
+    val identityOptions = when {
+        windowsA40Fork -> arrayOf("-A40Fork")
+        windowsWatchPartyTest -> arrayOf("-WatchPartyTest")
+        else -> emptyArray<String>()
+    }
     fun runProtocolStep(step: String, vararg options: String) {
         val process = ProcessBuilder(
             "powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
@@ -1517,7 +1543,7 @@ fun publishWindowsMsiOutput(release: Boolean) {
     runProtocolStep("registration")
     runProtocolStep("verification", "-VerifyOnly")
 
-    if (windowsWatchPartyTest) {
+    if (windowsWatchPartyTest || windowsA40Fork) {
         val testOutput = layout.buildDirectory.dir("compose/release-msis").get().asFile
         testOutput.mkdirs()
         Files.move(sourceMsi.toPath(), testOutput.resolve(finalMsi.name).toPath())

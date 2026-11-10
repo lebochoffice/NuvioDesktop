@@ -9,15 +9,16 @@ param(
     [switch]$RequirePartyProtocol,
     [string]$InstalledExePath,
     [string]$ExpectedProductVersion,
-    [switch]$WatchPartyTest
+    [switch]$WatchPartyTest,
+    [switch]$A40Fork
 )
 $ErrorActionPreference = 'Stop'
-. (Join-Path $PSScriptRoot 'windows-msi-identity.ps1') -WatchPartyTest:$WatchPartyTest
+. (Join-Path $PSScriptRoot 'windows-msi-identity.ps1') -WatchPartyTest:$WatchPartyTest -A40Fork:$A40Fork
 if (!$PSBoundParameters.ContainsKey('RepoPath')) {
     $RepoPath = Split-Path -Parent $PSScriptRoot
 }
 $repo = (Resolve-Path -LiteralPath $RepoPath).Path
-$buildDirectory = if ($WatchPartyTest) { 'composeApp/build/windows-watch-party-test' } else { 'composeApp/build' }
+$buildDirectory = if ($A40Fork) { 'composeApp/build/windows-a40-fork' } elseif ($WatchPartyTest) { 'composeApp/build/windows-watch-party-test' } else { 'composeApp/build' }
 $msis = if ($MsiPath) { @(Get-Item -LiteralPath $MsiPath) } else { @(Get-ChildItem (Join-Path $repo "$buildDirectory/compose/release-msis") -Filter '*.msi') }
 if ($msis.Count -ne 1) { throw "Expected one published MSI, found $($msis.Count)" }
 $msi = $msis[0]
@@ -27,9 +28,9 @@ try {
     $bytes = New-Object byte[] 8
     if ($stream.Read($bytes, 0, 8) -ne 8 -or (-join ($bytes | ForEach-Object { $_.ToString('X2') })) -ne 'D0CF11E0A1B11AE1') { throw 'Not an MSI compound document' }
 } finally { $stream.Dispose() }
-& (Join-Path $PSScriptRoot 'register-windows-party-protocol.ps1') -MsiPath $msi.FullName -VerifyOnly -WatchPartyTest:$WatchPartyTest
+& (Join-Path $PSScriptRoot 'register-windows-party-protocol.ps1') -MsiPath $msi.FullName -VerifyOnly -WatchPartyTest:$WatchPartyTest -A40Fork:$A40Fork
 
-$app = Join-Path $repo "$buildDirectory/compose/binaries/main-release/app/$familyMsiProductName"
+$app = Join-Path $repo "$buildDirectory/compose/binaries/main-release/app/$familyMsiImageName"
 $jars = @(Get-ChildItem (Join-Path $app 'app') -Filter 'composeApp-desktop-*.jar')
 if ($jars.Count -ne 1) { throw 'Expected one packaged desktop application JAR' }
 

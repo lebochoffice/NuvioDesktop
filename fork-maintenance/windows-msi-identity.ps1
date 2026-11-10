@@ -1,11 +1,14 @@
 # Windows fork packaging contract. Keep the name and UpgradeCode in sync with Gradle.
-param([switch]$WatchPartyTest)
-$familyMsiProductName = if ($WatchPartyTest) { 'NUVIO Watch Party Test' } else { 'Nuvio Family' }
-$familyMsiUpgradeCode = if ($WatchPartyTest) { [guid]'716bf1a3-9f38-48ac-9dd9-cea658938116' } else { [guid]'dfe71c5b-c265-42ce-a025-396193575a13' }
-$familyMsiLauncher = "$familyMsiProductName.exe"
-$familyMsiProgId = if ($WatchPartyTest) { 'nuvio-watch-test' } else { 'Nuvio.Family.Party' }
-$familyMsiCapabilities = if ($WatchPartyTest) { 'Software\NuvioWatchPartyTest\Capabilities' } else { 'Software\NuvioFamily\Capabilities' }
-$familyMsiScheme = if ($WatchPartyTest) { 'nuvio-watch-test' } else { 'nuvio' }
+param([switch]$WatchPartyTest, [switch]$A40Fork)
+if ($WatchPartyTest -and $A40Fork) { throw 'Choose only one Windows packaging identity.' }
+$familyMsiProductName = if ($A40Fork) { 'Nuvio A40-Fork' } elseif ($WatchPartyTest) { 'NUVIO Watch Party Test' } else { 'Nuvio Family' }
+$familyMsiUpgradeCode = if ($A40Fork) { [guid]'e3bc93a6-7e5c-4a95-a902-bdc61b8324e3' } elseif ($WatchPartyTest) { [guid]'716bf1a3-9f38-48ac-9dd9-cea658938116' } else { [guid]'dfe71c5b-c265-42ce-a025-396193575a13' }
+$familyMsiImageName = if ($A40Fork) { 'Nuvio' } else { $familyMsiProductName }
+$familyMsiInstallDirectory = if ($A40Fork) { 'Nuvio-A40-Fork' } else { $familyMsiProductName }
+$familyMsiLauncher = "$familyMsiImageName.exe"
+$familyMsiProgId = if ($A40Fork) { 'nuvio-a40' } elseif ($WatchPartyTest) { 'nuvio-watch-test' } else { 'Nuvio.Family.Party' }
+$familyMsiCapabilities = if ($A40Fork) { 'Software\NuvioA40Fork\Capabilities' } elseif ($WatchPartyTest) { 'Software\NuvioWatchPartyTest\Capabilities' } else { 'Software\NuvioFamily\Capabilities' }
+$familyMsiScheme = if ($A40Fork) { 'nuvio-a40' } elseif ($WatchPartyTest) { 'nuvio-watch-test' } else { 'nuvio' }
 $familyMsiLaunchCondition = 'Installed OR NOT JP_DOWNGRADABLE_FOUND'
 $familyMsiVersionTables = @('InstallUISequence', 'InstallExecuteSequence')
 
@@ -17,7 +20,8 @@ function Close-MsiView($View) {
 function Assert-FamilyMsiIdentity($Properties, [string]$Template, [object[]]$UpgradeRules, [string]$ExpectedProductVersion, [switch]$BeforeUpgradePolicy) {
     $upgradeCode = [guid]::Empty
     $productCode = [guid]::Empty
-    if ($Properties['ProductName'] -cne $familyMsiProductName -or
+    $expectedProductName = if ($A40Fork -and $BeforeUpgradePolicy) { $familyMsiImageName } else { $familyMsiProductName }
+    if ($Properties['ProductName'] -cne $expectedProductName -or
         ![guid]::TryParseExact($Properties['UpgradeCode'], 'B', [ref]$upgradeCode) -or $upgradeCode -ne $familyMsiUpgradeCode -or
         ![guid]::TryParseExact($Properties['ProductCode'], 'B', [ref]$productCode) -or
         $productCode -eq [guid]::Empty -or $productCode -eq $upgradeCode) {
@@ -191,7 +195,7 @@ function Get-VerifiedFamilyMsiProperties($Database, [string]$ExpectedProductVers
         if (!$record) { throw 'MSI is missing the INSTALLDIR directory.' }
         try {
             $targetName = $record.StringData(1).Split(':')[0].Split('|')[-1]
-            if ($targetName -cne $familyMsiProductName -or $record.StringData(2) -cne 'ProgramFiles64Folder') {
+            if ($targetName -cne $familyMsiInstallDirectory -or $record.StringData(2) -cne 'ProgramFiles64Folder') {
                 throw 'MSI INSTALLDIR does not target the Nuvio Family directory under 64-bit Program Files.'
             }
         } finally { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($record) }
