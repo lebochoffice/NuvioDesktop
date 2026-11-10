@@ -200,7 +200,11 @@ try {
         if ($A40Fork) {
             $stage = 'isolating A40 product name and desktop shortcut'
             Invoke-MsiStatement $db 'INSERT INTO `Directory` (`Directory`, `Directory_Parent`, `DefaultDir`) VALUES (''A40DesktopFolder'', ''DesktopFolder'', ''Nuvio-A40-Fork'')'
-            Invoke-MsiStatement $db 'UPDATE `Shortcut` SET `Directory_` = ''A40DesktopFolder'' WHERE `Directory_` = ''DesktopFolder'''
+            if ($actions['RemoveFiles'] -le $removeSequence -or !(Test-MsiTable $db 'RemoveFile') -or $component -notmatch '^[A-Za-z_][A-Za-z0-9_.]*$') {
+                throw 'Cannot safely remove the empty A40 legacy shortcut directory.'
+            }
+            # A NULL FileName removes only the empty directory, never its contents.
+            Invoke-MsiStatement $db ('INSERT INTO `RemoveFile` (`FileKey`, `Component_`, `DirProperty`, `InstallMode`) VALUES (''A40EmptyDesktopFolder'', ''{0}'', ''A40DesktopFolder'', 1)' -f $component)
         }
         $stage = 'committing MSI transaction'
         $db.Commit()
@@ -211,23 +215,35 @@ try {
 
     if ($A40Fork) {
         $stage = 'verifying isolated A40 shortcuts'
-        $v = $db.OpenView('SELECT `Shortcut`.`Name`, `Shortcut`.`Target`, `Directory`.`Directory_Parent`, `Directory`.`DefaultDir` FROM `Shortcut`, `Directory` WHERE `Shortcut`.`Directory_` = `Directory`.`Directory`')
+        $v = $db.OpenView('SELECT `Shortcut`.`Name`, `Shortcut`.`Target`, `Directory`.`Directory`, `Directory`.`Directory_Parent`, `Directory`.`DefaultDir` FROM `Shortcut`, `Directory` WHERE `Shortcut`.`Directory_` = `Directory`.`Directory`')
         try {
             [void]$v.Execute()
             $found = @()
             while ($rec = $v.Fetch()) {
                 try {
-                    if ($rec.StringData(1).Split('|')[-1] -cne 'Nuvio' -or $rec.StringData(2) -cne ('[#{0}]' -f $file) -or
-                        $rec.StringData(4).Split('|')[-1] -cne 'Nuvio-A40-Fork' -or
-                        $rec.StringData(3) -notin @('DesktopFolder', 'ProgramMenuFolder')) {
-                        throw 'A40 shortcut collides with another Nuvio installation.'
+                    $location = if ($rec.StringData(3) -ceq 'DesktopFolder') { 'DesktopFolder' }
+                        elseif ($rec.StringData(4) -ceq 'ProgramMenuFolder' -and $rec.StringData(5).Split('|')[-1] -ceq 'Nuvio-A40-Fork') { 'ProgramMenuFolder' }
+                    if ($rec.StringData(1).Split('|')[-1] -cne 'Nuvio' -or $rec.StringData(2) -cne ('[#{0}]' -f $file) -or !$location) {
+                        throw 'Unexpected A40 shortcut or launcher target.'
                     }
-                    $found += $rec.StringData(3)
+                    $found += $location
                 } finally { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($rec) }
             }
             if ($found.Count -ne 2 -or 'DesktopFolder' -notin $found -or 'ProgramMenuFolder' -notin $found) {
                 throw 'Expected one desktop and one Start menu A40 shortcut.'
             }
+        } finally { Close-MsiView $v }
+        $v = $db.OpenView('SELECT `Component_`, `FileName`, `DirProperty`, `InstallMode` FROM `RemoveFile` WHERE `FileKey` = ''A40EmptyDesktopFolder''')
+        try {
+            [void]$v.Execute()
+            $rec = $v.Fetch()
+            if (!$rec) { throw 'Missing A40 empty-folder cleanup rule.' }
+            try {
+                if ($rec.StringData(1) -cne $component -or !$rec.IsNull(2) -or $rec.StringData(3) -cne 'A40DesktopFolder' -or
+                    $rec.IntegerData(4) -ne 1 -or $actions['RemoveFiles'] -le $removeSequence) {
+                    throw 'Unexpected A40 shortcut cleanup rule.'
+                }
+            } finally { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($rec) }
         } finally { Close-MsiView $v }
     }
 
