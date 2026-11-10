@@ -2,6 +2,7 @@ package com.nuvio.app
 
 import com.nuvio.app.core.deeplink.AppDeepLinkRepository
 import com.nuvio.app.core.storage.windowsFamilyDataDirectory
+import com.nuvio.app.core.storage.windowsWatchPartyTest
 import com.nuvio.app.features.party.PARTY_CODE_LENGTH
 import com.nuvio.app.features.party.normalizePartyCode
 import io.ktor.http.Url
@@ -29,7 +30,8 @@ internal class WindowsPartyInvitation(val code: String?) {
     }
 }
 
-private val partyUri = Regex("^nuvio://party(?:[/?#].*)?$", RegexOption.IGNORE_CASE)
+private val partyScheme = if (windowsWatchPartyTest) "nuvio-watch-test" else "nuvio"
+private val partyUri = Regex("^$partyScheme://party(?:[/?#].*)?$", RegexOption.IGNORE_CASE)
 
 internal fun windowsPartyInvitation(value: String): WindowsPartyInvitation? {
     val input = value.trim()

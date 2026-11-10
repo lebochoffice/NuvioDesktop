@@ -58,7 +58,6 @@ data class PlayerControlPartyState(
     val torboxLinkAuto: Boolean = false,
     val torboxSuggestedFilter: String = "",
     // Default origin of "Watch in Browser" (production, or the preview in a test build).
-    val browserOrigin: String = "",
     // Host's own video link for all browser guests (never the URL itself here).
     val hostHlsAllowed: Boolean = false,
     val hostHlsActive: Boolean = false,

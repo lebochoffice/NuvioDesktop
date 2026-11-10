@@ -1364,6 +1364,15 @@
   font-size: 13px;
 }
 
+.party-button.compact.party-host-solo {
+  align-self: center;
+  width: fit-content;
+  margin-inline: auto;
+  min-height: 28px;
+  padding: 0 10px;
+  font-size: 12px;
+}
+
 .party-button.compact.list {
   width: 100%;
   justify-content: space-between;
@@ -1456,17 +1465,6 @@
 .party-divider {
   height: 1px;
   background: rgba(255, 255, 255, .08);
-}
-
-.party-invite-card .party-browser-host {
-  width: 100%;
-  box-sizing: border-box;
-  border: 1px solid var(--theme-border-default);
-  border-radius: 9px;
-  padding: 9px 12px;
-  background: rgba(0, 0, 0, .25);
-  color: var(--theme-text-primary);
-  font-size: 13px;
 }
 
 .party-invite-card {
@@ -1675,11 +1673,6 @@
   grid-template-columns: 1fr 1fr;
   gap: 8px;
   margin-top: 4px;
-}
-
-.party-invite-card > .party-browser-host,
-.party-invite-card > .party-detail {
-  grid-column: 1 / -1;
 }
 
 .party-invite-card .party-button {

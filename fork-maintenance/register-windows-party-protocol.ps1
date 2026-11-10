@@ -2,11 +2,12 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$MsiPath,
-    [switch]$VerifyOnly
+    [switch]$VerifyOnly,
+    [switch]$WatchPartyTest
 )
 
 $ErrorActionPreference = 'Stop'
-. (Join-Path $PSScriptRoot 'windows-msi-identity.ps1')
+. (Join-Path $PSScriptRoot 'windows-msi-identity.ps1') -WatchPartyTest:$WatchPartyTest
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 $msi = Get-Item -LiteralPath $MsiPath
 if ($msi.Extension -ne '.msi' -or $msi.PSIsContainer) { throw 'Expected a generated MSI file.' }
@@ -64,7 +65,7 @@ try {
         @{ Id = 'ForkCommand'; Root = 0; Key = "$familyMsiProgId\shell\open\command"; Name = $null; Value = $command }
         @{ Id = 'Capabilities'; Root = -1; Key = $familyMsiCapabilities; Name = 'ApplicationName'; Value = $familyMsiProductName }
         @{ Id = 'Description'; Root = -1; Key = $familyMsiCapabilities; Name = 'ApplicationDescription'; Value = 'Open Nuvio watch party invitations.' }
-        @{ Id = 'Associations'; Root = -1; Key = "$familyMsiCapabilities\URLAssociations"; Name = 'nuvio'; Value = $familyMsiProgId }
+        @{ Id = 'Associations'; Root = -1; Key = "$familyMsiCapabilities\URLAssociations"; Name = $familyMsiScheme; Value = $familyMsiProgId }
         @{ Id = 'Registered'; Root = -1; Key = 'Software\RegisteredApplications'; Name = $familyMsiProductName; Value = $familyMsiCapabilities }
     )
 
@@ -206,10 +207,14 @@ try {
         while ($r = $v.Fetch()) {
             try {
                 $key = $r.StringData(3)
+                if ($WatchPartyTest -and ($key -match '^(?:Software\\Classes\\)?Nuvio\.Family\.Party(?:\\|$)|^Software\\NuvioFamily(?:\\|$)' -or
+                    ($key -ieq 'Software\RegisteredApplications' -and $r.StringData(4) -ieq 'Nuvio Family'))) {
+                    throw "Unexpected Family registry entry in the test MSI: $key"
+                }
                 if ($key -match '^(?:Software\\Classes\\)?nuvio(?:\\|$)') {
                     throw "Unexpected shared protocol key in MSI: $key"
                 }
-                if ($key -match '(?:^|\\)UrlAssociations\\nuvio\\UserChoice(?:\\|$)') {
+                if ($key -match '(?:^|\\)UrlAssociations\\(?:nuvio|nuvio-watch-test)\\UserChoice(?:\\|$)') {
                     throw 'MSI must not set the Windows user default for nuvio://.'
                 }
                 $actual[$r.StringData(1)] = @{
@@ -228,7 +233,7 @@ try {
         }
         if ($entry.Component -cne $component) { throw "Registry row $id does not belong to the $familyMsiLauncher component." }
     }
-    Write-Host 'Windows party protocol: Family-only association verified in the MSI. Installed behavior requires a live check.'
+    Write-Host 'Windows party protocol: Package-specific association verified in the MSI. Installed behavior requires a live check.'
 } catch {
     $failure = $_.Exception.ToString()
     $detail = Get-MsiErrorDetail

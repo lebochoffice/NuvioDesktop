@@ -1,9 +1,11 @@
 # Windows fork packaging contract. Keep the name and UpgradeCode in sync with Gradle.
-$familyMsiProductName = 'Nuvio Family'
-$familyMsiUpgradeCode = [guid]'dfe71c5b-c265-42ce-a025-396193575a13'
+param([switch]$WatchPartyTest)
+$familyMsiProductName = if ($WatchPartyTest) { 'NUVIO Watch Party Test' } else { 'Nuvio Family' }
+$familyMsiUpgradeCode = if ($WatchPartyTest) { [guid]'716bf1a3-9f38-48ac-9dd9-cea658938116' } else { [guid]'dfe71c5b-c265-42ce-a025-396193575a13' }
 $familyMsiLauncher = "$familyMsiProductName.exe"
-$familyMsiProgId = 'Nuvio.Family.Party'
-$familyMsiCapabilities = 'Software\NuvioFamily\Capabilities'
+$familyMsiProgId = if ($WatchPartyTest) { 'nuvio-watch-test' } else { 'Nuvio.Family.Party' }
+$familyMsiCapabilities = if ($WatchPartyTest) { 'Software\NuvioWatchPartyTest\Capabilities' } else { 'Software\NuvioFamily\Capabilities' }
+$familyMsiScheme = if ($WatchPartyTest) { 'nuvio-watch-test' } else { 'nuvio' }
 $familyMsiLaunchCondition = 'Installed OR NOT JP_DOWNGRADABLE_FOUND'
 $familyMsiVersionTables = @('InstallUISequence', 'InstallExecuteSequence')
 

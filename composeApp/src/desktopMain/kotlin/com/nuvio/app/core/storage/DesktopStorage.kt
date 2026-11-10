@@ -10,8 +10,11 @@ import java.util.Locale
 import java.util.Properties
 import kotlin.io.path.exists
 
+internal val windowsWatchPartyTest = System.getProperty("nuvio.windows.watchPartyTest") == "true"
+internal val windowsProductName = if (windowsWatchPartyTest) "NUVIO Watch Party Test" else "Nuvio Family"
+
 internal fun windowsFamilyDataDirectory(configuredBase: String?, fallbackBase: Path): Path =
-    (configuredBase?.takeIf(String::isNotBlank)?.let(Paths::get) ?: fallbackBase).resolve("Nuvio Family")
+    (configuredBase?.takeIf(String::isNotBlank)?.let(Paths::get) ?: fallbackBase).resolve(windowsProductName)
 
 internal object DesktopStorage {
     private val json = Json { ignoreUnknownKeys = true }

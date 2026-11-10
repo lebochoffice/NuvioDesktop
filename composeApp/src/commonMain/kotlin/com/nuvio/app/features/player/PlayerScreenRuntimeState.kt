@@ -282,7 +282,6 @@ internal class PlayerScreenRuntime(
     var copyPartyInvite: (codeOnly: Boolean) -> Unit = {}
     var copyNuvioInvite: () -> Unit = {}
     // NUVIO_BROWSER_PARTY_BRIDGE_V1
-    var copyBrowserInvite: (String) -> Unit = {}
     var showPartyChat by mutableStateOf(false)
     var partyChatVisible by mutableStateOf(false)
     val isPanelOpen: Boolean
@@ -348,7 +347,7 @@ internal class PlayerScreenRuntime(
     var partyRateNudge: Float? = null
     var partyPreviousKey: String? = null
     var partyOpeningRequestedSource = false
-    var hostSoloReturnOpened = false
+    var hostSoloInPlaceReturnToken: Long? = null
     var hostSoloActionPending = false
     var partyAppInBackground = false
     var playbackSnapshotMark: TimeMark? = null

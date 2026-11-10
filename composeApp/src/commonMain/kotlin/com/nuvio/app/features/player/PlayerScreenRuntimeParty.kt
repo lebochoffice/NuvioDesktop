@@ -68,7 +68,6 @@ import com.nuvio.app.features.party.message
 import com.nuvio.app.features.party.UnreadBadge
 import com.nuvio.app.features.party.messageRes
 import com.nuvio.app.features.party.partyMediaKey
-import com.nuvio.app.features.streams.PlaybackAvailability
 import com.nuvio.app.isDesktop
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
@@ -97,7 +96,7 @@ internal val PlayerScreenRuntime.partyKey: String
     get() = partyMediaKey(parentMetaType, parentMetaId, activeSeasonNumber, activeEpisodeNumber)
 
 internal val PlayerScreenRuntime.isPartySynced: Boolean
-    get() = !hostSoloReturnOpened && !PartyRepository.hostSolo.value && PartyRepository.state.value.party?.media?.key == partyKey
+    get() = !PartyRepository.hostSolo.value && PartyRepository.state.value.party?.media?.key == partyKey
 
 internal val PlayerScreenRuntime.isPartyControlLocked: Boolean
     get() = PartyRepository.state.value.party?.blocksManualPlayback(partyKey, partySolo) == true
@@ -132,7 +131,7 @@ internal fun PlayerScreenRuntime.switchPartyMedia() {
         PartyRepository.publishMedia(currentPartyMedia(), positionMs = playbackSnapshot.positionMs)
         return
     }
-    if (hostSoloReturnOpened || hostSoloActionPending) return
+    if (hostSoloActionPending) return
     val party = PartyRepository.state.value.party?.takeIf { it.isHost } ?: return
     val media = currentPartyMedia()
     if (media.key == party.media.key) return
@@ -167,40 +166,42 @@ internal fun PlayerScreenRuntime.watchWithParty() {
 }
 
 internal fun PlayerScreenRuntime.toggleHostSolo(keepWatchingAlone: Boolean = false) {
-    if (!isDesktop || hostSoloReturnOpened || hostSoloActionPending) return
+    if (!isDesktop || hostSoloActionPending) return
     hostSoloActionPending = true
     scope.launch {
         try {
             val party = PartyRepository.state.value.party?.takeIf { it.isHost } ?: return@launch
             if (keepWatchingAlone && (PartyRepository.hostSolo.value || party.media.key == partyKey)) return@launch
             if (!PartyRepository.hostSolo.value) {
-                if (party.sharing || party.browserSharing || PartyRepository.sharedStream.value != null || familySharePartyId != null) {
-                    showPartyMessage("Aktive Streamfreigaben benötigen den Party-Player. Beende die Freigabe vor „Allein schauen“.")
+                if (party.sharing || (!party.browserSharing && familySharePartyId != null)) {
+                    showPartyMessage("Beende die aktive Streamfreigabe vor „Allein schauen“.")
                     return@launch
                 }
-                if (!PartyRepository.enterHostSolo(party)) {
-                    showPartyMessage("Allein schauen ist nur bei verbundener, bereiter Party ohne Countdown oder Streamfreigabe möglich.")
+                if (party.browserSharing && party.media.key != partyKey) {
+                    showPartyMessage("Die Browser-Freigabe braucht den aktuellen Party-Titel im Player.")
+                    return@launch
+                }
+                if (!initialLoadCompleted || !initialSeekApplied || playbackSnapshot.isLoading || playerController == null || errorMessage != null) {
+                    showPartyMessage("Warte, bis die aktuelle Wiedergabe bereit ist.")
+                    return@launch
+                }
+                if (!PartyRepository.enterHostSolo(party, partyKey)) {
+                    showPartyMessage("Allein schauen ist nur bei verbundener, bereiter Party ohne Countdown möglich.")
                     return@launch
                 }
                 clearPartyNudge()
                 return@launch
             }
+            if (party.media.key != partyKey) {
+                showPartyMessage("Öffne zuerst den aktuellen Party-Titel und wähle dann „Zur Party“.")
+                return@launch
+            }
             val request = PartyRepository.requestHostSoloReturn()
             if (request == null) {
-                showPartyMessage("Die Party ist noch nicht verbunden. Versuche die Rückkehr erneut.")
+                showPartyMessage("Die Party ist noch nicht bereit. Versuche die Rückkehr erneut.")
                 return@launch
             }
-            val media = request.media
-            if (!PlaybackAvailability.current().canStream(media.type, media.videoId ?: media.metaId)) {
-                PartyRepository.failHostSoloReturn(request)
-                showPartyMessage("Für den Party-Titel ist keine Wiedergabequelle verfügbar. Du schaust weiterhin allein.")
-                return@launch
-            }
-            hostSoloReturnOpened = true
-            partyOpeningRequestedSource = true
-            showPartyPanel = false
-            flushWatchProgress()
-            args.onOpenPartyMedia(media, request.token)
+            hostSoloInPlaceReturnToken = request.token
         } finally {
             hostSoloActionPending = false
         }
@@ -445,8 +446,7 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
     val party = partyState.party
     val partyId = party?.id
     val key = partyKey
-    val hostSolo by PartyRepository.hostSolo.collectAsState()
-    val sharingHost = party?.takeIf { it.isHost && !hostSolo && !hostSoloReturnOpened && it.media.key == key }
+    val sharingHost = party?.takeIf { it.isHost && it.media.key == key }
     val desktopOffer = if (sharingHost?.sharing == true) currentPartyStream() else null
     val browserOffer = if (sharingHost?.browserSharing == true) currentPartyBrowserHls() else null
     val browserSharing = sharingHost?.browserSharing == true
@@ -670,7 +670,7 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
         val previous = partyPreviousKey
         partyPreviousKey = key
         val party = PartyRepository.state.value.party ?: return@LaunchedEffect
-        if (!isDesktop && !hostSoloReturnOpened && !PartyRepository.hostSolo.value &&
+        if (!isDesktop && !PartyRepository.hostSolo.value &&
             previous != null && previous != key && party.media.key == previous
         ) {
             PartyRepository.publishMedia(currentPartyMedia(), positionMs = 0L)
@@ -734,12 +734,11 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
         while (isActive) {
             delay(PARTY_TICK)
             val party = PartyRepository.state.value.party ?: break
-            if (hostSoloReturnOpened) continue
             val snapshot = playbackSnapshot
             if (PartyRepository.hostSolo.value) {
                 clearPartyNudge()
                 val request = PartyRepository.hostSoloReturn.value
-                    ?.takeIf { it.token == args.hostSoloReturnToken } ?: continue
+                    ?.takeIf { it.token == (hostSoloInPlaceReturnToken ?: args.hostSoloReturnToken) } ?: continue
                 if (returnToken != request.token) {
                     returnToken = request.token
                     returnStarted = clock.markNow()

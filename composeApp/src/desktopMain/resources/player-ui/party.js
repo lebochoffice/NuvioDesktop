@@ -517,86 +517,13 @@ const buildPartySwitch = (key, title, description, checked, eventType, disabled 
   return row;
 };
 
-// NUVIO_BROWSER_PARTY_BRIDGE_V1: Link to the independently hosted browser guest.
-// v2 key: values stored by older builds (e.g. preview URLs) are ignored.
-const partyBrowserProductionHost = "https://nuvio-watch-friends.pages.dev";
-const partyBrowserAllowedPreviewHost = "https://family-beta.nuvio-watch-friends.pages.dev";
-// The family preview is the default; production requires explicit configuration.
-let partyBrowserDefaultHost = partyBrowserAllowedPreviewHost;
-const setPartyBrowserDefaultHost = origin => {
-  partyBrowserDefaultHost = origin === partyBrowserProductionHost ? partyBrowserProductionHost : partyBrowserAllowedPreviewHost;
-};
-const partyBrowserHostStorage = "nuvio-browser-party-host-v2";
-// Cloudflare preview deployments (<hash>.<project>.pages.dev) are never
-// used as invitation targets, except the one preview this build
-// was explicitly configured for.
-const partyBrowserPreviewHost = host => /\.pages\.dev$/i.test(host) && host.split(".").length > 3 &&
-  !(partyBrowserDefaultHost === partyBrowserAllowedPreviewHost && `https://${host.toLowerCase()}` === partyBrowserAllowedPreviewHost);
-const partyBrowserHost = () => {
-  // A preview test build always invites to its preview (a stored production
-  // address from earlier must not win); production builds keep the stored host.
-  if (partyBrowserDefaultHost === partyBrowserAllowedPreviewHost) return partyBrowserDefaultHost;
-  try {
-    const stored = window.localStorage.getItem(partyBrowserHostStorage) || "";
-    const host = stored ? new URL(stored).hostname : "";
-    return stored && !partyBrowserPreviewHost(host) ? stored : partyBrowserDefaultHost;
-  } catch { return partyBrowserDefaultHost; }
-};
-
-// Invite block: heading, browser address, two copy buttons (Nuvio app and
-// browser). The note only shows feedback or an address problem.
-const buildPartyBrowserShare = party => {
-  setPartyBrowserDefaultHost(String(party.browserOrigin || ""));
+// NUVIO_BROWSER_PARTY_BRIDGE_V1: Desktop builds the invitation from the current party.
+const buildPartyBrowserShare = () => {
   const section = partyElement("div", "party-invite-card");
-  const address = partyElement("input", "party-browser-host");
-  address.setAttribute("aria-label", "Adresse der Browser-Seite");
-  address.setAttribute("type", "url");
-  address.setAttribute("inputmode", "url");
-  address.placeholder = "https://your-project.pages.dev";
-  address.value = partyBrowserHost();
-  address.autocomplete = "off";
-  address.dataset.partyFocus = "browserHost";
-  address.addEventListener("click", event => event.stopPropagation());
-  address.addEventListener("keydown", event => event.stopPropagation());
-  address.hidden = partyBrowserDefaultHost === partyBrowserAllowedPreviewHost;
-  section.appendChild(address);
-  const note = partyElement("p", "party-detail");
-  note.hidden = true;
-  const showNote = text => { note.textContent = text; note.hidden = !text; };
-  section.appendChild(note);
-  address.addEventListener("change", () => {
-    try { window.localStorage.setItem(partyBrowserHostStorage, address.value.trim()); } catch { /* session only */ }
-  });
-  const inviteUrl = () => {
-    const raw = address.hidden ? partyBrowserDefaultHost : address.value.trim();
-    let parsed;
-    try {
-      parsed = new URL(raw);
-      if (partyBrowserPreviewHost(new URL(raw).hostname) || !/^https:\/\/[^/?#@]+\/?$/i.test(raw) || /[\u0000-\u001f\u007f\\]/.test(address.value) || parsed.protocol !== "https:" || !parsed.hostname || parsed.username || parsed.password || parsed.search || parsed.hash || /[\u0000-\u0020\u007f\\]/.test(raw) || (parsed.pathname !== "/" && parsed.pathname !== "")) throw Error("invalid address");
-    } catch {
-      showNote("Bitte die HTTPS-Startadresse der Browser-Seite eintragen.");
-      return;
-    }
-    const code = String(party.code || "").trim();
-    if (!/^[A-HJ-NP-Z2-9]{6}$/.test(code)) {
-      showNote("Der Party-Code ist ungültig.");
-      return;
-    }
-    const invite = `${parsed.origin}/party/${encodeURIComponent(code)}`;
-    try { if (!address.hidden) window.localStorage.setItem(partyBrowserHostStorage, parsed.origin); } catch { /* session only */ }
-    return invite;
-  };
-  const onClick = () => {
-    const invite = inviteUrl();
-    if (!invite) return;
-    // Copying the link must never implicitly enable source sharing.
-    send(`partyBrowserInvite:${partyEncodeText(invite)}`, 0);
-    showNote("");
-  };
-  // Same party code: the original Nuvio invite, then the browser invite (last).
   const nuvio = partyIconTextButton("icon-monitor", "Watch in Nuvio", "", "nuvioShare", () => send("partyCopyNuvioLink", 0));
   nuvio.title = "Nuvio-Einladungslink kopieren";
-  const browser = partyIconTextButton("icon-globe", "Watch in Browser", "light", "browserShare", onClick);
+  const browser = partyIconTextButton("icon-globe", "Watch in Browser", "light", "browserShare",
+    () => copyPartyInvite());
   browser.title = "Browser-Einladungslink kopieren";
   section.appendChild(nuvio);
   section.appendChild(browser);
@@ -840,10 +767,6 @@ const buildPartyContent = party => {
   overview.appendChild(buildPartyCode(party));
   overview.appendChild(buildPartyMembers(party));
   content.appendChild(overview);
-  if (party.isHost) {
-    content.appendChild(partyButtonElement(party.hostSolo ? "Zur Party" : "Allein schauen",
-      "compact", "hostSolo", () => send("partyHostSolo", 0)));
-  }
 
   const nowWatching = String(party.nowWatching || "").trim();
   if (party.isHost && party.hostDifferentTitle) {
@@ -892,11 +815,13 @@ const buildPartyContent = party => {
     content.appendChild(note);
   }
   if (party.isHost) {
-    if (!party.hostSolo) content.appendChild(buildPartyBrowserShare(party));
+    if (!party.hostSolo) content.appendChild(buildPartyBrowserShare());
     content.appendChild(partyElement("div", "party-divider"));
     const playback = partyElement("section", "party-playback-controls");
     playback.appendChild(partyElement("h3", "party-label", partyLabel("playbackControls", "Playback controls")));
     playback.appendChild(buildPartySwitch("hostOnly", partyLabel("hostOnlyTitle"), "", party.hostOnly, "partyHostOnly"));
+    playback.appendChild(partyButtonElement(party.hostSolo ? "Zur Party" : "Allein schauen",
+      "compact party-host-solo", "hostSolo", () => send("partyHostSolo", 0)));
     content.appendChild(playback);
   }
 

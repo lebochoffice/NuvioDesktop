@@ -277,11 +277,12 @@ object PartyRepository {
         }
     }
 
-    internal suspend fun enterHostSolo(expected: ActiveParty): Boolean = withContext(dispatcher) {
+    internal suspend fun enterHostSolo(expected: ActiveParty, playerMediaKey: String): Boolean = withContext(dispatcher) {
         val party = _state.value.party ?: return@withContext false
         val playback = _playback.value ?: return@withContext false
         if (!party.connected || !party.isHost || party.id != expected.id || party.memberId != expected.memberId ||
-            _hostSolo.value || party.sharing || party.browserSharing || _sharedStream.value != null ||
+            party.media.key != expected.media.key || _hostSolo.value || party.sharing ||
+            (party.browserSharing && party.media.key != playerMediaKey) ||
             _countdown.value != null || (playback.mediaKey != null && playback.mediaKey != party.media.key)
         ) return@withContext false
         _hostSolo.value = true
@@ -314,10 +315,11 @@ object PartyRepository {
         }
 
     fun shareStream(partyId: String, memberId: String, mediaKey: String, desktop: PartyStream?, browser: PartyBrowserHls?) {
-        if (_hostSolo.value) return
         scope.launch {
             val party = _state.value.party ?: return@launch
-            if (_hostSolo.value || !party.isHost || party.id != partyId || party.memberId != memberId || party.media.key != mediaKey) return@launch
+            if (!party.isHost || party.id != partyId || party.memberId != memberId || party.media.key != mediaKey) return@launch
+            // Browser offers and their renewals belong to the Party, even while the host plays solo.
+            if (_hostSolo.value && party.sharing) return@launch
             val offer = party.streamOffer(desktop, browser)
             if (offer != _sharedStream.value) sendStream(offer)
         }
@@ -1101,7 +1103,7 @@ val watchPartyBrowserOrigin: String
     get() = PartyBrowserConfig.ORIGIN.takeIf { it == WATCH_PARTY_BROWSER_PRODUCTION_ORIGIN } ?: WATCH_PARTY_BROWSER_ORIGIN
 
 // "Watch in Nuvio": the original upstream invite (opens the Nuvio app).
-// "Watch in Browser" builds its own link from watchPartyBrowserOrigin.
+// Desktop browser invitations use the agreed Family-Beta origin.
 fun partyInviteLink(code: String): String = partyInviteLink(code, ServerConfigurationRepository.active.value.isCustom)
 
 internal fun partyInviteLink(code: String, customBackend: Boolean): String =

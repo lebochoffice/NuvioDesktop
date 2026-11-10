@@ -479,7 +479,11 @@ std::wstring localAppDataDirectory(const wchar_t *name) {
     }
     std::wstring directory(localAppData);
     CoTaskMemFree(localAppData);
+#ifdef NUVIO_WATCH_PARTY_TEST
+    directory += L"\\NUVIO Watch Party Test\\";
+#else
     directory += L"\\Nuvio Family\\";
+#endif
     directory += name;
     int createResult = SHCreateDirectoryExW(nullptr, directory.c_str(), nullptr);
     if (createResult != ERROR_SUCCESS && createResult != ERROR_ALREADY_EXISTS && createResult != ERROR_FILE_EXISTS) {

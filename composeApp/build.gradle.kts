@@ -22,6 +22,7 @@ import org.jetbrains.kotlin.gradle.targets.native.tasks.KotlinNativeSimulatorTes
 import org.jetbrains.kotlin.gradle.tasks.KotlinCompilationTask
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.nio.file.Files
 import java.util.Properties
 import javax.inject.Inject
 
@@ -518,8 +519,13 @@ val desktopReleaseVersionCode = (
     ?.toIntOrNull()
     ?: 1
 val desktopReleasePackageVersion = jpackageCompatibleVersion(desktopReleaseVersionName)
-val windowsMsiProductName = "Nuvio Family"
-val windowsMsiUpgradeUuid = "dfe71c5b-c265-42ce-a025-396193575a13"
+val windowsWatchPartyTest = providers.gradleProperty("nuvio.windows.watchPartyTest").orNull == "true"
+require(!windowsWatchPartyTest || System.getProperty("os.name").contains("win", ignoreCase = true)) {
+    "The Watch Party test identity is Windows-only."
+}
+if (windowsWatchPartyTest) layout.buildDirectory.set(layout.projectDirectory.dir("build/windows-watch-party-test"))
+val windowsMsiProductName = if (windowsWatchPartyTest) "NUVIO Watch Party Test" else "Nuvio Family"
+val windowsMsiUpgradeUuid = if (windowsWatchPartyTest) "716bf1a3-9f38-48ac-9dd9-cea658938116" else "dfe71c5b-c265-42ce-a025-396193575a13"
 val iosDistribution = (
     providers.gradleProperty("nuvio.ios.distribution").orNull
         ?: System.getenv("NUVIO_IOS_DISTRIBUTION")
@@ -875,8 +881,9 @@ val windowsPlayerBridgeCommand = if (missingWindowsPlayerBridgeInputs.isNotEmpty
     val objFile = windowsPlayerBridgeObj.get().asFile
     val javaIncludeDir = File(windowsPlayerBridgeJavaHome, "include")
     val javaWin32IncludeDir = File(javaIncludeDir, "win32")
-    val compileCommand = listOf(
+    val compileCommand = listOfNotNull(
         "cl",
+        "/DNUVIO_WATCH_PARTY_TEST".takeIf { windowsWatchPartyTest },
         "/nologo",
         "/EHsc",
         "/std:c++17",
@@ -1351,6 +1358,7 @@ compose.desktop {
         val smokePlayerUrl = providers.gradleProperty("nuvio.desktop.smokePlayerUrl").orNull
             ?: System.getenv("NUVIO_DESKTOP_SMOKE_PLAYER_URL")
         jvmArgs += listOfNotNull(
+            "-Dnuvio.windows.watchPartyTest=true".takeIf { windowsWatchPartyTest },
             "-Dapple.awt.application.appearance=NSAppearanceNameDarkAqua",
             // Keep AWT from loading its own GTK (Swing L&F/file dialogs): the
             // bridge owns the process's GTK via initGtkEarly (skoruppa's fix).
@@ -1491,10 +1499,11 @@ fun publishWindowsMsiOutput(release: Boolean) {
     check(sourceMsi.isFile) { "Expected Windows MSI output at ${sourceMsi.absolutePath}" }
 
     val protocolScript = rootProject.file("fork-maintenance/register-windows-party-protocol.ps1")
+    val identityOptions = if (windowsWatchPartyTest) arrayOf("-WatchPartyTest") else emptyArray<String>()
     fun runProtocolStep(step: String, vararg options: String) {
         val process = ProcessBuilder(
             "powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-            "-File", protocolScript.absolutePath, "-MsiPath", sourceMsi.absolutePath, *options,
+            "-File", protocolScript.absolutePath, "-MsiPath", sourceMsi.absolutePath, *identityOptions, *options,
         ).apply {
             environment().remove("PSModulePath")
         }.redirectErrorStream(true).start()
@@ -1507,6 +1516,13 @@ fun publishWindowsMsiOutput(release: Boolean) {
     }
     runProtocolStep("registration")
     runProtocolStep("verification", "-VerifyOnly")
+
+    if (windowsWatchPartyTest) {
+        val testOutput = layout.buildDirectory.dir("compose/release-msis").get().asFile
+        testOutput.mkdirs()
+        Files.move(sourceMsi.toPath(), testOutput.resolve(finalMsi.name).toPath())
+        return
+    }
 
     if (sourceMsi.canonicalFile != finalMsi.canonicalFile) {
         sourceMsi.copyTo(finalMsi, overwrite = true)
