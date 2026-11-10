@@ -25,7 +25,6 @@ import com.nuvio.app.features.details.components.DetailHeroMetaBadge
 import com.nuvio.app.features.details.components.ImdbRatingSourceLabel
 import com.nuvio.app.features.details.components.ImdbYellow
 import com.nuvio.app.features.details.components.RatingsRow
-import com.nuvio.app.features.details.components.formatOneDecimal
 import com.nuvio.app.features.details.formatRuntimeForDisplay
 import com.nuvio.app.features.home.MetaPreview
 import nuvio.composeapp.generated.resources.Res
@@ -59,9 +58,7 @@ internal fun HomeHeroMetaRows(
     val ratings = if (showMdbListRatings) item.externalRatings else emptyList()
     val imdbRating = item.imdbRating?.trim()
         ?.takeIf { showImdbRating && ratings.isEmpty() }
-        ?.toDoubleOrNull()
-        ?.takeIf { it > 0.0 }
-        ?.let(::formatOneDecimal)
+        ?.takeIf { raw -> raw.toDoubleOrNull()?.let { it > 0.0 } == true }
     val primaryImdbRating = imdbRating?.takeIf { !isSeries && badges.isEmpty() }
     val secondaryImdbRating = imdbRating?.takeIf { primaryImdbRating == null }
     val horizontalAlignment = if (isTablet) Alignment.Start else Alignment.CenterHorizontally

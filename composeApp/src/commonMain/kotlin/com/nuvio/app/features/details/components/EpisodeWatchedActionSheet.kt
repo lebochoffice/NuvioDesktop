@@ -29,7 +29,6 @@ import com.nuvio.app.features.details.MetaVideo
 import kotlinx.coroutines.launch
 import nuvio.composeapp.generated.resources.*
 import org.jetbrains.compose.resources.stringResource
-import com.nuvio.app.core.i18n.localizedEpisodeTitle
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -206,7 +205,7 @@ private fun EpisodeActionSheetHeader(
         verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
         Text(
-            text = localizedEpisodeTitle(episode.title, episode.episode) ?: episode.title,
+            text = episode.title,
             style = MaterialTheme.typography.titleLarge,
             color = MaterialTheme.colorScheme.onSurface,
             fontWeight = FontWeight.SemiBold,

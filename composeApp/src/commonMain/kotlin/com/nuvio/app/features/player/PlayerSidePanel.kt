@@ -44,11 +44,9 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
-import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import com.nuvio.app.core.ui.NuvioLoadingIndicator
 import com.nuvio.app.core.ui.PlatformBackHandler
@@ -67,14 +65,12 @@ internal fun PlayerSidePanel(
     visible: Boolean,
     onDismiss: () -> Unit,
     width: Dp = 520.dp,
-    modal: Boolean = true,
     modifier: Modifier = Modifier,
     content: @Composable ColumnScope.() -> Unit,
 ) {
     val tokens = MaterialTheme.nuvio
     val backgroundInteraction = remember { MutableInteractionSource() }
     val panelInteraction = remember { MutableInteractionSource() }
-    val slideDirection = if (LocalLayoutDirection.current == LayoutDirection.Ltr) 1 else -1
 
     PlatformBackHandler(enabled = visible, onBack = onDismiss)
 
@@ -87,42 +83,37 @@ internal fun PlayerSidePanel(
         BoxWithConstraints(
             modifier = Modifier
                 .fillMaxSize()
-                .then(
-                    if (modal) {
-                        Modifier
-                            .background(Color.Black.copy(alpha = 0.34f))
-                            .clickable(
-                                interactionSource = backgroundInteraction,
-                                indication = null,
-                                onClick = onDismiss,
-                            )
-                    } else {
-                        Modifier
-                    },
+                .background(Color.Black.copy(alpha = 0.34f))
+                .clickable(
+                    interactionSource = backgroundInteraction,
+                    indication = null,
+                    onClick = onDismiss,
                 ),
         ) {
             val resolvedWidth = minOf(maxWidth, width)
             val shape = RoundedCornerShape(topStart = 16.dp, bottomStart = 16.dp)
 
-            Column(
-                modifier = Modifier
-                    .align(Alignment.CenterEnd)
-                    .animateEnterExit(
-                        enter = slideInHorizontally(tween(250)) { it * slideDirection },
-                        exit = slideOutHorizontally(tween(200)) { it * slideDirection },
-                    )
-                    .width(resolvedWidth)
-                    .fillMaxHeight()
-                    .clip(shape)
-                    .background(tokens.colors.surfaceElevated)
-                    .clickable(
-                        interactionSource = panelInteraction,
-                        indication = null,
-                        onClick = {},
-                    )
-                    .windowInsetsPadding(WindowInsets.navigationBars.only(WindowInsetsSides.End)),
-                content = content,
-            )
+            AnimatedVisibility(
+                visible = visible,
+                enter = slideInHorizontally(tween(250)) { it },
+                exit = slideOutHorizontally(tween(200)) { it },
+                modifier = Modifier.align(Alignment.CenterEnd),
+            ) {
+                Column(
+                    modifier = Modifier
+                        .width(resolvedWidth)
+                        .fillMaxHeight()
+                        .clip(shape)
+                        .background(tokens.colors.surfaceElevated)
+                        .clickable(
+                            interactionSource = panelInteraction,
+                            indication = null,
+                            onClick = {},
+                        )
+                        .windowInsetsPadding(WindowInsets.navigationBars.only(WindowInsetsSides.End)),
+                    content = content,
+                )
+            }
         }
     }
 }

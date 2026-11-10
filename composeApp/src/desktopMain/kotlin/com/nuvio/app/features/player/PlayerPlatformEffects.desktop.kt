@@ -10,7 +10,6 @@ import androidx.compose.ui.unit.IntSize
 import com.nuvio.app.features.player.desktop.DesktopHostOs
 import com.nuvio.app.features.player.desktop.DesktopPlayerPictureInPicture
 import com.nuvio.app.features.player.desktop.NativePlayerBridge
-import com.nuvio.app.features.updater.DesktopWindowsForkUpdate
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -54,9 +53,7 @@ actual fun ManagePlayerPictureInPicture(
     }
 
     DisposableEffect(Unit) {
-        DesktopWindowsForkUpdate.playerOpen = true
         onDispose {
-            DesktopWindowsForkUpdate.playerOpen = false
             DesktopPlayerPictureInPicture.clear()
         }
     }

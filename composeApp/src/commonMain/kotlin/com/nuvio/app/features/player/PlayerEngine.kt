@@ -36,7 +36,6 @@ interface PlayerEngineController {
         hasActiveSubtitle: Boolean,
         useCustomSubtitles: Boolean = false,
     ) {}
-    fun setSubtitleVisible(visible: Boolean) {}
     fun setSubtitleDelayMs(delayMs: Int) {}
     fun configureIosVideoOutput(settings: PlayerSettingsUiState) {}
     fun updateNowPlayingMetadata(info: PlayerNowPlayingInfo) {}
@@ -81,11 +80,6 @@ enum class PlayerControlsAction {
     DoubleTapSeekBack,
     DoubleTapSeekForward,
 }
-
-data class PlayerControlSubtitleFont(
-    val id: String,
-    val label: String,
-)
 
 data class PlayerControlChapter(
     val startMs: Long,
@@ -176,6 +170,7 @@ data class PlayerControlsState(
     val subtitleBuiltInTabLabel: String = "Built-in",
     val subtitleAddonsTabLabel: String = "Addons",
     val subtitleStyleTabLabel: String = "Style",
+    val customSubtitleStyleLabel: String = "Use custom styling",
     val forcedLabel: String = "Forced",
     val noneLabel: String = "None",
     val fetchSubtitlesLabel: String = "Tap to fetch subtitles",
@@ -193,19 +188,6 @@ data class PlayerControlsState(
     val colorLabel: String = "Color",
     val textOpacityLabel: String = "Text Opacity",
     val outlineColorLabel: String = "Outline Color",
-    val fontLabel: String = "Font",
-    val backgroundColorLabel: String = "Background Color",
-    val backgroundOpacityLabel: String = "Background opacity",
-    val fontImportLabel: String = "Import font",
-    val fontImportHint: String = "",
-    val fontImportError: String = "",
-    val doneLabel: String = "Done",
-    val fontRemoveLabel: String = "Remove {name}",
-    val subtitleFontImportFailed: Boolean = false,
-    val shadowLabel: String = "Drop shadow",
-    val shadowOpacityLabel: String = "Shadow opacity",
-    val shadowSizeLabel: String = "Shadow size",
-    val subtitleFonts: List<PlayerControlSubtitleFont> = emptyList(),
     val noSubtitleLinesFoundLabel: String = "No subtitle lines found",
     val resetDefaultsLabel: String = "Reset Defaults",
     val onLabel: String = "On",
@@ -291,6 +273,7 @@ data class PlayerControlsState(
     val isLoadingAddonSubtitles: Boolean = false,
     val selectedAddonSubtitleId: String = "",
     val useCustomSubtitles: Boolean = false,
+    val customSubtitleStylingEnabled: Boolean = true,
     val subtitleStyle: SubtitleStyleState = SubtitleStyleState.DEFAULT,
     val subtitleDelayMs: Int = 0,
     val hasSelectedAddonSubtitle: Boolean = false,
