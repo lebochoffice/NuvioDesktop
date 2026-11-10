@@ -17,6 +17,55 @@ function Close-MsiView($View) {
     finally { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($View) }
 }
 
+
+# WiX can generate the same component IDs for identical paths relative to
+# INSTALLDIR even when the installed products have different directories.
+function Set-A40MsiComponentIdentity($Database) {
+    $property = $Database.OpenView('SELECT `Value` FROM `Property` WHERE `Property` = ''NUVIOA40COMPONENTIDENTITY''')
+    try {
+        [void]$property.Execute()
+        $marker = $property.Fetch()
+        if ($marker) {
+            try { throw 'The A40 component identity was already authored.' }
+            finally { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($marker) }
+        }
+    } finally { Close-MsiView $property }
+
+    $view = $Database.OpenView('SELECT `ComponentId` FROM `Component`')
+    try {
+        [void]$view.Execute()
+        $ids = @(while ($row = $view.Fetch()) {
+            try {
+                if (!$row.IsNull(1)) { ([guid]$row.StringData(1)).ToString('B').ToUpperInvariant() }
+            } finally { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($row) }
+        })
+    } finally { Close-MsiView $view }
+    if (!$ids.Count -or ($ids | Sort-Object -Unique).Count -ne $ids.Count) {
+        throw 'Invalid component identity set in the A40 MSI.'
+    }
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try {
+        $changes = @(foreach ($old in $ids) {
+            # UUIDv8, deterministically namespaced for future A40 upgrades.
+            $hash = [BitConverter]::ToString($sha256.ComputeHash([Text.Encoding]::ASCII.GetBytes("Nuvio-A40-Fork/e3bc93a6-7e5c-4a95-a902-bdc61b8324e3/$old"))).Replace('-', '')
+            $hex = $hash.Substring(0,12) + '8' + $hash.Substring(13,3) + '8' + $hash.Substring(17,15)
+            @{ Old = $old; New = ([guid]::ParseExact($hex, 'N')).ToString('B').ToUpperInvariant() }
+        })
+    } finally { $sha256.Dispose() }
+    if (($changes.New | Sort-Object -Unique).Count -ne $ids.Count -or @($changes.New | Where-Object { $_ -in $ids }).Count) {
+        throw 'Component identity collision in the A40 MSI.'
+    }
+    foreach ($change in $changes) {
+        $sql = 'UPDATE `Component` SET `ComponentId` = ''{0}'' WHERE `ComponentId` = ''{1}''' -f $change.New, $change.Old
+        $update = $Database.OpenView($sql)
+        try { [void]$update.Execute() }
+        finally { Close-MsiView $update }
+    }
+    $insert = $Database.OpenView('INSERT INTO `Property` (`Property`, `Value`) VALUES (''NUVIOA40COMPONENTIDENTITY'', ''1'')')
+    try { [void]$insert.Execute() }
+    finally { Close-MsiView $insert }
+}
+
 function Assert-FamilyMsiIdentity($Properties, [string]$Template, [object[]]$UpgradeRules, [string]$ExpectedProductVersion, [switch]$BeforeUpgradePolicy) {
     $upgradeCode = [guid]::Empty
     $productCode = [guid]::Empty
@@ -26,6 +75,9 @@ function Assert-FamilyMsiIdentity($Properties, [string]$Template, [object[]]$Upg
         ![guid]::TryParseExact($Properties['ProductCode'], 'B', [ref]$productCode) -or
         $productCode -eq [guid]::Empty -or $productCode -eq $upgradeCode) {
         throw 'Unexpected Nuvio Family ProductName, UpgradeCode or ProductCode.'
+    }
+    if ($A40Fork -and !$BeforeUpgradePolicy -and $Properties['NUVIOA40COMPONENTIDENTITY'] -cne '1') {
+        throw 'Missing A40 component identity.'
     }
     if ($Properties['ALLUSERS'] -cne '1') { throw 'Nuvio Family requires a per-machine MSI.' }
     $version = $Properties['ProductVersion']

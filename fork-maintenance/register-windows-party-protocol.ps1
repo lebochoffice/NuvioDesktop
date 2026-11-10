@@ -156,7 +156,7 @@ try {
         $record = $installer.CreateRecord(2)
         try {
             $record.StringData(1) = $familyMsiLaunchCondition
-            $record.StringData(2) = 'An equal or newer Nuvio Family version is already installed.'
+            $record.StringData(2) = "An equal or newer $familyMsiProductName version is already installed."
             Invoke-MsiStatement $db 'INSERT INTO `LaunchCondition` (`Condition`, `Description`) VALUES (?, ?)' $record
         } finally { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($record) }
 
@@ -171,6 +171,10 @@ try {
                 throw "Unexpected LaunchConditions or occupied sequence slot in $table."
             }
             Invoke-MsiStatement $db ('INSERT INTO `{0}` (`Action`, `Sequence`) VALUES (''LaunchConditions'', {1})' -f $table, $launchSequence)
+        }
+        if ($A40Fork) {
+            Invoke-MsiStatement $db 'UPDATE `Property` SET `Value` = ''Nuvio A40-Fork'' WHERE `Property` = ''ProductName'''
+            Set-A40MsiComponentIdentity $db
         }
         $null = Get-VerifiedFamilyMsiProperties $db
 
@@ -195,7 +199,6 @@ try {
         }
         if ($A40Fork) {
             $stage = 'isolating A40 product name and desktop shortcut'
-            Invoke-MsiStatement $db 'UPDATE `Property` SET `Value` = ''Nuvio A40-Fork'' WHERE `Property` = ''ProductName'''
             Invoke-MsiStatement $db 'INSERT INTO `Directory` (`Directory`, `Directory_Parent`, `DefaultDir`) VALUES (''A40DesktopFolder'', ''DesktopFolder'', ''Nuvio-A40-Fork'')'
             Invoke-MsiStatement $db 'UPDATE `Shortcut` SET `Directory_` = ''A40DesktopFolder'' WHERE `Directory_` = ''DesktopFolder'''
         }
