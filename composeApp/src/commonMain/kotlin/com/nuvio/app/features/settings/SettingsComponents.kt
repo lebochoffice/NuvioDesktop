@@ -79,7 +79,7 @@ private fun SettingsCard(
     Surface(
         modifier = modifier.fillMaxWidth(),
         color = tokens.colors.surface,
-        shape = tokens.shapes.card,
+        shape = if (isTablet) RoundedCornerShape(NuvioTokens.Radius.xl) else tokens.shapes.compactCard,
         border = BorderStroke(
             tokens.borders.hairline,
             tokens.colors.borderSubtle,
@@ -214,9 +214,7 @@ internal fun SettingsSection(
     val tokens = MaterialTheme.nuvio
     Column {
         Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = NuvioTokens.Radius.card),
+            modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {

@@ -41,7 +41,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import co.touchlab.kermit.Logger
@@ -125,7 +124,6 @@ internal fun PlayerScreenRuntime.openPartyPanel() {
     showPartyPanel = true
     if (!isDesktop) controlsVisible = false
     partyPanelToken += 1L
-    controlsActivityTick += 1
 }
 
 internal fun PlayerScreenRuntime.switchPartyMedia() {
@@ -909,12 +907,7 @@ private fun PlayerScreenRuntime.clearPartyNudge(playback: PartyPlayback? = Party
 }
 
 @Composable
-internal fun BoxScope.RenderParty(
-    runtime: PlayerScreenRuntime,
-    panelWidth: Dp,
-    modal: Boolean,
-    panelVisible: Boolean,
-) {
+internal fun BoxScope.RenderParty(runtime: PlayerScreenRuntime) {
     val partyState by PartyRepository.state.collectAsStateWithLifecycle()
     val playback by PartyRepository.playback.collectAsStateWithLifecycle()
     val unread by PartyChat.unread.collectAsStateWithLifecycle()
@@ -935,9 +928,7 @@ internal fun BoxScope.RenderParty(
             )
         }
         PartyPanel(
-            visible = panelVisible,
-            width = panelWidth,
-            modal = modal,
+            visible = showPartyPanel,
             state = partyState,
             showChat = showPartyChat,
             onShowChatChange = { showPartyChat = it },

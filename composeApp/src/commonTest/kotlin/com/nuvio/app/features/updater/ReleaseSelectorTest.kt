@@ -5,31 +5,6 @@ import kotlin.test.Test
 
 class ReleaseSelectorTest {
     @Test
-    fun `fork status does not fall back to a test build or an official release`() {
-        val releases = listOf(
-            release("v0.1.65-watchparty", prerelease = true),
-            release("v0.1.64-upstream-0.1.35-test"),
-            release("v0.1.35"),
-        )
-
-        assertEquals(null, ReleaseSelector.latestForkRelease(releases))
-    }
-
-    @Test
-    fun `fork tags use numeric ordering and exclude drafts prereleases and upstream tags`() {
-        val releases = listOf(
-            release("v0.2.0-watchparty", draft = true),
-            release("v0.1.20-watchparty", prerelease = true),
-            release("0.1.35-alpha"),
-            release("v0.1.9-watchparty"),
-            release("v0.1.10-watchparty"),
-        )
-
-        assertEquals("v0.1.10-watchparty", ReleaseSelector.latestForkRelease(releases)?.tagName)
-        assertEquals(null, ReleaseSelector.forkVersion("0.1.35-alpha"))
-    }
-
-    @Test
     fun `stable channel excludes GitHub and tag prereleases`() {
         val releases = listOf(
             release("1.1.0-beta.2", prerelease = true),
