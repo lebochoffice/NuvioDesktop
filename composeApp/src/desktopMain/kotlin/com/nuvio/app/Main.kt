@@ -42,16 +42,11 @@ import com.nuvio.app.features.profiles.ProfileRepository
 import com.nuvio.app.features.settings.AppIconRepository
 import com.nuvio.app.features.settings.applyDesktopRendererPreference
 import com.nuvio.app.features.settings.transparentPreviewResource
-import com.nuvio.app.features.updater.DesktopWindowsForkUpdate
-import com.nuvio.app.features.updater.ForkInstallResult
-import nuvio.composeapp.generated.resources.*
-import org.jetbrains.compose.resources.getString
 import java.awt.Desktop
 import java.awt.Frame
 import javax.imageio.ImageIO
 import java.awt.Color as AwtColor
 import javax.swing.JComponent
-import javax.swing.JOptionPane
 
 private val NuvioDesktopNativeBackground = AwtColor(0x0D, 0x0D, 0x0D)
 private const val MacosDarkAquaAppearance = "NSAppearanceNameDarkAqua"
@@ -59,16 +54,6 @@ private const val MacosDarkAquaAppearance = "NSAppearanceNameDarkAqua"
 @OptIn(ExperimentalComposeUiApi::class)
 fun main(args: Array<String>) {
     val isWindows = DesktopHostOs.current == DesktopHostOs.WINDOWS
-    val forkUpdater = DesktopWindowsForkUpdate.takeIf { isWindows && it.installationReleased && it.canDownload }
-    val updateLease = if (forkUpdater != null) {
-        try {
-            forkUpdater.holdStartupLease()
-        } catch (_: java.io.IOException) {
-            JOptionPane.showMessageDialog(null, "Nuvio Family update is running, or the update folder is unavailable.")
-            return
-        }
-    } else null
-    if (updateLease != null) Runtime.getRuntime().addShutdownHook(Thread { updateLease.close() })
     val protocolLaunch = isWindows && args.firstOrNull() == "--party-link"
     val windowsInvitation = if (protocolLaunch) {
         val uri = args.getOrNull(1)?.takeIf { args.size == 2 } ?: return
@@ -99,28 +84,6 @@ fun main(args: Array<String>) {
     DiscordPresenceManager.start()
 
     application {
-        val closeDesktop: () -> Unit = {
-            windowsLinks?.close()
-            P2pStreamingEngine.shutdown()
-            DiscordPresenceManager.shutdown()
-            SentryInitializer.close()
-            exitApplication()
-        }
-        DisposableEffect(Unit) {
-            forkUpdater?.closeApplication = closeDesktop
-            onDispose { forkUpdater?.closeApplication = null }
-        }
-        LaunchedEffect(Unit) {
-            val (outcome, exitCode) = runCatching { forkUpdater?.takeResult() }.getOrNull() ?: return@LaunchedEffect
-            val message = getString(when (outcome) {
-                ForkInstallResult.Installed -> Res.string.fork_updates_installed_on_start
-                ForkInstallResult.RestartRequired -> Res.string.fork_updates_restart_windows
-                ForkInstallResult.Cancelled -> Res.string.fork_updates_cancelled
-                else -> Res.string.fork_updates_install_failed
-            })
-            val detail = exitCode?.let { "\n" + getString(Res.string.fork_updates_exit_code, it) }.orEmpty()
-            JOptionPane.showMessageDialog(null, message + detail, "Nuvio Family", JOptionPane.INFORMATION_MESSAGE)
-        }
         val appIconState by AppIconRepository.state.collectAsState()
         val smokePlayerUrl = (
             System.getProperty("nuvio.desktop.smokePlayerUrl")
@@ -172,7 +135,13 @@ fun main(args: Array<String>) {
         val fullscreenController = remember { DesktopAppFullscreenController() }
 
         SwingWindow(
-            onCloseRequest = closeDesktop,
+            onCloseRequest = {
+                windowsLinks?.close()
+                P2pStreamingEngine.shutdown()
+                DiscordPresenceManager.shutdown()
+                SentryInitializer.close()
+                exitApplication()
+            },
             title = if (smokePlayerUrl == null) "Nuvio" else "Nuvio Player Smoke",
             state = windowState,
             icon = painterResource(appIconState.selected.transparentPreviewResource),

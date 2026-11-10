@@ -60,8 +60,8 @@ $zip = [IO.Compression.ZipFile]::OpenRead($jars[0].FullName)
 try {
     $required = @('native/windows/player_bridge.dll','native/windows/libmpv-2.dll','native/windows/WebView2Loader.dll','native/windows/nuvio_engine.dll','native/windows/runtime-files.txt')
     foreach ($entry in $required) { if (-not $zip.GetEntry($entry)) { throw "Packaged native runtime entry missing: $entry" } }
-    foreach ($name in @('windows-msi-identity.ps1','windows-update-trust.ps1','verify-windows-update.ps1','install-windows-update.ps1')) {
-        if (-not $zip.GetEntry("fork-updater/$name")) { throw "Packaged update verifier entry missing: $name" }
+    if ($zip.Entries | Where-Object { $_.FullName.StartsWith('fork-updater/', [StringComparison]::OrdinalIgnoreCase) }) {
+        throw 'Unexpected in-app updater resources in the packaged application'
     }
     $partyJs = $zip.GetEntry('player-ui/party.js')
     if (-not $partyJs) { throw 'Party overlay missing from packaged application' }

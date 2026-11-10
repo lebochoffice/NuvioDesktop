@@ -111,7 +111,6 @@ import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 import nuvio.composeapp.generated.resources.*
 import org.jetbrains.compose.resources.stringResource
-import com.nuvio.app.core.i18n.localizedEpisodeTitle
 
 // ---------------------------------------------------------------------------
 // Streams Screen
@@ -746,7 +745,7 @@ private fun EpisodeHeroBlock(
             Spacer(modifier = Modifier.height(2.dp))
             // Episode title
             Text(
-                text = localizedEpisodeTitle(episodeTitle, episodeNumber) ?: episodeTitle,
+                text = episodeTitle,
                 style = MaterialTheme.typography.titleLarge.copy(
                     fontSize = 24.sp,
                     fontWeight = FontWeight.Bold,

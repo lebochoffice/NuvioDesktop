@@ -43,11 +43,11 @@ need_text composeApp/build.gradle.kts 'INTRODB_API_URL missing or not https'
 # WebView2 loader guard: SDK path relative to the root, staged runtime checked.
 need_text composeApp/build.gradle.kts '?.let { rootProject.file(it) }'
 need_text composeApp/build.gradle.kts 'WebView2Loader.dll missing from the staged player runtime'
-# Fork updater: only this fork's releases, checksum required.
-need_text composeApp/src/desktopMain/kotlin/com/nuvio/app/features/updater/AppUpdaterPlatform.desktop.kt 'forkReleaseOwner = "lebochoffice"'
-need_text composeApp/src/desktopMain/kotlin/com/nuvio/app/features/updater/AppUpdaterPlatform.desktop.kt 'actual val requiresUpdateChecksum: Boolean = true'
-# Fork-only automation.
-for f in .github/workflows/fork-windows-msi.yml .github/workflows/fork-upstream-review.yml .github/workflows/fork-release.yml fork-maintenance/verify-msi.ps1 fork-maintenance/build-ci.ps1; do need_file "$f"; done
+# Local packaging must preserve the isolated Family identity and leave desktop updates manual.
+need_text composeApp/build.gradle.kts 'windowsMsiUpgradeUuid = "dfe71c5b-c265-42ce-a025-396193575a13"'
+need_text composeApp/src/desktopMain/kotlin/com/nuvio/app/core/build/AppFeaturePolicy.desktop.kt 'inAppUpdaterEnabled: Boolean = false'
+need_text composeApp/src/desktopMain/kotlin/com/nuvio/app/features/updater/AppUpdaterPlatform.desktop.kt 'canInstallDownloadedUpdate(): Boolean = false'
+for f in .github/workflows/fork-windows-msi.yml fork-maintenance/verify-msi.ps1 fork-maintenance/build-ci.ps1; do need_file "$f"; done
 
 if (( failures > 0 )); then
   echo "Fork invariants failed ($failures). The upstream update must not be merged as is." >&2

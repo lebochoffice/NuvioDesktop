@@ -193,6 +193,13 @@ object SkipIntroRepository {
         return chosen.values.toList()
     }
 
+    private fun segmentCategory(type: String): String? = when (type.lowercase()) {
+        "intro", "op", "mixed-op" -> "opening"
+        "outro", "ed", "mixed-ed", "credits", "ending" -> "ending"
+        "recap" -> "recap"
+        else -> null
+    }
+
     private suspend fun fetchFromIntroDb(imdbId: String, season: Int, episode: Int): List<SkipInterval> {
         return try {
             val data = SkipIntroApi.getIntroDbSegments(imdbId, season, episode)
@@ -211,7 +218,7 @@ object SkipIntroRepository {
         if (this == null) return null
         val start = startSec ?: startMs?.let { it / 1000.0 }
         val end = endSec ?: endMs?.let { it / 1000.0 }
-        if (start == null || end == null || !start.isFinite() || !end.isFinite() || start < 0 || end <= start) return null
+        if (start == null || end == null || end <= start) return null
         return SkipInterval(startTime = start, endTime = end, type = type, provider = "introdb")
     }
 
@@ -258,9 +265,7 @@ object SkipIntroRepository {
                     val endTime = sorted.getOrNull(i + 1)?.at ?: Double.MAX_VALUE
                     val type = when (ts.type.name.lowercase()) {
                         "intro", "new intro" -> "op"
-                        "credits", "new credits" -> "ed"
-                        "mixed intro" -> "mixed-op"
-                        "mixed credits" -> "mixed-ed"
+                        "credits" -> "ed"
                         "recap" -> "recap"
                         else -> return@mapIndexedNotNull null
                     }
@@ -345,11 +350,4 @@ internal suspend fun resolveMovieSkipImdbId(
             else -> null
         }?.trim()?.takeIf { imdbPattern.matches(it) }
     }
-}
-
-internal fun segmentCategory(type: String): String? = when (type.lowercase()) {
-    "intro", "op", "mixed-op" -> "opening"
-    "outro", "ed", "mixed-ed", "credits", "ending" -> "ending"
-    "recap" -> "recap"
-    else -> null
 }

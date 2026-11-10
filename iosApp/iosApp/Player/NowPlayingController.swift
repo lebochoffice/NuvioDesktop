@@ -14,7 +14,6 @@ final class PlayerNowPlayingController {
         var positionMs: Int64 = 0
         var durationMs: Int64 = 0
         var playbackSpeed: Float = 1.0
-        var sampledAt: TimeInterval = ProcessInfo.processInfo.systemUptime
     }
 
     private struct RemoteCommandTarget {
@@ -25,7 +24,6 @@ final class PlayerNowPlayingController {
     private weak var owner: MPVPlayerViewController?
     private var metadata = Metadata()
     private var playbackState = PlaybackState()
-    private var publishedPlaybackState = PlaybackState()
     private var currentArtworkImage: UIImage?
     private var currentArtworkURL: String?
     private var artworkTask: URLSessionDataTask?
@@ -53,6 +51,7 @@ final class PlayerNowPlayingController {
         if metadata.title == normalizedTitle,
            metadata.subtitle == normalizedSubtitle,
            currentArtworkURL == normalizedArtworkUrl {
+            applyNowPlayingInfo()
             return
         }
 
@@ -102,8 +101,7 @@ final class PlayerNowPlayingController {
         positionMs: Int64,
         durationMs: Int64,
         isPlaying: Bool,
-        playbackSpeed: Float,
-        force: Bool = false
+        playbackSpeed: Float
     ) {
         let nextState = PlaybackState(
             isPlaying: isPlaying,
@@ -111,16 +109,15 @@ final class PlayerNowPlayingController {
             durationMs: max(0, durationMs),
             playbackSpeed: playbackSpeed > 0 ? playbackSpeed : 1.0
         )
-        let elapsedMs = (nextState.sampledAt - publishedPlaybackState.sampledAt) * 1000
-        let expectedPositionMs = Double(publishedPlaybackState.positionMs) +
-            (publishedPlaybackState.isPlaying ? elapsedMs * Double(publishedPlaybackState.playbackSpeed) : 0)
-        let positionJumped = abs(Double(nextState.positionMs) - expectedPositionMs) >= 1_000
-        let shouldPublish = force || playbackState.isPlaying != nextState.isPlaying ||
+        let positionChanged = abs(nextState.positionMs - playbackState.positionMs) >= 1_000
+        guard playbackState.isPlaying != nextState.isPlaying ||
             playbackState.durationMs != nextState.durationMs ||
             playbackState.playbackSpeed != nextState.playbackSpeed ||
-            positionJumped
+            positionChanged else {
+            return
+        }
+
         playbackState = nextState
-        guard shouldPublish else { return }
         applyNowPlayingInfo()
     }
 
@@ -131,7 +128,6 @@ final class PlayerNowPlayingController {
         currentArtworkURL = nil
         metadata = Metadata()
         playbackState = PlaybackState()
-        publishedPlaybackState = PlaybackState()
         DispatchQueue.main.async {
             MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
         }
@@ -165,8 +161,6 @@ final class PlayerNowPlayingController {
             }
 
             MPNowPlayingInfoCenter.default().nowPlayingInfo = info
-            self.publishedPlaybackState = self.playbackState
-            self.publishedPlaybackState.sampledAt = ProcessInfo.processInfo.systemUptime
         }
 
         if Thread.isMainThread {

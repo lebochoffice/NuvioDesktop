@@ -24,7 +24,7 @@ jobs:
       - name: Check browser bridge is present
         shell: bash
         run: test -f browser-site/package-lock.json
-      - name: Fork invariants (watch party, TorBox HLS, invite link, intro guard, fork updater)
+      - name: Fork invariants (watch party, TorBox HLS, invite link, intro guard, MSI isolation)
         shell: bash
         run: bash fork-maintenance/check-fork-invariants.sh
       - uses: actions/setup-node@v6
@@ -77,11 +77,11 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'WebView2 SDK download failed' }
           if (-not (Test-Path -LiteralPath (Join-Path $sdk 'build/native/x64/WebView2Loader.dll.lib'))) { throw 'WebView2 x64 library missing' }
           "NUVIO_WEBVIEW2_DIR=$sdk" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-      - name: Test party, updater and fork logic
+      - name: Test party and fork logic
         shell: pwsh
         run: |
-          .\gradlew.bat :composeApp:desktopTest --tests '*Party*Test' --tests '*Fork*UpdateTest' --tests '*AppUpdate*Test' --tests '*UpdateChannelTest' --tests '*ReleaseSelector*' --tests '*VersionUtils*' "-Pnuvio.webview2.dir=$env:NUVIO_WEBVIEW2_DIR" '-Dorg.gradle.jvmargs=-Xmx4g' '-Pkotlin.daemon.jvmargs=-Xmx3g' --max-workers=2 --no-configuration-cache --console=plain --stacktrace
-          if ($LASTEXITCODE -ne 0) { throw 'Party/updater tests failed' }
+          .\gradlew.bat :composeApp:desktopTest --tests '*Party*Test' "-Pnuvio.webview2.dir=$env:NUVIO_WEBVIEW2_DIR" '-Dorg.gradle.jvmargs=-Xmx4g' '-Pkotlin.daemon.jvmargs=-Xmx3g' --max-workers=2 --no-configuration-cache --console=plain --stacktrace
+          if ($LASTEXITCODE -ne 0) { throw 'Party tests failed' }
       - name: Build MSI only when manually requested on reviewed Dev
         if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/Dev'
         shell: pwsh

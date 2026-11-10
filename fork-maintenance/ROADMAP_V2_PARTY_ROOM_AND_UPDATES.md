@@ -1,3 +1,5 @@
+> Historischer Plan. Der automatische Updater und die darin beschriebenen GitHub-Workflows wurden eingestellt. Für aktuelle Builds gilt die [manuelle MSI-Anleitung](README.md).
+
 # Roadmap V2: Party-Room und Upstream-Update-Audit
 
 Stand 04.11.2026:

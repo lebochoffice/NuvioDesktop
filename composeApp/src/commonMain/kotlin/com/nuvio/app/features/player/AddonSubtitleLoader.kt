@@ -4,10 +4,8 @@ import com.nuvio.app.features.addons.AddonRepository
 import com.nuvio.app.features.addons.AddonResource
 import com.nuvio.app.features.addons.buildAddonResourceUrl
 import com.nuvio.app.features.addons.enabledAddons
-import com.nuvio.app.features.addons.encodeAddonPathSegment
 import com.nuvio.app.features.addons.fetchAddonResponseText
 import com.nuvio.app.features.servers.ServerItemRef
-import com.nuvio.app.features.streams.StreamBehaviorHints
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -33,65 +31,7 @@ data class SubtitleAddonRequest(
     val addonName: String,
 )
 
-data class SubtitleRequestExtras(
-    val filename: String? = null,
-    val videoSize: Long? = null,
-    val videoHash: String? = null,
-) {
-    fun toPathSegment(): String? = buildList {
-        videoHash?.trim()?.takeIf(String::isNotBlank)?.let { hash ->
-            add("videoHash=${hash.encodeAddonPathSegment()}")
-        }
-        videoSize?.takeIf { it > 0L }?.let { size ->
-            add("videoSize=$size")
-        }
-        filename?.trim()?.takeIf(String::isNotBlank)?.let { name ->
-            add("filename=${name.encodeAddonPathSegment()}")
-        }
-    }.joinToString(separator = "&").ifBlank { null }
-
-    companion object {
-        fun from(hints: StreamBehaviorHints): SubtitleRequestExtras? =
-            SubtitleRequestExtras(
-                filename = hints.filename,
-                videoSize = hints.videoSize,
-                videoHash = hints.videoHash,
-            ).takeIf { it.toPathSegment() != null }
-
-        /**
-         * Creates extras from stream behavior hints with a filename fallback
-         * derived from the playback URL (same pattern as NuvioTV's
-         * `streamFilenameFromUrl`).
-         */
-        fun from(hints: StreamBehaviorHints, sourceUrl: String?): SubtitleRequestExtras? {
-            val filename = hints.filename ?: sourceUrl?.let(::sourceFilenameFromUrl)
-            return SubtitleRequestExtras(
-                filename = filename,
-                videoSize = hints.videoSize,
-                videoHash = hints.videoHash,
-            ).takeIf { it.toPathSegment() != null }
-        }
-    }
-}
-
-internal fun buildSubtitleRequestUrl(
-    manifestUrl: String,
-    type: String,
-    videoId: String,
-    extras: SubtitleRequestExtras? = null,
-): String = buildAddonResourceUrl(
-    manifestUrl = manifestUrl,
-    resource = "subtitles",
-    type = canonicalSubtitleType(type),
-    id = videoId,
-    extraPathSegment = extras?.toPathSegment(),
-)
-
-internal fun addonSubtitleRequests(
-    type: String,
-    videoId: String,
-    extras: SubtitleRequestExtras? = null,
-): List<SubtitleAddonRequest> {
+internal fun addonSubtitleRequests(type: String, videoId: String): List<SubtitleAddonRequest> {
     if (ServerItemRef.isServerId(videoId)) return emptyList()
     val requestType = canonicalSubtitleType(type)
     return AddonRepository.uiState.value.addons.enabledAddons().mapNotNull { addon ->
@@ -101,7 +41,7 @@ internal fun addonSubtitleRequests(
                     resource.supportsSubtitleType(requestType, videoId)
             }) return@mapNotNull null
         SubtitleAddonRequest(
-            url = buildSubtitleRequestUrl(manifest.transportUrl, requestType, videoId, extras),
+            url = buildAddonResourceUrl(manifest.transportUrl, "subtitles", requestType, videoId),
             addonId = manifest.id,
             addonName = addon.displayTitle,
         )
@@ -136,9 +76,8 @@ private suspend fun parseAddonSubtitles(response: String, request: SubtitleAddon
         val url = obj.stringValue("url") ?: return@mapIndexedNotNull null
         val language = listOf("lang", "language", "languageCode", "locale", "label")
             .firstNotNullOfOrNull(obj::stringValue) ?: "unknown"
-        val addonProvidedId = obj.stringValue("id")
         AddonSubtitle(
-            id = addonProvidedId ?: "${request.addonId}_$index",
+            id = obj.stringValue("id") ?: "${request.addonId}_$index",
             url = url,
             language = normalizeLanguageCode(language) ?: language,
             display = getString(
@@ -147,7 +86,6 @@ private suspend fun parseAddonSubtitles(response: String, request: SubtitleAddon
                 request.addonName,
             ),
             addonName = request.addonName,
-            label = addonProvidedId?.takeIf { it != language && it != url },
         )
     }
 }
