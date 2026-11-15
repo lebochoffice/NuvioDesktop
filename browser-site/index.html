@@ -118,14 +118,21 @@
             <div class="group right">
               <span id="syncChip" class="sync-chip" hidden>Synchron</span>
               <button id="resync" type="button" class="icon-btn resync-btn" aria-label="Party-Zeit aktualisieren" title="Party-Zeit aktualisieren" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.35-5.65M20 4v4.5h-4.5"/></svg></button>
-              <label id="qualityWrap" class="quality" hidden><span class="sr-only">Qualität</span><select id="quality" aria-label="Videoqualität"></select></label>
               <button id="ctlSolo" class="solo-btn" type="button" aria-pressed="false" title="Lokal ohne Party-Synchronisierung weiterschauen">Allein schauen</button>
-              <div class="cc-group">
-                <button id="ctlSubtitles" class="icon-btn" type="button" aria-label="Untertitel" aria-haspopup="menu" aria-expanded="false" aria-controls="subtitleMenu"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="5.5" width="17" height="13" rx="2.5"/><path d="M10.5 10.2a2.2 2.2 0 1 0 0 3.6M16.5 10.2a2.2 2.2 0 1 0 0 3.6"/></svg></button>
-                <div id="subtitleMenu" class="menu" role="menu" aria-label="Untertitel" hidden></div>
-                <input id="subtitleFile" type="file" accept=".vtt,.srt,text/vtt" hidden>
+              <div id="playbackSettingsGroup" class="playback-settings-group">
+                <button id="ctlSettings" class="icon-btn" type="button" aria-label="Einstellungen" aria-expanded="false" aria-controls="playbackSettings"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m10 3-.6 2.6-2 .9L5 5.4 3 8.8l1.9 1.8v2.8L3 15.2l2 3.4 2.4-1.1 2 .9L10 21h4l.6-2.6 2-.9 2.4 1.1 2-3.4-1.9-1.8v-2.8L21 8.8l-2-3.4-2.4 1.1-2-.9L14 3z"/><circle cx="12" cy="12" r="3"/></svg></button>
+                <div id="playbackSettings" class="menu playback-settings" role="group" aria-labelledby="playbackSettingsTitle" hidden>
+                  <h3 id="playbackSettingsTitle">Wiedergabe-Einstellungen</h3>
+                  <label id="audioWrap" class="playback-setting"><span >Audiosprache</span><select id="audioTrack" aria-label="Audiosprache" disabled><option>Audio</option></select></label>
+                  <label id="qualityWrap" class="playback-setting"><span >Qualität</span><select id="quality" aria-label="Videoqualität" disabled><option>Qualität</option></select></label>
+                  <details id="subtitleOptions" class="playback-subtitles">
+                    <summary>Untertitel</summary>
+                    <div id="subtitleMenu" class="subtitle-options" role="group" aria-label="Untertitel"></div>
+                    <input id="subtitleFile" type="file" accept=".vtt,.srt,text/vtt" hidden>
+                  </details>
+                  <button id="openPartySettings" type="button" aria-haspopup="dialog" aria-controls="infoDrawer">Party-Einstellungen</button>
+                </div>
               </div>
-              <button id="ctlSettings" class="icon-btn" type="button" aria-label="Einstellungen" aria-haspopup="dialog" aria-expanded="false" aria-controls="infoDrawer"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m10 3-.6 2.6-2 .9L5 5.4 3 8.8l1.9 1.8v2.8L3 15.2l2 3.4 2.4-1.1 2 .9L10 21h4l.6-2.6 2-.9 2.4 1.1 2-3.4-1.9-1.8v-2.8L21 8.8l-2-3.4-2.4 1.1-2-.9L14 3z"/><circle cx="12" cy="12" r="3"/></svg></button>
               <button id="ctlFullscreen" class="icon-btn" type="button" aria-label="Vollbild"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/></svg></button>
             </div>
           </div>

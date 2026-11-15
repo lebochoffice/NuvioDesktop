@@ -308,10 +308,20 @@ internal fun PlayerScreenRuntime.currentPartyMedia(): PartyMedia = PartyMedia(
     ),
 )
 
-/** TorBox file of the current source: its own identity, a unique cloud match, or the host's manual link. */
+private val PlayerScreenRuntime.torboxSourceFilename: String?
+    get() = activeSourceFilename ?: activeStream?.behaviorHints?.filename ?: activeTorrentFilename
+
+private fun PlayerScreenRuntime.torboxAutoSourceKey(partyId: String?): String =
+    "$partyId|$partyKey|${activeTorrentInfoHash.orEmpty()}|${torboxSourceFilename.orEmpty()}|$activeTorrentFileIdx"
+
+/** The explicit host choice takes precedence over an automatic link for the current source. */
 internal val PlayerScreenRuntime.effectiveTorboxFile: com.nuvio.app.features.debrid.TorboxPartyFile?
-    get() = activeStream?.torboxPartyFile ?: torboxMappedFile?.takeIf { torboxMappedFor == torboxMappingKey() }
-        ?: torboxManualFile?.takeIf { torboxManualFor == partyKey }
+    get() {
+        val linked = torboxManualFile?.takeIf { torboxManualFor == partyKey }
+        if (!torboxLinkAuto && linked != null) return linked
+        return activeStream?.torboxPartyFile ?: torboxMappedFile?.takeIf { torboxMappedFor == torboxMappingKey() }
+            ?: linked?.takeIf { torboxAutoLinkedFor == torboxAutoSourceKey(PartyRepository.state.value.party?.id) }
+    }
 
 /** The host's shared video link, valid only for the title it was entered for. */
 internal val PlayerScreenRuntime.activeHostPartyHls: com.nuvio.app.features.party.PartyHostHls?
@@ -454,23 +464,34 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
     val browserSharing = sharingHost?.browserSharing == true
     val debridSettings by com.nuvio.app.features.debrid.DebridSettingsRepository.uiState.collectAsState()
     val torboxKey = debridSettings.apiKeyFor(com.nuvio.app.features.debrid.DebridProviders.Torbox.id)
-    // Addon stream without TorBox identity: look for exactly one matching file
-    // in the user's own TorBox cloud (by info hash), once per stream. Host only.
-    // Addon stream without TorBox identity: link a cloud file automatically
-    // (unique info hash, else exact title), once per stream; the host can
-    // change or remove it. A manual link always wins.
-    val autoKey = if (activeStream != null && activeStream?.torboxPartyFile == null && partyState.party?.isHost == true)
-        "$key|${activeTorrentInfoHash.orEmpty()}|${activeSourceFilename ?: activeStream?.behaviorHints?.filename.orEmpty()}" else null
-    LaunchedEffect(autoKey, torboxKey) {
-        if (autoKey == null || torboxKey.isBlank() || torboxAutoTriedFor == autoKey || torboxManualFor == key) return@LaunchedEffect
-        torboxAutoTriedFor = autoKey
+    // Sources with a file identity and manual links always take precedence.
+    val sourceFilename = torboxSourceFilename
+    val autoKey = activeStream?.takeIf { it.torboxPartyFile == null && sharingHost != null }
+        ?.let { torboxAutoSourceKey(partyId) }
+    LaunchedEffect(autoKey, torboxKey, torboxManualFor) {
+        if (autoKey == null || torboxKey.isBlank() || (torboxManualFor == key && !torboxLinkAuto) || effectiveTorboxFile != null) return@LaunchedEffect
+        val account = com.nuvio.app.features.debrid.torboxAccountFingerprint(torboxKey)
+        val attemptKey = "$autoKey|$account"
+        if (torboxAutoTriedFor == attemptKey) return@LaunchedEffect
+        torboxAutoStatus = "TorBox-Torrent-Inventar wird geprüft …"
         val media = currentPartyMedia()
-        val found = try {
-            com.nuvio.app.features.debrid.autoLinkTorboxCloud(torboxKey, activeTorrentInfoHash,
-                activeSourceFilename ?: activeStream?.behaviorHints?.filename, media.title, media.season, media.episode)
-        } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled } catch (_: Exception) { null }
-        if (found != null && torboxManualFor != key) {
-            torboxManualFile = found.first; torboxManualFor = key; torboxManualName = found.second; torboxLinkAuto = true
+        if (isSeries && (media.season == null || media.episode == null)) {
+            torboxAutoStatus = "Staffel oder Folge fehlt. Bitte Originaldatei manuell wählen."
+            return@LaunchedEffect
+        }
+        val year = metaUiState.meta?.takeIf { it.id == parentMetaId && !isSeries }?.releaseInfo?.trim()
+        val found = com.nuvio.app.features.debrid.autoLinkTorboxCloud(torboxKey, activeTorrentInfoHash,
+            sourceFilename, media.title, media.season, media.episode, releaseYear = year)
+        if (found.kind != com.nuvio.app.features.debrid.TorboxMatchKind.Unavailable) torboxAutoTriedFor = attemptKey
+        torboxAutoStatus = found.kind.message
+        val choice = found.choice
+        if (choice != null && (torboxManualFor != key || torboxLinkAuto)) {
+            torboxManualFile = choice.partyFile(account)
+            torboxManualName = choice.partyDisplayName() +
+                if (found.kind == com.nuvio.app.features.debrid.TorboxMatchKind.UniqueTitle) " · Titel-/Folgenabgleich" else ""
+            torboxAutoLinkedFor = autoKey
+            torboxLinkAuto = true
+            torboxManualFor = key
         }
     }
     val torboxFile = effectiveTorboxFile
@@ -515,9 +536,9 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
                     torboxPropagateToken = result.propagateToken
                     torboxPartyStream = PartyStream(mediaKey = key, url = result.url, name = "TorBox HLS", streamType = "hls")
                     torboxPartyPhase = com.nuvio.app.features.debrid.TorboxHlsPhase.Ready
-                    torboxPartyStatus = if (result.familyOnly)
+                    torboxPartyStatus = (if (result.familyOnly)
                         "TorBox HLS mit Account-Key vorbereitet. Bei Browser-HLS-Freigabe erhalten ihn alle Party-Mitglieder."
-                    else "TorBox HLS vorbereitet. Mehrgerätezugriff und Browserwiedergabe müssen geprüft werden."
+                    else "TorBox HLS vorbereitet. Mehrgerätezugriff und Browserwiedergabe müssen geprüft werden.") + " " + result.audioStatus
                     // Renew only after an explicit expiry/access failure, never on
                     // every recomposition, toggle or transient network failure.
                     while (isActive) {

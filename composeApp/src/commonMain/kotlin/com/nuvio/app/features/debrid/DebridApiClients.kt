@@ -34,9 +34,10 @@ internal object TorboxApiClient {
     suspend fun createStream(
         apiKey: String, torrentId: Int, fileId: Int,
         audioIndex: Int = 0, resolutionIndex: Int? = null,
+        source: TorboxPartySource = TorboxPartySource.Torrent,
     ): DebridApiResponse<JsonElement> = request(
         method = "GET",
-        url = "$BASE_URL/v1/api/stream/createstream?${torboxCreateStreamQuery(torrentId, fileId, audioIndex, resolutionIndex)}",
+        url = "$BASE_URL/v1/api/stream/createstream?${torboxCreateStreamQuery(torrentId, fileId, audioIndex, resolutionIndex, source)}",
         apiKey = apiKey,
     )
 

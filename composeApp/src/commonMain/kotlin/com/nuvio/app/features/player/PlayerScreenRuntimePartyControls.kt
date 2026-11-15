@@ -298,19 +298,22 @@ internal fun PlayerScreenRuntime.rememberPartyControlsState(): PlayerControlPart
         },
         partyMediaTitle = if (elsewhere) party.media.displayTitle() else "",
         playerMediaTitle = if (elsewhere) playerMedia.displayTitle() else "",
-        torboxLinkAuto = torboxManualFor == partyKey && torboxLinkAuto,
-        torboxSuggestedFilter = if (party.isHost) playerMedia.title.take(60) else "",
+        torboxLinkAuto = effectiveTorboxFile != null && effectiveTorboxFile == torboxManualFile && torboxLinkAuto,
+        torboxSuggestedFilter = if (party.isHost) {
+            val season = playerMedia.season
+            val episode = playerMedia.episode
+            playerMedia.title.take(60) + if (season != null && episode != null) " S"+season+"E"+episode else ""
+        } else "",
         hlsStatus = when {
             !party.isHost || elsewhere -> ""
             activeHostPartyHls != null -> "Der geteilte Video-Link ersetzt TorBox-HLS, solange er aktiv ist."
             effectiveTorboxFile != null -> torboxPartyStatus.takeIf {
-                it.isNotBlank() && (torboxFamilyOnly || torboxPartyPhase != com.nuvio.app.features.debrid.TorboxHlsPhase.Ready)
+                it.isNotBlank()
             } ?: com.nuvio.app.features.debrid.torboxHlsStatusLabel(torboxPartyPhase, party.browserSharing)
-            // A provider name such as "[TB+] …" is no TorBox file identity.
-            party.browserSharing && activeStream != null -> if (activeTorrentInfoHash.isNullOrBlank())
-                "Nicht verfügbar: Addon-Stream ohne Infohash und ohne TorBox-Dateikennung. „Mit TorBox-Datei verknüpfen“ wählen oder einen Video-Link für Browser teilen."
-            else
-                "Nicht verfügbar: Kein eindeutiger passender Eintrag in deiner TorBox-Cloud (Infohash und Dateiname). „Mit TorBox-Datei verknüpfen“ wählen oder die Quelle über die TorBox-Cloud starten."
+            party.browserSharing && activeStream != null ->
+                torboxAutoStatus.ifBlank {
+                    "Die Originalquelle konnte keiner eindeutigen TorBox-Cloud-Datei zugeordnet werden. Bitte die passende Datei im selben TorBox-Konto verknüpfen."
+                }
             else -> ""
         },
         hostHlsAllowed = party.isHost && !elsewhere && activeStream != null,
@@ -327,12 +330,27 @@ internal fun PlayerScreenRuntime.rememberPartyControlsState(): PlayerControlPart
             com.nuvio.app.features.debrid.DebridSettingsRepository.snapshot().apiKeyFor(com.nuvio.app.features.debrid.DebridProviders.TORBOX_ID).isNotBlank(),
         familyAvailable = party.isHost && !elsewhere && com.nuvio.app.features.party.PartyFamilyShare.configured,
         familyStatus = if (party.isHost) familyShareStatus else "",
-        torboxLinkedName = if (torboxManualFor == partyKey) torboxManualName else "",
+        torboxLinkedName = when {
+            effectiveTorboxFile == null -> ""
+            effectiveTorboxFile == torboxManualFile && torboxManualFor == partyKey ->
+                if (torboxLinkAuto) "TorBox · automatisch · $torboxManualName"
+                else {
+                    val original = activeStream?.torboxPartyFile
+                    val relation = when {
+                        original == null -> "Übereinstimmung mit Original offen"
+                        original == effectiveTorboxFile -> "Datei der Desktop-Quelle"
+                        else -> "andere Datei als die Desktop-Quelle"
+                    }
+                    "TorBox · manuell · $relation · $torboxManualName"
+                }
+            activeStream?.torboxPartyFile == effectiveTorboxFile -> "TorBox · Datei der Desktop-Quelle"
+            else -> "TorBox · über Infohash zugeordnet"
+        },
         torboxChoicesOpen = party.isHost && torboxChoicesFor == partyKey && (torboxChoices != null || torboxChoicesBusy),
         torboxChoicesBusy = torboxChoicesBusy,
         torboxChoicesStatus = if (party.isHost) torboxChoicesStatus else "",
         torboxChoices = if (party.isHost && torboxChoicesFor == partyKey) torboxChoices.orEmpty().map {
-            PlayerControlTorboxChoice(id = "${it.torrentId}:${it.fileId}", name = it.name, size = it.size?.let(::formatTorboxSize).orEmpty())
+            PlayerControlTorboxChoice(id = it.selectionId, name = "${it.source.label} · ${it.name}", size = it.size?.let(::formatTorboxSize).orEmpty(), bytes = it.size ?: 0L)
         } else emptyList(),
         canEnd = party.isHost && party.members.size > 1,
         seatsLabel = stringResource(Res.string.party_seats, party.members.size, party.maxMembers),
@@ -372,8 +390,7 @@ internal fun PlayerScreenRuntime.handlePartyControlsEvent(type: String, value: D
         return true
     }
     if (type.startsWith(TORBOX_PICK_EVENT)) {
-        val ids = type.removePrefix(TORBOX_PICK_EVENT).split(':').mapNotNull { it.toIntOrNull() }
-        if (ids.size == 2) linkTorboxCloudFile(ids[0], ids[1])
+        linkTorboxCloudFile(type.removePrefix(TORBOX_PICK_EVENT))
         return true
     }
     if (type.startsWith(CHAT_SEND_EVENT)) {
@@ -623,6 +640,9 @@ private fun syncAllSummary(
 }
 private const val TORBOX_PICK_EVENT = "partyTorboxPick:"
 
+internal fun com.nuvio.app.features.debrid.TorboxCloudChoice.partyDisplayName(): String =
+    source.label + " · " + name.take(100) + size?.takeIf { it > 0 }?.let { " · ${formatTorboxSize(it)}" }.orEmpty()
+
 private fun formatTorboxSize(bytes: Long): String = when {
     bytes >= 1L shl 30 -> "${(bytes * 10 / (1L shl 30)) / 10.0} GB"
     bytes >= 1L shl 20 -> "${bytes / (1L shl 20)} MB"
@@ -676,6 +696,7 @@ private fun PlayerScreenRuntime.loadTorboxCloudChoices() {
     if (key.isBlank()) { torboxChoicesStatus = "Kein TorBox-Account-Key gespeichert."; return }
     val mediaKey = partyKey
     torboxChoicesFor = mediaKey
+    torboxChoicesAccount = com.nuvio.app.features.debrid.torboxAccountFingerprint(key)
     torboxChoicesBusy = true
     torboxChoicesStatus = "TorBox-Cloud wird geladen …"
     scope.launch {
@@ -684,26 +705,31 @@ private fun PlayerScreenRuntime.loadTorboxCloudChoices() {
             catch (_: Exception) { null }
         torboxChoicesBusy = false
         if (torboxChoicesFor != mediaKey) return@launch
-        torboxChoices = choices
+        torboxChoices = choices?.files
         torboxChoicesStatus = when {
             choices == null -> "TorBox-Cloud konnte nicht geladen werden. Netzwerk und Account prüfen."
-            choices.isEmpty() -> "Keine Videodateien in deiner TorBox-Cloud gefunden."
-            choices.size >= com.nuvio.app.features.debrid.TORBOX_CHOICES_LIMIT -> "Die ersten ${choices.size} Videodateien (alphabetisch). Exakte Datei für genau diesen Titel wählen."
+            choices.missingCategory != null -> "TorBox: " + choices.missingCategory + "-Inventar nicht abrufbar. Nur verfügbare Kategorie angezeigt."
+            choices.files.isEmpty() -> "Keine Videodateien im Torrent- und Usenet-Inventar des eingestellten TorBox-Kontos gefunden."
             else -> "Exakte Datei für genau diesen Titel wählen."
         }
     }
 }
 
 /** Accepts only an ID pair from the list just loaded; nothing is guessed. */
-private fun PlayerScreenRuntime.linkTorboxCloudFile(torrentId: Int, fileId: Int) {
+private fun PlayerScreenRuntime.linkTorboxCloudFile(selectionId: String) {
     val party = PartyRepository.state.value.party ?: return
     if (!party.isHost || torboxChoicesFor != partyKey) return
-    val choice = torboxChoices?.firstOrNull { it.torrentId == torrentId && it.fileId == fileId } ?: return
+    val choice = torboxChoices?.firstOrNull { it.selectionId == selectionId } ?: return
     val key = com.nuvio.app.features.debrid.DebridSettingsRepository.snapshot().apiKeyFor(com.nuvio.app.features.debrid.DebridProviders.TORBOX_ID)
     if (key.isBlank()) return
-    torboxManualFile = com.nuvio.app.features.debrid.TorboxPartyFile(torrentId, fileId, com.nuvio.app.features.debrid.torboxAccountFingerprint(key))
+    val account = com.nuvio.app.features.debrid.torboxAccountFingerprint(key)
+    if (torboxChoicesAccount != account) {
+        torboxChoicesStatus = "TorBox-Konto geändert. Bitte Dateiliste neu laden."
+        return
+    }
+    torboxManualFile = choice.partyFile(account)
     torboxManualFor = partyKey
-    torboxManualName = choice.name
+    torboxManualName = choice.partyDisplayName()
     torboxLinkAuto = false
     torboxChoices = null; torboxChoicesFor = null
     torboxChoicesStatus = "" // The linked name is shown once in its own row.

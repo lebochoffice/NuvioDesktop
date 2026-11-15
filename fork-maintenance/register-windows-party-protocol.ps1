@@ -35,6 +35,54 @@ function Invoke-MsiStatement($Database, [string]$Sql, $Record = $null) {
     } finally { Close-MsiView $statement }
 }
 
+
+# A moved shortcut needs a new component identity. Keep the new KeyPaths
+# independent of the MSI version so later upgrades retain that identity.
+function Set-OrAssertA40ShortcutIdentity($Database, [switch]$Verify) {
+    $identities = @{
+        DesktopFolder = @('Desktop', '{84EA04EF-AFA1-4913-80D7-A2BD0DDA699E}')
+        ProgramMenuFolder = @('StartMenu', '{5A663DD0-9BC4-4224-BC40-4FAF2E2CB487}')
+    }
+    $key = 'Software\NuvioA40Fork\Installer\Shortcuts'
+    $view = $Database.OpenView('SELECT `Shortcut`.`Directory_`, `Directory`.`Directory_Parent`, `Component`.`Component`, `Component`.`ComponentId`, `Registry`.`Registry`, `Registry`.`Root`, `Registry`.`Key`, `Registry`.`Name`, `Registry`.`Value` FROM `Shortcut`, `Directory`, `Component`, `Registry` WHERE `Shortcut`.`Directory_` = `Directory`.`Directory` AND `Shortcut`.`Component_` = `Component`.`Component` AND `Component`.`KeyPath` = `Registry`.`Registry` AND `Component`.`Component` = `Registry`.`Component_`')
+    $rows = @{}
+    try {
+        [void]$view.Execute()
+        while ($rec = $view.Fetch()) {
+            try {
+                $location = if ($rec.StringData(1) -ceq 'DesktopFolder') { 'DesktopFolder' } else { $rec.StringData(2) }
+                if (!$identities.ContainsKey($location) -or $rows.ContainsKey($location) -or
+                    $rec.IntegerData(6) -ne 1 -or $rec.StringData(9) -cne '[ProductCode]') {
+                    throw 'Unexpected A40 shortcut component or registry KeyPath.'
+                }
+                $rows[$location] = @{
+                    Component = $rec.StringData(3); Id = $rec.StringData(4); Registry = $rec.StringData(5)
+                    Key = $rec.StringData(7); Name = $rec.StringData(8)
+                }
+            } finally { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($rec) }
+        }
+    } finally { Close-MsiView $view }
+    if ($rows.Count -ne 2 -or $rows.DesktopFolder.Component -eq $rows.ProgramMenuFolder.Component) {
+        throw 'Expected separate A40 desktop and Start menu components.'
+    }
+    foreach ($location in $identities.Keys) {
+        $row = $rows[$location]
+        $name, $id = $identities[$location]
+        if ($Verify) {
+            if ($row.Id -cne $id -or $row.Key -cne $key -or $row.Name -cne $name) {
+                throw "Unexpected stable A40 shortcut identity for $location."
+            }
+        } else {
+            if ($row.Component -notmatch '^[A-Za-z_][A-Za-z0-9_.]*$' -or $row.Registry -notmatch '^[A-Za-z_][A-Za-z0-9_.]*$' -or
+                $row.Key -notmatch '^Software\\Nuvio A40 Fork\\Nuvio\\[0-9]+\.[0-9]+\.[0-9]+$' -or $row.Name -cne 'ProductCode') {
+                throw 'Unexpected jpackage A40 shortcut registry KeyPath.'
+            }
+            Invoke-MsiStatement $Database ('UPDATE `Component` SET `ComponentId` = ''{0}'' WHERE `Component` = ''{1}''' -f $id, $row.Component)
+            Invoke-MsiStatement $Database ('UPDATE `Registry` SET `Key` = ''{0}'', `Name` = ''{1}'' WHERE `Registry` = ''{2}''' -f $key, $name, $row.Registry)
+        }
+    }
+}
+
 $db = $null
 $stage = "opening MSI '$($msi.FullName)' (VerifyOnly=$VerifyOnly)"
 try {
@@ -198,7 +246,8 @@ try {
             } finally { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($record) }
         }
         if ($A40Fork) {
-            $stage = 'isolating A40 product name and desktop shortcut'
+            $stage = 'authoring stable A40 shortcut components'
+            Set-OrAssertA40ShortcutIdentity $db
             Invoke-MsiStatement $db 'INSERT INTO `Directory` (`Directory`, `Directory_Parent`, `DefaultDir`) VALUES (''A40DesktopFolder'', ''DesktopFolder'', ''Nuvio-A40-Fork'')'
             if ($actions['RemoveFiles'] -le $removeSequence -or !(Test-MsiTable $db 'RemoveFile') -or $component -notmatch '^[A-Za-z_][A-Za-z0-9_.]*$') {
                 throw 'Cannot safely remove the empty A40 legacy shortcut directory.'
@@ -215,6 +264,7 @@ try {
 
     if ($A40Fork) {
         $stage = 'verifying isolated A40 shortcuts'
+        Set-OrAssertA40ShortcutIdentity $db -Verify
         $v = $db.OpenView('SELECT `Shortcut`.`Name`, `Shortcut`.`Target`, `Directory`.`Directory`, `Directory`.`Directory_Parent`, `Directory`.`DefaultDir` FROM `Shortcut`, `Directory` WHERE `Shortcut`.`Directory_` = `Directory`.`Directory`')
         try {
             [void]$v.Execute()

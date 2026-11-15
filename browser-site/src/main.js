@@ -788,7 +788,7 @@ function resetVideo(reason = 'Persönliche Quelle entfernt. Für diesen Film kan
   pendingSeek = internalHlsSeek = pendingPlay = ownSeek = null;
   waitingForTarget = false;
   lastAlignedPlayback = null; lastPresence = null;
-  resetSyncState(); renderQuality(null); clearSubtitles();
+  resetSyncState(); renderQuality(null); clearAudioTracks(); clearSubtitles();
   mediaPointerDown = false; mediaGestureUntil = -1; lastPlaybackError = 'none';
   personalHls.clear();
   personalReadinessMessage = '';
@@ -1003,7 +1003,7 @@ function failVideo(message, errorCode = 'media_error') {
   pendingSeek = internalHlsSeek = pendingPlay = ownSeek = null;
   waitingForTarget = false;
   lastAlignedPlayback = null;
-  resetSyncState(); renderQuality(null);
+  resetSyncState(); renderQuality(null); clearAudioTracks();
   if (personalHls.active) $('personalHlsStatus').textContent = message;
   personalHls.dispose();
   if (hls) { hls.destroy(); hls = null; }
@@ -1027,15 +1027,94 @@ function mediaResumed() {
   seekSettled = true;
 }
 const currentHls = () => hls || personalHls.instance;
-// Listens only for level lists and fragment timing; never reads URLs.
+const AUDIO_PREFERENCE_KEY = 'nuvio.browser.audioPreference';
+let audioPreference = '';
+try { audioPreference = globalThis.localStorage?.getItem(AUDIO_PREFERENCE_KEY) || ''; } catch { /* Default to German. */ }
+
+function audioLanguage(value) {
+  const language = String(value || '').trim().toLowerCase();
+  if (/^(?:de|deu|ger)(?:[-_][a-z0-9]+)*$|^(?:german|deutsch)(?:$|[ .(])/.test(language)) return 'de';
+  if (/^(?:en|eng)(?:[-_][a-z0-9]+)*$|^english(?:$|[ .(])/.test(language)) return 'en';
+  return ['und', 'unknown', 'undefined'].includes(language) ? '' : language;
+}
+function audioTrackName(track) {
+  return String(track.name || track.label || '').trim();
+}
+function audioTrackLanguage(track) {
+  const tagged = audioLanguage(track.lang || track.language);
+  const labelled = audioLanguage(audioTrackName(track));
+  return tagged || (labelled === 'de' || labelled === 'en' ? labelled : '');
+}
+function audioTrackLabel(track, index, count) {
+  const language = audioTrackLanguage(track);
+  if (count === 1 && language === 'de') return 'Deutsch';
+  if (count === 1 && language === 'en') return 'Englisch';
+  return (count > 1 ? audioTrackName(track) : '') || language || (count === 1 ? 'Audio · 1 Spur' : 'Tonspur ' + (index + 1));
+}
+function audioTracks(instance) {
+  if (instance) return instance.audioTracks || [];
+  return loadedStream && streamIsHls(loadedStream) ? Array.from(player.audioTracks || []) : [];
+}
+function selectAudioTrack(instance, tracks, index) {
+  if (instance) instance.audioTrack = index;
+  else tracks.forEach((track, i) => { track.enabled = i === index; });
+}
+function clearAudioTracks() {
+  const select = $('audioTrack');
+  select.replaceChildren(new Option(loadedStream ? 'Audio · festgelegt' : 'Audio'));
+  select.disabled = true;
+}
+function renderAudioTracks(instance, applyPreference = false) {
+  const tracks = audioTracks(instance);
+  if (!tracks.length) { clearAudioTracks(); return; }
+  if (applyPreference && tracks.length > 1) {
+    let preferred = audioPreference.startsWith('language:')
+      ? tracks.findIndex(track => 'language:' + audioTrackLanguage(track) === audioPreference)
+      : tracks.findIndex(track => 'label:' + audioTrackName(track) === audioPreference);
+    if (preferred < 0) preferred = tracks.findIndex(track => audioTrackLanguage(track) === 'de');
+    const selected = instance ? instance.audioTrack : tracks.findIndex(track => track.enabled);
+    if (preferred >= 0 && preferred !== selected) selectAudioTrack(instance, tracks, preferred);
+  }
+  const select = $('audioTrack');
+  select.replaceChildren(...tracks.map((track, i) =>
+    new Option(audioTrackLabel(track, i, tracks.length) + (tracks.length === 1 ? ' · festgelegt' : ''), String(i))));
+  select.disabled = tracks.length === 1;
+  select.selectedIndex = select.disabled ? 0 : instance ? instance.audioTrack : tracks.findIndex(track => track.enabled);
+}
+$('audioTrack').addEventListener('change', () => {
+  const instance = currentHls(), tracks = audioTracks(instance);
+  const index = $('audioTrack').selectedIndex;
+  const track = tracks[index];
+  if (!track) return;
+  selectAudioTrack(instance, tracks, index);
+  const language = audioTrackLanguage(track), name = audioTrackName(track);
+  audioPreference = language ? 'language:' + language : name ? 'label:' + name : '';
+  try { globalThis.localStorage?.setItem(AUDIO_PREFERENCE_KEY, audioPreference); } catch { /* Session only. */ }
+});
+player.audioTracks?.addEventListener('addtrack', () => {
+  if (!currentHls()) renderAudioTracks(null, true);
+});
+player.audioTracks?.addEventListener('removetrack', () => {
+  if (!currentHls()) renderAudioTracks(null);
+});
+player.audioTracks?.addEventListener('change', () => {
+  if (!currentHls()) renderAudioTracks(null);
+});
+
 function watchHlsInstance(instance) {
+  instance.on(Hls.Events.AUDIO_TRACKS_UPDATED, () => queueMicrotask(() => {
+    if (currentHls() === instance) renderAudioTracks(instance, true);
+  }));
+  instance.on(Hls.Events.AUDIO_TRACK_SWITCHED, () => {
+    if (currentHls() === instance) renderAudioTracks(instance);
+  });
   instance.on(Hls.Events.MANIFEST_PARSED, () => { if (currentHls() === instance) renderQuality(instance); });
   instance.on(Hls.Events.SUBTITLE_TRACKS_UPDATED, () => { if (currentHls() === instance) renderSubtitles(); });
   // Shows the variant actually playing, so a manual choice is verifiable.
   instance.on(Hls.Events.LEVEL_SWITCHED, (_event, data) => {
     if (currentHls() !== instance || qualityOptions(instance.levels).length === 0) return;
     const height = Number(instance.levels?.[data?.level]?.height);
-    $('qualityNote').textContent = Number.isInteger(height) && height > 0 ? `Aktiv: ${height >= 2000 ? '4K' : height + 'p'}` : '';
+    $('qualityNote').textContent = Number.isInteger(height) && height > 0 ? `Aktiv: ${height}p` : '';
     $('qualityNote').hidden = !$('qualityNote').textContent;
   });
   instance.on(Hls.Events.FRAG_LOADED, (_event, data) => {
@@ -1045,29 +1124,40 @@ function watchHlsInstance(instance) {
     segmentStats = {loadMs: Number.isFinite(loadMs) && loadMs >= 0 ? Math.round(loadMs) : null, durationS: Number.isFinite(duration) ? Math.round(duration * 10) / 10 : null};
   });
 }
-// Real variants only (Auto + distinct heights). A selector without effect is
-// never shown: one variant → fixed "Automatisch" note; native Safari HLS →
-// the browser chooses. No resolutions are invented.
+const QUALITY_PREFERENCE_KEY = 'nuvio.browser.videoQuality';
+let qualityPreference = 'best';
+try { qualityPreference = globalThis.localStorage?.getItem(QUALITY_PREFERENCE_KEY) || 'best'; } catch { /* Default to best. */ }
+
 function renderQuality(instance, nativeHls = false) {
-  const options = instance ? qualityOptions(instance.levels) : [];
+  const variants = instance ? qualityOptions(instance.levels) : [];
   const select = $('quality');
-  select.replaceChildren(...options.map(({value, label}) => {
-    const option = document.createElement('option');
-    option.value = String(value); option.textContent = label; return option;
-  }));
-  select.value = '-1';
-  $('qualityWrap').hidden = options.length === 0;
-  const torbox = loadedStream?.name === 'TorBox HLS';
-  $('qualityNote').textContent = options.length ? ''
-    : instance ? (torbox ? 'Automatisch · TorBox liefert eine Qualität' : 'Automatisch · eine Qualität verfügbar')
-    : nativeHls ? 'Automatisch · vom Browser gewählt' : '';
-  $('qualityNote').hidden = !$('qualityNote').textContent;
+  const options = variants.length > 1
+    ? [new Option('Beste Qualität', 'best'), new Option('Automatisch (adaptiv)', 'auto'),
+      ...variants.map(({height, label}) => new Option(label, String(height)))]
+    : variants.length === 1 ? [new Option(variants[0].label + ' · festgelegt', 'best')]
+    : [new Option(nativeHls ? 'Browser-Automatik' : 'Qualität', 'auto')];
+  select.replaceChildren(...options);
+  select.disabled = options.length < 2;
+  $('qualityWrap').title = select.title = variants.length === 1 ? 'Auflösung fest vorgegeben'
+    : variants.length ? 'Videoqualität' : 'Der Player meldet keine umschaltbaren Qualitätsstufen';
+  $('qualityNote').hidden = true;
+  $('qualityNote').textContent = '';
+  if (!variants.length) return;
+  select.value = variants.length > 1 && options.some(option => option.value === qualityPreference) ? qualityPreference : 'best';
+  const level = variants.find(variant => String(variant.height) === select.value)?.value ?? variants[0].value;
+  if (select.value !== 'auto') instance.startLevel = level;
+  instance.loadLevel = select.value === 'auto' ? -1 : level;
 }
 $('quality').addEventListener('change', () => {
-  const instance = currentHls(), level = Number($('quality').value);
-  // nextLevel replaces the buffered-ahead fragments, so a manual choice is
-  // visible within seconds (loadLevel could take a full 30 s buffer).
-  if (instance && qualityOptions(instance.levels).some(option => option.value === level)) instance.nextLevel = level;
+  const instance = currentHls(), mode = $('quality').value;
+  const variants = instance ? qualityOptions(instance.levels) : [];
+  if (variants.length < 2) return;
+  const level = mode === 'best' ? variants[0].value : variants.find(variant => String(variant.height) === mode)?.value;
+  if (mode !== 'auto' && level == null) return;
+  qualityPreference = mode;
+  try { globalThis.localStorage?.setItem(QUALITY_PREFERENCE_KEY, mode); } catch { /* Session only. */ }
+  // Change future segments without flushing the current buffer or restarting playback.
+  instance.loadLevel = mode === 'auto' ? -1 : level;
 });
 // --- Subtitles ----------------------------------------------------------------
 // Only real sources: hls.js subtitle renditions (EXT-X-MEDIA TYPE=SUBTITLES),
@@ -1090,14 +1180,14 @@ function renderSubtitles() {
   const item = (id, label) => {
     const button = document.createElement('button');
     button.type = 'button'; button.textContent = label;
-    button.setAttribute?.('role', 'menuitemradio'); button.setAttribute?.('aria-checked', String(activeSubtitle === id));
-    button.addEventListener('click', () => { selectSubtitle(id); closeSubtitleMenu(); });
+    button.setAttribute('aria-pressed', String(activeSubtitle === id));
+    button.addEventListener('click', () => { selectSubtitle(id); });
     return button;
   };
   const note = document.createElement('p'); note.className = 'menu-note';
   note.textContent = sources.length || subtitleFiles.length ? 'Untertitel' : 'Diese Quelle liefert keine Untertitel.';
   const load = document.createElement('button'); load.type = 'button'; load.textContent = 'Untertiteldatei laden (.vtt/.srt) …';
-  load.addEventListener('click', () => { closeSubtitleMenu(); $('subtitleFile').click?.(); });
+  load.addEventListener('click', () => $('subtitleFile').click?.());
   menu.replaceChildren(note, item('off', 'Aus'), ...sources.map(s => item(s.id, s.label)),
     ...subtitleFiles.map((file, index) => item(`file:${index}`, file.label)), load);
 }
@@ -1142,11 +1232,8 @@ function clearSubtitles() {
   subtitleFiles = []; activeSubtitle = 'off';
   renderSubtitles();
 }
-function closeSubtitleMenu() { $('subtitleMenu').hidden = true; $('ctlSubtitles').setAttribute?.('aria-expanded', 'false'); }
-$('ctlSubtitles').addEventListener('click', () => {
-  const open = $('subtitleMenu').hidden;
-  if (open) renderSubtitles();
-  $('subtitleMenu').hidden = !open; $('ctlSubtitles').setAttribute?.('aria-expanded', String(open));
+$('subtitleOptions').addEventListener('toggle', () => {
+  if ($('subtitleOptions').open) renderSubtitles();
 });
 $('subtitleFile').addEventListener('change', () => {
   const file = $('subtitleFile').files?.[0];
@@ -1334,7 +1421,7 @@ function selectDrawerTab(selected, focus = false) {
 }
 function openDrawer(view, opener) {
   if (document.fullscreenElement) document.exitFullscreen?.(); // The drawer lives outside the player.
-  closeSubtitleMenu();
+  closePlaybackSettings();
   if ($('infoDrawer').hidden) drawerOpener = opener;
   const participants = view === 'participants';
   // One drawer: participants are a tab, the members badge opens it directly.
@@ -1343,7 +1430,6 @@ function openDrawer(view, opener) {
   $('infoDrawer').hidden = false; $('drawerScrim').hidden = false;
   $('partyApp').inert = true;
   $('membersButton').setAttribute?.('aria-expanded', String(participants));
-  $('ctlSettings').setAttribute?.('aria-expanded', String(!participants));
   $('drawerResync').disabled = $('resync').disabled;
   $('drawerClose').focus?.();
 }
@@ -1352,13 +1438,13 @@ function closeDrawer() {
   $('infoDrawer').hidden = true; $('drawerScrim').hidden = true;
   $('partyApp').inert = false;
   $('membersButton').setAttribute?.('aria-expanded', 'false');
-  $('ctlSettings').setAttribute?.('aria-expanded', 'false');
   if (!$('watchSection').hidden) drawerOpener?.focus?.();
   drawerOpener = null;
 }
 // Back arrow: to the invitation without leaving the party. Local playback
 // pauses; "Zurück zur Party" re-joins the party time.
 function backToInvite() {
+  closePlaybackSettings();
   if (document.fullscreenElement) { document.exitFullscreen?.(); return; }
   if (syncEnabled) { syncEnabled = false; pauseLocally(); presence(); }
   else if (!player.paused) pauseLocally();
@@ -1372,7 +1458,33 @@ $('ctlFwd10').addEventListener('click', () => skip(10));
 $('ctlFullscreen').addEventListener('click', toggleFullscreen);
 $('ctlSolo').addEventListener('click', toggleSolo);
 $('ctlBack').addEventListener('click', backToInvite);
-$('ctlSettings').addEventListener('click', () => openDrawer('settings', $('ctlSettings')));
+function closePlaybackSettings(restoreFocus = false) {
+  if ($('playbackSettings').hidden) return;
+  $('playbackSettings').hidden = true;
+  $('subtitleOptions').open = false;
+  $('ctlSettings').setAttribute('aria-expanded', 'false');
+  setClass($('playerWrap'), 'has-playback-settings', false);
+  if (restoreFocus) $('ctlSettings').focus();
+}
+$('ctlSettings').addEventListener('click', () => {
+  if (!$('playbackSettings').hidden) { closePlaybackSettings(); return; }
+  $('playbackSettings').hidden = false;
+  $('ctlSettings').setAttribute('aria-expanded', 'true');
+  setClass($('playerWrap'), 'has-playback-settings', true);
+  revealControls();
+});
+$('openPartySettings').addEventListener('click', () => openDrawer('settings', $('ctlSettings')));
+document.addEventListener('pointerdown', event => {
+  if (!$('playbackSettings').hidden && event.target.closest('#ctlSeek')) event.preventDefault();
+}, true);
+document.addEventListener('click', event => {
+  if ($('playbackSettings').hidden || $('playbackSettingsGroup').contains(event.target)) return;
+  closePlaybackSettings();
+  if ($('playerWrap').contains(event.target) && !event.target.closest('#membersButton')) {
+    event.preventDefault();
+    event.stopPropagation();
+  }
+}, true);
 $('membersButton').addEventListener('click', () => openDrawer('participants', $('membersButton')));
 for (const name of drawerTabs) {
   const tab = $(`tab${name}`);
@@ -1395,6 +1507,9 @@ $('copyPartyCode').addEventListener('click', async () => {
 $('drawerResync').addEventListener('click', () => { if (!$('resync').disabled) resyncNow(); });
 $('drawerClose').addEventListener('click', closeDrawerToPlayer);
 $('drawerScrim').addEventListener('click', closeDrawerToPlayer);
+$('infoDrawer').addEventListener('click', event => {
+  if (!event.target.closest('.drawer-head, .settings-tabs, .settings-panel')) closeDrawerToPlayer();
+});
 $('ctlMute').addEventListener('click', () => { player.muted = !player.muted; if (!player.muted && autoStartPhase === 'muted') autoStartPhase = 'playing'; renderPlayerUi(); });
 $('ctlVolume').addEventListener('input', () => { player.volume = Number($('ctlVolume').value); player.muted = player.volume === 0; renderPlayerUi(); });
 $('ctlSeek').addEventListener('input', () => {
@@ -1449,7 +1564,11 @@ $('playerWrap').addEventListener('keydown', e => {
 });
 window.addEventListener('keydown', e => {
   if ($('infoDrawer').hidden) {
-    if (e.key === 'Escape' && !$('subtitleMenu').hidden) { closeSubtitleMenu(); $('ctlSubtitles').focus?.(); }
+    if (e.key === 'Escape' && !$('playbackSettings').hidden) {
+      e.preventDefault();
+      closePlaybackSettings(true);
+      return;
+    }
     return;
   }
   if (e.key === 'Escape') { e.preventDefault(); closeDrawer(); return; }
@@ -1547,6 +1666,7 @@ function loadStream() {
   if (hls) { hls.destroy(); hls = null; }
   pauseLocally(); player.removeAttribute('src'); player.load();
   loadedStream = stream; loading = true; syncEnabled = false;
+  clearAudioTracks(); renderQuality(null);
   renderPartyRoom();
   $('resync').disabled = true; $('loadStream').hidden = true;
   status('Quelle wird geladen. Erst nach erfolgreichem Laden ist die Synchronisierung verfügbar.');
@@ -2007,8 +2127,16 @@ function resyncNow() {
   finishSourceRecovery();
 }
 $('resync').addEventListener('click', resyncNow);
+// A single media playlist may not advertise its height until playback metadata arrives.
+player.addEventListener('resize', () => {
+  if (!loadedStream || (!currentHls() && !streamIsHls(loadedStream))) return;
+  if (qualityOptions(currentHls()?.levels).length || !$('quality').disabled) return;
+  const height = player.videoHeight;
+  if (height > 0) $('quality').replaceChildren(new Option(height + 'p · festgelegt'));
+});
 player.addEventListener('loadedmetadata', () => {
   if (!loadedStream) return;
+  renderAudioTracks(currentHls(), !currentHls());
   if (personalHls.active) { updatePersonalHlsReadiness(true); return; }
   loading = false; $('noStream').hidden = true; $('resync').disabled = false;
   autoStartPhase = 'loaded';
@@ -2092,7 +2220,7 @@ player.addEventListener('play', () => {
   presence(); renderPlayerUi();
 });
 // load() cancels old media tasks; their pause events may never be delivered.
-player.addEventListener('emptied', () => { expectedPauses = 0; });
+player.addEventListener('emptied', () => { expectedPauses = 0; clearAudioTracks(); });
 player.addEventListener('waiting', () => { if (!buffering) bufferingEvents++; buffering = true; presence(); });
 player.addEventListener('playing', () => { $('autoplayStart').hidden = true; buffering = false; mediaResumed(); applySync(); finishSourceRecovery(); presence(); });
 // Autoplay fallback: the tap itself starts playback at the current party time.
@@ -2161,6 +2289,7 @@ function renderSyncDebug() {
     videoWidth: number(player.videoWidth), videoHeight: number(player.videoHeight),
     bandwidthKbps: currentHls() && Number.isFinite(currentHls().bandwidthEstimate) ? Math.round(currentHls().bandwidthEstimate / 1000) : null,
     qualityVariants: currentHls() ? number(currentHls().levels?.length) : null,
+    audioTracks: number(audioTracks(currentHls()).length),
     bufferAheadSeconds: number(Math.round(bufferAhead(bufferedRanges(player.buffered), player.currentTime) * 10) / 10),
     lastSegmentLoadMs: number(segmentStats.loadMs), lastSegmentDurationSeconds: number(segmentStats.durationS),
     bufferingEvents: number(bufferingEvents), stallsSinceLoad: number(stallTracker.stalls),

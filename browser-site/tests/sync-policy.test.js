@@ -59,12 +59,12 @@ test('mobile fairness: after the wait budget a guest catches up alone until the 
   now += SYNC.waitWindowMs; assert.equal(stall(), 'buffering');
 });
 
-test('quality options list only real distinct variants; a single variant offers no choice', () => {
-  assert.deepEqual(qualityOptions([{height: 1080, bitrate: 6e6}]), []);
+test('quality options list distinct heights with the highest-bitrate rendition at each height', () => {
+  assert.deepEqual(qualityOptions([{height: 1080, bitrate: 6e6}]), [{value: 0, height: 1080, label: '1080p'}]);
   assert.deepEqual(qualityOptions([]), []); assert.deepEqual(qualityOptions(undefined), []);
   assert.deepEqual(qualityOptions([{height: 720, bitrate: 3e6}, {height: 2160, bitrate: 15e6}, {height: 1080, bitrate: 5e6}, {height: 1080, bitrate: 7e6}, {}]), [
-    {value: -1, label: 'Auto'}, {value: 1, label: '4K'}, {value: 3, label: '1080p'}, {value: 0, label: '720p'}]);
-  assert.deepEqual(qualityOptions([{height: 480}, {height: 360}]).map(o => o.label), ['Auto', '480p', '360p']);
+    {value: 1, height: 2160, label: '4K / 2160p'}, {value: 3, height: 1080, label: '1080p'}, {value: 0, height: 720, label: '720p'}]);
+  assert.deepEqual(qualityOptions([{height: 480}, {height: 360}]).map(o => o.label), ['480p', '360p']);
 });
 
 test('hls.js tuning keeps ABR/forward-buffer defaults and only bounds back buffer memory', () => {

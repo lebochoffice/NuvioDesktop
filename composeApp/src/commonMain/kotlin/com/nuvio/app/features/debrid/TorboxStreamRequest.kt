@@ -7,12 +7,13 @@ internal fun torboxCreateStreamQuery(
     fileId: Int,
     audioIndex: Int = 0,
     resolutionIndex: Int? = null,
+    source: TorboxPartySource = TorboxPartySource.Torrent,
 ): String {
     require(torrentId >= 0 && fileId >= 0 && audioIndex >= 0)
     require(resolutionIndex == null || resolutionIndex >= 0)
     return queryString(
         "id" to torrentId.toString(), "file_id" to fileId.toString(),
-        "type" to "torrent", "chosen_audio_index" to audioIndex.toString(),
+        "type" to source.apiType, "chosen_audio_index" to audioIndex.toString(),
         "chosen_resolution_index" to resolutionIndex?.toString(),
         "scrobbling_enabled" to "false",
     )

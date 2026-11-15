@@ -611,6 +611,10 @@ let partyHostHlsDraft = "";
 let partyHostHlsConsent = false;
 let partyTorboxFilter = "";
 const partyTorboxVisibleLimit = 60;
+const torboxSearchText = value => String(value || "").toLowerCase()
+  .replace(/s0*(\d+)[\s._-]*e0*(\d+)|\b0*(\d+)[\s._-]*x[\s._-]*0*(\d+)/g,
+    (_tag, s, e, xSeason, xEpisode) => " s" + (s || xSeason) + "e" + (e || xEpisode) + " ")
+  .replace(/[^\p{L}\p{N}]+/gu, " ").trim();
 
 const partyInputElement = (className, label, focusKey) => {
   const input = partyElement("input", className);
@@ -713,12 +717,16 @@ const buildPartyTorboxLink = party => {
   filter.value = partyTorboxFilter;
   box.appendChild(filter);
   const list = partyElement("div", "party-torbox-list");
+  let page = 0;
   const render = () => {
     list.textContent = "";
-    const words = partyTorboxFilter.toLowerCase().split(/\s+/).filter(Boolean);
-    const matches = normalizeItems(party.torboxChoices)
-      .filter(choice => words.every(word => String(choice.name || "").toLowerCase().includes(word)));
-    matches.slice(0, partyTorboxVisibleLimit).forEach(choice => {
+    const words = torboxSearchText(partyTorboxFilter).split(" ").filter(Boolean);
+    const matches = normalizeItems(party.torboxChoices).filter(choice => {
+      const name = torboxSearchText(choice.name);
+      return words.every(word => /^s\d+e\d+$/.test(word) ? name.split(" ").includes(word) : name.includes(word));
+    }).sort((a, b) => (Number(b.bytes) || 0) - (Number(a.bytes) || 0));
+    const offset = page * partyTorboxVisibleLimit;
+    matches.slice(offset, offset + partyTorboxVisibleLimit).forEach(choice => {
       const name = String(choice.name || "");
       const item = partyButtonElement(name, "compact list", `torboxPick:${choice.id}`, () => showPartyConfirm({
         title: "Diese Datei verknüpfen?",
@@ -730,10 +738,19 @@ const buildPartyTorboxLink = party => {
       if (choice.size) item.appendChild(partyElement("span", "party-list-meta", String(choice.size)));
       list.appendChild(item);
     });
-    if (matches.length > partyTorboxVisibleLimit) list.appendChild(partyElement("p", "party-detail", `${matches.length - partyTorboxVisibleLimit} weitere Treffer – Suche genauer eingeben.`));
+    if (matches.length > partyTorboxVisibleLimit) {
+      const pages = partyElement("div", "party-inline-row");
+      if (page > 0) pages.appendChild(partyCompactButton("Zurück", "torboxPrevious", () => { page--; render(); }));
+      pages.appendChild(partyElement("span", "party-detail", (offset + 1) + "–" +
+        Math.min(matches.length, offset + partyTorboxVisibleLimit) + " von " + matches.length));
+      if (offset + partyTorboxVisibleLimit < matches.length) {
+        pages.appendChild(partyCompactButton("Weitere Treffer", "torboxNext", () => { page++; render(); }));
+      }
+      list.appendChild(pages);
+    }
     if (!party.torboxChoicesBusy && !matches.length) list.appendChild(partyElement("p", "party-detail", "Keine passende Datei."));
   };
-  filter.addEventListener("input", () => { partyTorboxFilter = filter.value; render(); });
+  filter.addEventListener("input", () => { partyTorboxFilter = filter.value; page = 0; render(); });
   render();
   box.appendChild(list);
   const actions = partyElement("div", "party-inline-row");

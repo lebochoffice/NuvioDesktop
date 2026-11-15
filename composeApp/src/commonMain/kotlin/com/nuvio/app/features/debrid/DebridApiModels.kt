@@ -57,6 +57,8 @@ internal data class TorboxCloudItemDto(
     @SerialName("download_progress") val downloadProgress: Double? = null,
     val size: Long? = null,
     @SerialName("total_size") val totalSize: Long? = null,
+    @SerialName("download_present") val downloadPresent: Boolean? = null,
+    @SerialName("download_finished") val downloadFinished: Boolean? = null,
     val files: List<TorboxCloudFileDto>? = null,
 )
 

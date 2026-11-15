@@ -81,6 +81,71 @@ class TorboxPartyHlsTest {
         ]"""))
         assertEquals(listOf(TorboxCloudChoice(22, 0, "alpha.bin", null), TorboxCloudChoice(21, 3, "Zeta.S01E02.mkv", 2147483648)), choices)
     }
+    @Test fun `automatic matching keeps unique titles and episodes without weakening known hashes`() {
+        val items = cloud("""[
+            {"id":21,"hash":"old","files":[{"id":1,"name":"Movie.1995.1080p.mkv"}]},
+            {"id":22,"hash":"new","files":[{"id":2,"name":"Movie.2024.2160p.mkv"}]},
+            {"id":23,"hash":"series","files":[{"id":3,"name":"Snowfall.S05E03.2160p.mkv","size":5368709120},
+                {"id":4,"name":"Snowfall.S05E04.1080p.mkv"}]}
+        ]""")
+        assertEquals(TorboxMatchKind.Ambiguous, resolveTorboxCloudMatch(items, null, null, "Movie", null, null).kind)
+        assertEquals(2, resolveTorboxCloudMatch(items, null, null, "Movie", null, null, "2024").choice?.fileId)
+        assertEquals(3, resolveTorboxCloudMatch(items, null, null, "Snowfall", 5, 3).choice?.fileId)
+        assertEquals(TorboxMatchKind.NotFound, resolveTorboxCloudMatch(items, "different", null, "Snowfall", 5, 3).kind)
+        assertEquals(TorboxMatchKind.UnclearFile,
+            resolveTorboxCloudMatch(items, "series", "Snowfall.S05E04.1080p.mkv", "Snowfall", 5, 3).kind)
+    }
+
+    @Test fun `transient lookup retries at most once`() = kotlinx.coroutines.test.runTest {
+        var calls = 0
+        val result = autoLinkTorboxCloud("fixture", null, null, "Movie", null, null,
+            load = { calls++; DebridApiResponse(503, null, "") })
+        assertEquals(2, calls)
+        assertEquals(TorboxMatchKind.Unavailable, result.kind)
+    }
+
+    @Test fun `Usenet Snowfall uses its actual ids and does not replace a known torrent`() {
+        val usenet = cloud("""[
+            {"id":42,"download_finished":true,"download_present":true,"files":[
+                {"id":3,"name":"Snowfall.S05E03.GERMAN.DUBBED.DL.2160p.WEB.H265-FX.mkv","size":4700000000}]},
+            {"id":43,"status":"downloading","files":[{"id":3,"name":"Snowfall.S05E03.720p.mkv"}]}
+        ]""")
+        val torrents = cloud("""[{"id":42,"hash":"torrent","files":[{"id":3,"name":"Snowfall.S05E03.1080p.mkv"}]}]""")
+        val file = torboxCloudVideoChoices(usenet, TorboxPartySource.Usenet).single()
+        assertEquals("usenet:42:3", file.selectionId)
+        assertEquals(4700000000, file.size)
+        assertEquals(file, resolveTorboxCloudMatch(torrents, null, file.name, "Snowfall", 5, 3, usenet = usenet).choice)
+        assertEquals(TorboxMatchKind.Ambiguous, resolveTorboxCloudMatch(torrents, null, null, "Snowfall", 5, 3, usenet = usenet).kind)
+        assertEquals(TorboxMatchKind.UnclearFile, resolveTorboxCloudMatch(torrents, "torrent", file.name, "Snowfall", 5, 3, usenet = usenet).kind)
+        assertEquals(TorboxPartySource.Torrent, resolveTorboxCloudMatch(torrents, "torrent", null, "Snowfall", 5, 3, usenet = usenet).choice?.source)
+        val query = torboxCreateStreamQuery(file.downloadId, file.fileId, audioIndex = 1, source = file.source)
+        assertTrue(query.contains("id=42&file_id=3&type=usenet&chosen_audio_index=1"))
+        assertFalse(query.contains("chosen_resolution_index"))
+    }
+
+    @Test fun `Usenet page fetching preserves ids across the page boundary`() = kotlinx.coroutines.test.runTest {
+        val full = cloud((1..100).joinToString(",", prefix = "[", postfix = "]") { """{"id":$it}""" })
+        val last = cloud("""[{"id":101,"status":"completed","files":[{"id":9,"name":"Snowfall.S05E03.2160p.mkv"}]}]""")
+        val offsets = mutableListOf<Int>()
+        val result = fetchTorboxCloudPages { offset, _ ->
+            offsets += offset
+            DebridApiResponse(200, TorboxEnvelopeDto(success = true, data = if (offset == 0) full else last), "")
+        }
+        assertEquals(listOf(0, 100), offsets)
+        assertEquals("usenet:101:9", torboxCloudVideoChoices(result.body!!.data.orEmpty(), TorboxPartySource.Usenet).single().selectionId)
+    }
+
+    @Test fun `cloud choices retain large files after the first 400 sorted entries`() {
+        val earlier = (0 until 401).joinToString(",") { id ->
+            """{"id":$id,"name":"Alpha.$id.mkv"}"""
+        }
+        val items = cloud("""[{"id":21,"files":[$earlier,
+            {"id":500,"short_name":"","name":"Show.S01E02.2160p.mkv","size":5368709120}]}]""")
+        val choices = torboxCloudVideoChoices(items)
+        assertEquals(402, choices.size)
+        assertEquals(TorboxCloudChoice(21, 500, "Show.S01E02.2160p.mkv", 5368709120), choices.last())
+    }
+
     @Test fun `official TorBox CDN hosts are accepted with exact subdomain boundaries`() {
         assertTrue(isTorboxStreamHost("flux-007.wnam.tb-cdn.io")) // Live host of the reported failure.
         for (domain in listOf("tb-cdn.cx", "tb-cdn.io", "tb-cdn.pw", "tb-cdn.sh", "tb-cdn.st", "tb-cdn.to", "tb-cdn.earth", "torbox.app")) {
@@ -176,6 +241,12 @@ class TorboxPartyHlsTest {
         val episodes = listOf(c(5, "Dark.S01E02.German.1080p.mkv"), c(6, "Dark.S01E03.German.1080p.mkv"), c(7, "Dark.Matter.S01E02.mkv"))
         assertEquals(5, matchTorboxCloudByTitle(episodes, "Dark", 1, 2)?.fileId)
         assertNull(matchTorboxCloudByTitle(episodes, "Dark", 2, 1))
+        assertEquals(9, matchTorboxCloudByTitle(listOf(c(9, "Dark.S01.E02.1080p.mkv")), "Dark", 1, 2)?.fileId)
+        assertNull(matchTorboxCloudByTitle(listOf(c(9, "Dark.S01E02-E03.1080p.mkv")), "Dark", 1, 2))
+        val remakes = listOf(c(10, "Film.1995.mkv"), c(11, "Film.2024.1080p.mkv"), c(12, "Film.2024.2160p.mkv"))
+        assertNull(matchTorboxCloudByTitle(remakes, "Film", null, null, releaseYear = "2024"))
+        assertEquals(12, matchTorboxCloudByTitle(remakes, "Film", null, null,
+            releaseYear = "2024", filename = "Film 2024 2160p.mkv")?.fileId)
         assertNull(matchTorboxCloudByTitle(episodes, "Dark", null, null)) // A movie never matches an episode file.
         assertNull(matchTorboxCloudByTitle(movies, "", null, null))
         assertEquals(8, matchTorboxCloudByTitle(listOf(c(8, "Die.Schöne.und.das.Biest.2017.mkv")), "Die Schöne und das Biest", null, null)?.fileId)

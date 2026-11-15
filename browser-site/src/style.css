@@ -140,10 +140,11 @@ input:focus, select:focus { border-color: #ff8a80; box-shadow: 0 0 0 3px rgba(25
 .custom-controls .controls-bar, .custom-controls .player-top { opacity: 0; pointer-events: none; }
 .custom-controls .controls-bar { transform: translateY(8px); }
 .custom-controls.show-controls .controls-bar, .custom-controls.show-controls .player-top,
+.custom-controls.has-playback-settings .controls-bar,
 .custom-controls.is-paused .controls-bar, .custom-controls.is-paused .player-top,
 .custom-controls .controls-bar:hover, .custom-controls .controls-bar:focus-within, .custom-controls .player-top:focus-within { opacity: 1; transform: none; pointer-events: auto; }
 .custom-controls.show-controls, .custom-controls.is-paused { cursor: default; }
-.custom-controls.is-playing:not(.show-controls) { cursor: none; }
+.custom-controls.is-playing:not(.show-controls):not(.has-playback-settings) { cursor: none; }
 .player-wrap:not(.custom-controls) .controls-bar, .player-wrap:not(.custom-controls) .player-top { display: none; }
 /* Mouse devices: invisible controls stay clickable (hovering reveals them); touch needs a tap first. */
 @media (hover: hover) { .custom-controls .controls-bar, .custom-controls .player-top { pointer-events: auto; } }
@@ -183,7 +184,18 @@ input[type=range]:disabled { cursor: default; opacity: .5; }
 .sync-chip.warn { background: rgba(255, 179, 64, .16); color: #ffc46b; }
 .sync-chip.off { background: rgba(255, 255, 255, .1); color: #d0d1d6; }
 .sync-chip.lost { background: rgba(255, 77, 67, .16); color: #ff9b92; }
-.quality select { width: auto; padding: 7px 26px 7px 11px; font-size: 13px; border-radius: 999px; background: rgba(255, 255, 255, .14); border: 0; }
+.playback-settings-group { position: relative; }
+.playback-settings.menu { width: min(250px, calc(100vw - 24px)); min-width: 0; padding: 10px; gap: 8px; max-height: min(34vh, 240px); }
+.playback-settings h3 { margin: 0; font-size: 14px; }
+.playback-setting { display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; font-size: 12px; color: var(--text-2); }
+.playback-setting select { width: 100%; min-width: 0; padding: 6px 8px; font-size: 14px; text-overflow: ellipsis; }
+.playback-setting select:disabled { opacity: 1; cursor: default; }
+.playback-subtitles { border-top: 1px solid var(--line); min-width: 0; }
+.playback-subtitles summary { padding: 8px 0; cursor: pointer; font-size: 14px; }
+.subtitle-options { display: grid; gap: 2px; }
+.subtitle-options button { overflow-wrap: anywhere; }
+.subtitle-options button[aria-pressed="true"]::before { content: "✓ "; color: var(--accent); }
+.playback-settings #openPartySettings { border-top: 1px solid var(--line); border-radius: 0; }
 
 /* Participants badge, top right inside the player */
 .members-badge { display: inline-flex; align-items: center; gap: 8px; padding: 5px 12px 5px 6px; border: 0; border-radius: 999px; background: rgba(0, 0, 0, .45); color: #f0f0f3; font: inherit; font-size: 13px; font-weight: 650; cursor: pointer; backdrop-filter: blur(6px); }

@@ -93,8 +93,8 @@ export class StallTracker {
   }
 }
 
-const qualityLabel = height => height >= 2000 ? '4K' : `${height}p`;
-// Only real, distinct variant heights. A single-variant playlist offers none.
+const qualityLabel = height => height === 2160 ? '4K / 2160p' : `${height}p`;
+// Only real, distinct variant heights, highest bitrate first within each height.
 export function qualityOptions(levels) {
   const seen = new Map();
   (levels || []).forEach((level, index) => {
@@ -103,7 +103,6 @@ export function qualityOptions(levels) {
     const current = seen.get(height);
     if (!current || Number(level.bitrate) > current.bitrate) seen.set(height, {index, height, bitrate: Number(level.bitrate) || 0});
   });
-  if (seen.size < 2) return [];
-  return [{value: -1, label: 'Auto'}, ...[...seen.values()].sort((a, b) => b.height - a.height)
-    .map(({index, height}) => ({value: index, label: qualityLabel(height)}))];
+  return [...seen.values()].sort((a, b) => b.height - a.height)
+    .map(({index, height}) => ({value: index, height, label: qualityLabel(height)}));
 }

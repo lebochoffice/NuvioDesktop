@@ -27,7 +27,7 @@ class TorboxPartyHlsPrepareTest {
         return prepareTorboxPartyHls(
             file, key,
             onProcessing = { calls += "processing" },
-            createStream = { _, torrentId, fileId -> calls += "create-$torrentId-$fileId"; create },
+            createStream = { _, selected -> calls += "create-${selected.downloadId}-${selected.fileId}"; create },
             probe = { _, _ -> probes.getOrElse(i++) { probes.last() } },
             pause = { pauses += it },
         )
@@ -39,6 +39,74 @@ class TorboxPartyHlsPrepareTest {
         val result = prepare(ok("https://stream.torbox.app/a.m3u8"), listOf(404, 404, 202, 200), calls)
         assertIs<TorboxPartyHlsResult.Ready>(result)
         assertEquals(listOf("create-11-0", "processing"), calls) // No duplicate TorBox session while polling.
+    }
+
+    @Test
+    fun germanAudioUsesTheRelativeIndexFromTorboxMetadata() = runTest {
+        val usenet = file.copy(source = TorboxPartySource.Usenet)
+        val requested = mutableListOf<Int>()
+        val result = prepareTorboxPartyHls(usenet, key,
+            createStream = { _, selected ->
+                assertEquals(usenet, selected)
+                DebridApiResponse(200, Json.parseToJsonElement(
+                """{"success":true,"data":{"hls_url":"https://stream.torbox.app/default.m3u8","audio_index":0,"metadata":{"audios":[{"index":2,"language":"eng"},{"index":4,"language":"und","title":"German E-AC3 5.1"}]}}}"""
+            ), "") },
+            createStreamForAudio = { _, selected, index ->
+                assertEquals(usenet, selected)
+                requested += index
+                DebridApiResponse(200, Json.parseToJsonElement(
+                    """{"success":true,"data":{"hls_url":"https://stream.torbox.app/german.m3u8","audio_index":1}}"""
+                ), "")
+            },
+            probe = { _, _ -> 200 },
+        )
+        assertEquals(listOf(1), requested)
+        assertEquals("https://stream.torbox.app/german.m3u8", assertIs<TorboxPartyHlsResult.Ready>(result).url)
+    }
+
+    @Test
+    fun usenetUsesTheSameFamilyShareAndTokenPropagationAsTorrents() = runTest {
+        val usenet = file.copy(source = TorboxPartySource.Usenet)
+        val keyed = "https://stream.torbox.app/usenet.m3u8?token=$key"
+        val ready = prepareTorboxPartyHls(usenet, key, familyShare = true,
+            createStream = { _, selected -> assertEquals(usenet, selected); ok(keyed) },
+            probe = { url, account ->
+                assertEquals(keyed, url)
+                assertEquals("", account)
+                TORBOX_PROBE_OK_NEEDS_TOKEN
+            },
+        )
+        assertIs<TorboxPartyHlsResult.Ready>(ready)
+        assertEquals(keyed, ready.url)
+        assertTrue(ready.familyOnly)
+        assertTrue(ready.propagateToken)
+
+        val refused = prepareTorboxPartyHls(usenet, key, familyShare = false,
+            createStream = { _, _ -> ok(keyed) },
+            probe = { url, account ->
+                assertTrue(key !in url)
+                assertEquals(key, account)
+                403
+            },
+        )
+        assertEquals(TorboxHlsFailure.Unsupported, assertIs<TorboxPartyHlsResult.Failed>(refused).reason)
+    }
+
+    @Test
+    fun rejectedGermanAudioReportsTheFallback() = runTest {
+        val result = prepareTorboxPartyHls(file, key,
+            createStream = { _, _ -> DebridApiResponse(200, Json.parseToJsonElement(
+                """{"success":true,"data":{"hls_url":"https://stream.torbox.app/default.m3u8","audio_index":0,"metadata":{"audios":[{"language":"eng"},{"language":"de-DE"}]}}}"""
+            ), "") },
+            createStreamForAudio = { _, _, index ->
+                assertEquals(1, index)
+                status(422)
+            },
+            probe = { _, _ -> 200 },
+        )
+        val ready = assertIs<TorboxPartyHlsResult.Ready>(result)
+        assertEquals("https://stream.torbox.app/default.m3u8", ready.url)
+        assertTrue("HTTP 422" in ready.audioStatus && "Standardspur" in ready.audioStatus)
     }
 
     @Test
@@ -68,7 +136,7 @@ class TorboxPartyHlsPrepareTest {
     fun aKeyBearingHlsUrlIsUsedOnlyWithoutTheKeyAndOnlyIfTorBoxServesIt() = runTest {
         val probed = mutableListOf<String>()
         suspend fun run(code: Int) = prepareTorboxPartyHls(file, key,
-            createStream = { _, _, _ -> ok("https://stream.torbox.app/stream/p/0/0/0/0?token=$key") },
+            createStream = { _, _ -> ok("https://stream.torbox.app/stream/p/0/0/0/0?token=$key") },
             probe = { url, _ -> probed += url; code },
             pause = {},
         )
@@ -85,7 +153,7 @@ class TorboxPartyHlsPrepareTest {
     fun aCdnStreamIsPreparedAndAnUnsafeRedirectStopsTheShare() = runTest {
         val cdn = "https://flux-007.wnam.tb-cdn.io/stream/p/0/0/0/0"
         assertIs<TorboxPartyHlsResult.Ready>(prepare(ok(cdn), listOf(200)))
-        val keyed = prepareTorboxPartyHls(file, key, createStream = { _, _, _ -> ok("$cdn?token=$key") }, probe = { url, _ -> if (key in url) 500 else 200 }, pause = {})
+        val keyed = prepareTorboxPartyHls(file, key, createStream = { _, _ -> ok("$cdn?token=$key") }, probe = { url, _ -> if (key in url) 500 else 200 }, pause = {})
         assertIs<TorboxPartyHlsResult.Ready>(keyed)
         assertTrue(key !in keyed.url)
         val unsafe = prepare(ok(cdn), listOf(TORBOX_PROBE_UNSAFE_HOST)) as TorboxPartyHlsResult.Failed
@@ -111,7 +179,7 @@ class TorboxPartyHlsPrepareTest {
     fun withTheFamilyShareTheOriginalAddressWithItsTokenIsUsedUnchanged() = runTest {
         val keyed = "https://flux-007.wnam.tb-cdn.io/stream/p/0/0/0/0?token=$key"
         val probed = mutableListOf<Pair<String, String>>()
-        val ready = prepareTorboxPartyHls(file, key, createStream = { _, _, _ -> ok(keyed) },
+        val ready = prepareTorboxPartyHls(file, key, createStream = { _, _ -> ok(keyed) },
             probe = { url, checkKey -> probed += url to checkKey; TORBOX_PROBE_OK_NEEDS_TOKEN }, pause = {}, familyShare = true)
         assertIs<TorboxPartyHlsResult.Ready>(ready)
         assertEquals(keyed, ready.url); assertTrue(ready.familyOnly); assertTrue(ready.propagateToken)
@@ -119,22 +187,22 @@ class TorboxPartyHlsPrepareTest {
         // Without the share service the keyed address is never used, and a 422 for
         // the key-free address ends at once with a clear message.
         probed.clear()
-        val refused = prepareTorboxPartyHls(file, key, createStream = { _, _, _ -> ok(keyed) },
+        val refused = prepareTorboxPartyHls(file, key, createStream = { _, _ -> ok(keyed) },
             probe = { url, checkKey -> probed += url to checkKey; 422 }, pause = {}) as TorboxPartyHlsResult.Failed
         assertTrue("Freigabedienst" in refused.message && key !in refused.message)
         assertTrue(probed.single().first.let { key !in it })
         // A foreign host stays blocked even with the share service.
         assertIs<TorboxPartyHlsResult.Failed>(prepareTorboxPartyHls(file, key,
-            createStream = { _, _, _ -> ok("https://evil-tb-cdn.io/a?token=$key") }, probe = { _, _ -> 200 }, pause = {}, familyShare = true))
+            createStream = { _, _ -> ok("https://evil-tb-cdn.io/a?token=$key") }, probe = { _, _ -> 200 }, pause = {}, familyShare = true))
     }
 
     @Test
     fun accountChangeAndMissingKeyNeverCallTheApi() = runTest {
         val calls = mutableListOf<String>()
         val other = prepareTorboxPartyHls(file.copy(accountFingerprint = "other"), key,
-            createStream = { _, _, _ -> calls += "create"; ok("https://stream.torbox.app/a.m3u8") })
+            createStream = { _, _ -> calls += "create"; ok("https://stream.torbox.app/a.m3u8") })
         assertIs<TorboxPartyHlsResult.Failed>(other)
-        val blank = prepareTorboxPartyHls(file, "", createStream = { _, _, _ -> calls += "create"; ok("https://stream.torbox.app/a.m3u8") })
+        val blank = prepareTorboxPartyHls(file, "", createStream = { _, _ -> calls += "create"; ok("https://stream.torbox.app/a.m3u8") })
         assertIs<TorboxPartyHlsResult.Failed>(blank)
         assertEquals(emptyList(), calls)
     }

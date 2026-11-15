@@ -8,7 +8,16 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.json.*
 
 /** Non-secret identity retained from the exact file chosen by the resolver. */
-data class TorboxPartyFile(val torrentId: Int, val fileId: Int, val accountFingerprint: String)
+enum class TorboxPartySource(val apiType: String, val label: String) {
+    Torrent("torrent", "Torrent"), Usenet("usenet", "Usenet"),
+}
+
+data class TorboxPartyFile(
+    val downloadId: Int,
+    val fileId: Int,
+    val accountFingerprint: String,
+    val source: TorboxPartySource = TorboxPartySource.Torrent,
+)
 
 internal fun torboxAccountFingerprint(apiKey: String): String =
     com.nuvio.app.features.profiles.ProfilePinCrypto.sha256Hex(apiKey)
@@ -22,7 +31,7 @@ internal sealed interface TorboxPartyHlsResult {
      * never broadcast; only the family share service may hand it to admitted
      * guests. propagateToken: variant playlists need the same `token`.
      */
-    class Ready(val url: String, val familyOnly: Boolean = false, val propagateToken: Boolean = false) : TorboxPartyHlsResult
+    class Ready(val url: String, val familyOnly: Boolean = false, val propagateToken: Boolean = false, val audioStatus: String = "") : TorboxPartyHlsResult
     class Failed(val message: String, val reason: TorboxHlsFailure = TorboxHlsFailure.RequestFailed) : TorboxPartyHlsResult {
         // The account/plan refused access (not a transient failure).
         val denied: Boolean get() = reason == TorboxHlsFailure.Denied
@@ -149,25 +158,81 @@ internal fun torboxShareableHls(body: JsonElement?, apiKey: String): String? =
 internal val TORBOX_PLAYLIST_POLL_DELAYS_MS: List<Long> =
     List(5) { 2_000L } + List(10) { 5_000L } + List(36) { 15_000L }
 
+private val TORBOX_GERMAN_AUDIO = Regex("^(?:de|deu|ger)(?:[-_][a-z0-9]+)*$|^(?:german|deutsch)(?:$|[ .(].*)")
+
+private suspend fun preferGermanTorboxAudio(
+    response: DebridApiResponse<JsonElement>,
+    apiKey: String,
+    createForAudio: suspend (Int) -> DebridApiResponse<JsonElement>,
+): Pair<DebridApiResponse<JsonElement>, String> {
+    val unknown = response to "TorBox-Audio: Audio-Metadaten fehlen oder sind ungültig; Standardspur verwendet."
+    val data = (response.body as? JsonObject)?.get("data") as? JsonObject ?: return unknown
+    val metadata = data["metadata"] as? JsonObject ?: return unknown
+    val tracks = metadata["audios"] as? JsonArray ?: return unknown
+    if (tracks.isEmpty() || tracks.any { it !is JsonObject }) return unknown
+    fun JsonObject.language(field: String) =
+        (get(field) as? JsonPrimitive)?.takeIf { it.isString }?.contentOrNull?.trim()?.lowercase()
+    // Use the array position, which is independent of the container stream index.
+    val germanTracks = tracks.indices.filter { index ->
+        val track = tracks[index] as JsonObject
+        val languages = listOfNotNull(track.language("language"), track.language("language_full"))
+            .filterNot { it in setOf("", "und", "unknown", "undefined") }
+        if (languages.isEmpty()) {
+            track.language("title")?.let(TORBOX_GERMAN_AUDIO::matches) == true
+        } else {
+            languages.all(TORBOX_GERMAN_AUDIO::matches)
+        }
+    }
+    val count = tracks.size
+    if (germanTracks.isEmpty()) return response to "TorBox-Audio: Keine eindeutig deutsche Spur in $count gemeldeten Spuren; Standardspur verwendet."
+    val current = (data["audio_index"] as? JsonPrimitive)?.intOrNull
+    if (current != null && current in germanTracks)
+        return response to "TorBox-Audio: Deutsch vom Anbieter bestätigt (relativer Index $current, $count Spuren)."
+    val german = germanTracks.singleOrNull()
+        ?: return response to "TorBox-Audio: Mehrere deutsche Spuren; Standardspur verwendet."
+    if (current == null && german == 0)
+        return response to "TorBox-Audio: Deutsch steht an Index 0; TorBox bestätigt den gewählten Index nicht."
+    val adjusted = try {
+        createForAudio(german)
+    } catch (cancelled: CancellationException) { throw cancelled }
+    catch (_: Exception) {
+        return response to "TorBox-Audio: Anfrage für Deutsch (Index $german) fehlgeschlagen; Standardspur verwendet."
+    }
+    val adjustedData = (adjusted.body as? JsonObject)?.get("data") as? JsonObject
+    if (!adjusted.isSuccessful)
+        return response to "TorBox-Audio: Auswahl Deutsch (Index $german) fehlgeschlagen (HTTP ${adjusted.status}); Standardspur verwendet."
+    val actual = (adjustedData?.get("audio_index") as? JsonPrimitive)?.intOrNull
+    if (actual != german)
+        return response to "TorBox-Audio: Angeforderter Index $german nicht bestätigt (Antwort: ${actual ?: "kein Index"}); Standardspur verwendet."
+    return when (torboxHlsCandidate(adjusted.body, apiKey)) {
+        is TorboxHlsCandidate.Url, is TorboxHlsCandidate.KeyOnlyInTokenParameter ->
+            adjusted to "TorBox-Audio: Deutsch vom Anbieter bestätigt (relativer Index $german, $count Spuren)."
+        else -> response to "TorBox-Audio: Keine verwendbare HLS-Adresse für Deutsch (Index $german); Standardspur verwendet."
+    }
+}
+
 internal suspend fun prepareTorboxPartyHls(
     file: TorboxPartyFile,
     apiKey: String,
     onProcessing: () -> Unit = {},
     // Injectable for tests; production uses the real API, probe and delay.
-    createStream: suspend (apiKey: String, torrentId: Int, fileId: Int) -> DebridApiResponse<JsonElement> =
-        { key, torrentId, fileId -> TorboxApiClient.createStream(key, torrentId, fileId) },
+    createStream: suspend (String, TorboxPartyFile) -> DebridApiResponse<JsonElement> =
+        { key, selected -> TorboxApiClient.createStream(key, selected.downloadId, selected.fileId, source = selected.source) },
     probe: suspend (url: String, apiKey: String) -> Int = { url, key -> probeTorboxPartyHls(url, key) },
     pause: suspend (Long) -> Unit = { kotlinx.coroutines.delay(it) },
     // True only when the protected family share service is configured: then
     // the original address with the account token is used (host side only).
     familyShare: Boolean = false,
+    createStreamForAudio: suspend (String, TorboxPartyFile, Int) -> DebridApiResponse<JsonElement> =
+        { key, selected, audioIndex -> TorboxApiClient.createStream(key, selected.downloadId, selected.fileId, audioIndex, source = selected.source) },
 ): TorboxPartyHlsResult {
     if (apiKey.isBlank()) return TorboxPartyHlsResult.Failed("TorBox: Kein gespeicherter Account-Key verfügbar.")
     if (file.accountFingerprint != torboxAccountFingerprint(apiKey)) return TorboxPartyHlsResult.Failed("TorBox: Account geändert. Quelle im neuen Account erneut auswählen.")
     var keyFree = false
     var familyOnly = false
+    val audioStatus: String
     val url = try {
-        val response = createStream(apiKey, file.torrentId, file.fileId)
+        val response = createStream(apiKey, file)
         val root = response.body as? JsonObject
         if (response.status == 401 || response.status == 403) {
             return TorboxPartyHlsResult.Failed("TorBox: Streamzugriff verweigert (HTTP ${response.status}). Tarif und Account-Berechtigung prüfen.", TorboxHlsFailure.Denied)
@@ -176,8 +241,12 @@ internal suspend fun prepareTorboxPartyHls(
             return TorboxPartyHlsResult.Failed("TorBox: API-Anfrage fehlgeschlagen (HTTP ${response.status}). Account, Tarif und Verfügbarkeit prüfen.")
         }
         // Same address TorBox returned (host already checked by the candidate).
-        val original = ((root?.get("data") as? JsonObject)?.get("hls_url") as? JsonPrimitive)?.contentOrNull
-        val candidate = torboxHlsCandidate(response.body, apiKey)
+        val (stream, selectionStatus) = preferGermanTorboxAudio(response, apiKey) { audioIndex ->
+            createStreamForAudio(apiKey, file, audioIndex)
+        }
+        audioStatus = selectionStatus
+        val original = (((stream.body as? JsonObject)?.get("data") as? JsonObject)?.get("hls_url") as? JsonPrimitive)?.contentOrNull
+        val candidate = torboxHlsCandidate(stream.body, apiKey)
         val keyed = candidate is TorboxHlsCandidate.KeyOnlyInTokenParameter || candidate == TorboxHlsCandidate.ContainsAccountKey
         // Family share: keep the original address with its token unchanged.
         if (familyShare && keyed && original != null && isTorboxStreamUrl(original)) original.also { familyOnly = true }
@@ -209,7 +278,7 @@ internal suspend fun prepareTorboxPartyHls(
             catch (cancelled: CancellationException) { throw cancelled }
             catch (_: Exception) { 0 }
         if (manifest == 200 || manifest == TORBOX_PROBE_OK_NEEDS_TOKEN) {
-            return TorboxPartyHlsResult.Ready(url, familyOnly = familyOnly, propagateToken = manifest == TORBOX_PROBE_OK_NEEDS_TOKEN)
+            return TorboxPartyHlsResult.Ready(url, familyOnly = familyOnly, propagateToken = manifest == TORBOX_PROBE_OK_NEEDS_TOKEN, audioStatus = audioStatus)
         }
         if (keyFree && manifest in listOf(401, 403, 422)) return TorboxPartyHlsResult.Failed(
             "TorBox: Ohne Account-Key liefert TorBox die Playlist nicht (HTTP $manifest). Für die Familienfreigabe muss der Freigabedienst eingerichtet sein.",
@@ -243,10 +312,14 @@ internal fun matchTorboxCloudFile(items: List<TorboxCloudItemDto>, infoHash: Str
         (file.id as? JsonPrimitive)?.contentOrNull?.toIntOrNull()?.takeIf { it >= 0 }?.let { it to file }
     }
     fun names(file: TorboxCloudFileDto) = listOfNotNull(file.name, file.shortName, file.absolutePath?.substringAfterLast('/'))
-        .map { it.trim().lowercase() }.filter { it.isNotEmpty() }
-    val wanted = filename?.substringAfterLast('/')?.trim()?.lowercase()?.takeIf { it.isNotEmpty() }
+        .map(::torboxBasename).filter { it.isNotEmpty() }
+    val wanted = filename?.let(::torboxBasename)?.takeIf { it.isNotEmpty() }
     val match = if (wanted != null) {
-        files.filter { (_, file) -> wanted in names(file) }.singleOrNull()
+        val exact = files.filter { (_, file) -> wanted in names(file) }
+        if (exact.isNotEmpty()) exact.singleOrNull()
+        else files.filter { (_, file) ->
+            names(file).any { normalizedTorboxFilename(it) == normalizedTorboxFilename(wanted) }
+        }.singleOrNull()
     } else {
         files.filter { (_, file) ->
             (file.mimeType ?: file.mimeTypeAlt)?.startsWith("video/") == true ||
@@ -268,68 +341,194 @@ internal suspend fun findTorboxCloudFile(apiKey: String, infoHash: String, filen
 }
 
 /** One video file of the host's own TorBox cloud, offered for manual linking. */
-data class TorboxCloudChoice(val torrentId: Int, val fileId: Int, val name: String, val size: Long?)
-
-internal const val TORBOX_CHOICES_LIMIT = 400
+data class TorboxCloudChoice(
+    val downloadId: Int,
+    val fileId: Int,
+    val name: String,
+    val size: Long?,
+    val source: TorboxPartySource = TorboxPartySource.Torrent,
+) {
+    val selectionId: String get() = "${source.apiType}:$downloadId:$fileId"
+    fun partyFile(accountFingerprint: String) = TorboxPartyFile(downloadId, fileId, accountFingerprint, source)
+}
 
 /** Real torrent/file IDs from mylist; video files only, nothing derived from names. */
-internal fun torboxCloudVideoChoices(items: List<TorboxCloudItemDto>): List<TorboxCloudChoice> =
-    items.flatMap { torrent ->
-        val torrentId = (torrent.id as? JsonPrimitive)?.contentOrNull?.toIntOrNull()?.takeIf { it >= 0 } ?: return@flatMap emptyList()
-        torrent.files.orEmpty().mapNotNull { file ->
+internal fun torboxCloudVideoChoices(
+    items: List<TorboxCloudItemDto>, source: TorboxPartySource = TorboxPartySource.Torrent,
+): List<TorboxCloudChoice> =
+    items.flatMap { download ->
+        if (download.downloadPresent == false || download.downloadFinished == false) return@flatMap emptyList()
+        val status = listOfNotNull(download.downloadState, download.status, download.state)
+            .firstOrNull { it.isNotBlank() }?.trim()?.lowercase()
+        if (source == TorboxPartySource.Usenet && download.downloadFinished != true &&
+            status !in setOf("completed", "cached", "finished")
+        ) return@flatMap emptyList()
+        val downloadId = (download.id as? JsonPrimitive)?.contentOrNull?.toIntOrNull()?.takeIf { it >= 0 } ?: return@flatMap emptyList()
+        download.files.orEmpty().mapNotNull { file ->
             val fileId = (file.id as? JsonPrimitive)?.contentOrNull?.toIntOrNull()?.takeIf { it >= 0 } ?: return@mapNotNull null
-            val name = (file.shortName ?: file.name ?: file.absolutePath?.substringAfterLast('/'))?.trim()?.takeIf { it.isNotEmpty() } ?: return@mapNotNull null
-            val video = (file.mimeType ?: file.mimeTypeAlt)?.startsWith("video/") == true ||
-                VIDEO_EXTENSIONS.any { name.lowercase().endsWith(it) }
-            if (video) TorboxCloudChoice(torrentId, fileId, name.take(200), file.size) else null
+            val names = listOfNotNull(file.shortName, file.name, file.absolutePath)
+                .map { it.substringAfterLast('/').substringAfterLast('\\').trim() }
+                .filter { it.isNotEmpty() && !it.contains('?') && !it.contains('#') }
+            val videoName = names.firstOrNull { name -> VIDEO_EXTENSIONS.any { name.lowercase().endsWith(it) } }
+            val videoMime = listOfNotNull(file.mimeType, file.mimeTypeAlt).any { it.startsWith("video/", ignoreCase = true) }
+            val name = videoName ?: names.firstOrNull()?.takeIf { videoMime } ?: return@mapNotNull null
+            TorboxCloudChoice(downloadId, fileId, name, file.size, source)
         }
-    }.sortedBy { it.name.lowercase() }.take(TORBOX_CHOICES_LIMIT)
+    }.sortedBy { it.name.lowercase() }
 
-internal suspend fun listTorboxCloudChoices(apiKey: String): List<TorboxCloudChoice>? {
+internal data class TorboxCloudChoices(val files: List<TorboxCloudChoice>, val missingCategory: String? = null)
+
+internal suspend fun listTorboxCloudChoices(apiKey: String): TorboxCloudChoices? {
     if (apiKey.isBlank()) return null
-    val response = TorboxApiClient.listCloudTorrents(apiKey)
-    if (!response.isSuccessful) return null
-    return torboxCloudVideoChoices(response.body?.data ?: return null)
+    val torrents = readTorboxCloudItems { TorboxApiClient.listCloudTorrents(apiKey) }
+    val usenet = readTorboxCloudItems { TorboxApiClient.listCloudUsenet(apiKey) }
+    if (torrents == null && usenet == null) return null
+    return TorboxCloudChoices(
+        torboxCloudVideoChoices(torrents.orEmpty()) + torboxCloudVideoChoices(usenet.orEmpty(), TorboxPartySource.Usenet),
+        missingCategory = if (torrents == null) "Torrent" else if (usenet == null) "Usenet" else null,
+    )
 }
+
+private fun torboxBasename(name: String): String =
+    name.substringAfterLast('/').substringAfterLast('\\').trim().lowercase()
 
 private fun titleTokens(text: String): List<String> = text.lowercase()
     .replace("ä", "ae").replace("ö", "oe").replace("ü", "ue").replace("ß", "ss")
-    .replace(Regex("[^a-z0-9]+"), " ").trim().split(' ').filter { it.isNotEmpty() }
+    .replace(Regex("['’]"), "")
+    .split(Regex("[^\\p{L}\\p{N}]+")).filter { it.isNotEmpty() }
 
-private val RELEASE_MARKER = Regex("^(19|20)\\d{2}$|^s\\d{1,2}e\\d{1,3}$|^\\d{1,2}x\\d{1,3}$|^(2160p|1080p|720p|480p|4k|uhd|hdr|web|webrip|webdl|bluray|bdrip|remux|x264|x265|h264|h265|hevc|dv|proper|repack|multi|german|dl)$")
+private fun normalizedTorboxFilename(name: String): List<String> = titleTokens(torboxBasename(name))
 
-/**
- * Addon stream without info hash: link a cloud file only if its name, up to
- * the first year/episode/quality marker, is exactly the title (and, for an
- * episode, contains that SxxEyy). Unique match only; "Spider-Man 2" never
- * matches "Spider-Man". The host can always change or remove the link.
- */
-internal fun matchTorboxCloudByTitle(choices: List<TorboxCloudChoice>, title: String, season: Int?, episode: Int?): TorboxCloudChoice? {
-    val wanted = titleTokens(title).takeIf { it.isNotEmpty() } ?: return null
-    val episodeTags = if (season != null && episode != null) setOf(
-        "s${season.toString().padStart(2, '0')}e${episode.toString().padStart(2, '0')}", "s${season}e${episode}",
-        "s${season.toString().padStart(2, '0')}e${episode}", "${season}x${episode.toString().padStart(2, '0')}",
-    ) else emptySet()
-    return choices.filter { choice ->
-        val tokens = titleTokens(choice.name.substringBeforeLast('.'))
-        if ("sample" in tokens) return@filter false
-        val head = tokens.takeWhile { !RELEASE_MARKER.matches(it) }
-        val hasEpisode = tokens.any { Regex("^s\\d{1,2}e\\d{1,3}$|^\\d{1,2}x\\d{1,3}$").matches(it) }
-        head == wanted && if (episodeTags.isEmpty()) !hasEpisode else tokens.any { it in episodeTags }
-    }.singleOrNull()
+private val RELEASE_YEAR = Regex("^(19|20)\\d{2}$")
+private val RELEASE_SUFFIX = Regex("^(\\d{3,4}p|4k|uhd|hdr10?|dv|web|webrip|webdl|bluray|bdrip|brrip|remux|x26[45]|h26[45]|hevc|proper|repack|multi|german|dl)$")
+private val EPISODE_TAG = Regex("(?<![a-z0-9])(?:s(\\d{1,3})[ ._-]*e(\\d{1,3})|(\\d{1,3})[ ._-]*x[ ._-]*(\\d{1,3}))(?!\\d)")
+private val EPISODE_SUFFIX = Regex("^(?:e\\d|[ ._]*-[ ._]*(?:s\\d|e?\\d{1,3}(?!\\d|p)))")
+
+private fun torboxEpisodeMatches(stem: String, season: Int?, episode: Int?): Boolean {
+    val tags = EPISODE_TAG.findAll(stem).toList()
+    if (season == null && episode == null) return tags.isEmpty()
+    if (season == null || episode == null) return false
+    val tag = tags.singleOrNull() ?: return false
+    if (EPISODE_SUFFIX.containsMatchIn(stem.substring(tag.range.last + 1))) return false
+    val tagSeason = tag.groupValues[1].ifEmpty { tag.groupValues[3] }.toInt()
+    val tagEpisode = tag.groupValues[2].ifEmpty { tag.groupValues[4] }.toInt()
+    return tagSeason == season && tagEpisode == episode
 }
 
-/** One mylist call: unique info-hash match first, then the conservative title match. */
-internal suspend fun autoLinkTorboxCloud(apiKey: String, infoHash: String?, filename: String?, title: String, season: Int?, episode: Int?): Pair<TorboxPartyFile, String>? {
-    if (apiKey.isBlank()) return null
-    val response = TorboxApiClient.listCloudTorrents(apiKey)
-    if (!response.isSuccessful) return null
-    val items = response.body?.data ?: return null
-    val choices = torboxCloudVideoChoices(items)
-    val byHash = infoHash?.takeIf { it.isNotBlank() }?.let { matchTorboxCloudFile(items, it, filename) }
-    val choice = byHash?.let { (t, f) -> choices.firstOrNull { it.torrentId == t && it.fileId == f } ?: TorboxCloudChoice(t, f, filename.orEmpty(), null) }
-        ?: matchTorboxCloudByTitle(choices, title, season, episode) ?: return null
-    return TorboxPartyFile(choice.torrentId, choice.fileId, torboxAccountFingerprint(apiKey)) to choice.name
+/** Never use size or list order to choose between different plausible releases. */
+private fun torboxTitleCandidates(
+    choices: List<TorboxCloudChoice>, title: String, season: Int?, episode: Int?,
+    releaseYear: String? = null, filename: String? = null,
+): List<TorboxCloudChoice> {
+    val wanted = titleTokens(title).takeIf { it.isNotEmpty() } ?: return emptyList()
+    val year = releaseYear?.takeIf(RELEASE_YEAR::matches)
+    val candidates = choices.mapNotNull { choice ->
+        val stem = torboxBasename(choice.name).substringBeforeLast('.')
+        if (!torboxEpisodeMatches(stem, season, episode)) return@mapNotNull null
+        val titlePart = EPISODE_TAG.find(stem)?.let { stem.substring(0, it.range.first) } ?: stem
+        val tokens = titleTokens(titlePart)
+        if ("sample" in titleTokens(stem) || tokens.take(wanted.size) != wanted) return@mapNotNull null
+        val suffix = tokens.drop(wanted.size)
+        val fileYear = suffix.firstOrNull()?.takeIf(RELEASE_YEAR::matches)
+        if (suffix.isNotEmpty() && fileYear == null && !RELEASE_SUFFIX.matches(suffix.first())) return@mapNotNull null
+        if (year != null && fileYear != null && year != fileYear) return@mapNotNull null
+        choice to fileYear
+    }
+    if (!filename.isNullOrBlank()) {
+        val exact = candidates.filter { (choice, _) -> torboxBasename(choice.name) == torboxBasename(filename) }
+        if (exact.isNotEmpty()) return exact.map { it.first }
+        val normalized = candidates.filter { (choice, _) -> normalizedTorboxFilename(choice.name) == normalizedTorboxFilename(filename) }
+        if (normalized.isNotEmpty()) return normalized.map { it.first }
+    }
+    if (year != null) {
+        val dated = candidates.filter { it.second == year }
+        if (dated.isNotEmpty()) return dated.map { it.first }
+    }
+    return candidates.map { it.first }
+}
+
+internal fun matchTorboxCloudByTitle(
+    choices: List<TorboxCloudChoice>, title: String, season: Int?, episode: Int?,
+    releaseYear: String? = null, filename: String? = null,
+): TorboxCloudChoice? = torboxTitleCandidates(choices, title, season, episode, releaseYear, filename).singleOrNull()
+
+internal enum class TorboxMatchKind(val message: String) {
+    Exact(""), UniqueTitle(""),
+    Ambiguous("Mehrere TorBox-Veröffentlichungen passen. Bitte Originaldatei manuell wählen."),
+    UnclearFile("Torrent gefunden, Datei oder Folge nicht eindeutig. Bitte Originaldatei manuell wählen."),
+    NotFound("Keine passende Datei im abgefragten Cloud-Inventar des eingestellten TorBox-Kontos."),
+    Unavailable("TorBox-Cloud vorübergehend nicht abrufbar. Beim nächsten Quellenwechsel wird erneut gesucht."),
+}
+
+internal data class TorboxCloudMatch(val kind: TorboxMatchKind, val choice: TorboxCloudChoice? = null)
+
+internal suspend fun autoLinkTorboxCloud(
+    apiKey: String, infoHash: String?, filename: String?, title: String, season: Int?, episode: Int?,
+    releaseYear: String? = null,
+    load: suspend (String) -> DebridApiResponse<TorboxEnvelopeDto<List<TorboxCloudItemDto>>> = TorboxApiClient::listCloudTorrents,
+    loadUsenet: suspend (String) -> DebridApiResponse<TorboxEnvelopeDto<List<TorboxCloudItemDto>>> = TorboxApiClient::listCloudUsenet,
+): TorboxCloudMatch {
+    val torrents = readTorboxCloudItems { load(apiKey) } ?: return TorboxCloudMatch(TorboxMatchKind.Unavailable)
+    // A known torrent hash restricts matching to that torrent. For metadata
+    // matching compare both inventories so a second release stays ambiguous.
+    val usenet = if (infoHash.isNullOrBlank())
+        readTorboxCloudItems { loadUsenet(apiKey) } ?: return TorboxCloudMatch(TorboxMatchKind.Unavailable)
+    else emptyList()
+    return resolveTorboxCloudMatch(torrents, infoHash, filename, title, season, episode, releaseYear, usenet)
+}
+
+private suspend fun readTorboxCloudItems(
+    load: suspend () -> DebridApiResponse<TorboxEnvelopeDto<List<TorboxCloudItemDto>>>,
+): List<TorboxCloudItemDto>? {
+    suspend fun fetch() = try {
+        load()
+    } catch (cancelled: CancellationException) { throw cancelled }
+    catch (_: Exception) { null }
+    var response = fetch()
+    if (response == null || response.status in setOf(0, 408, 500, 502, 503, 504)) {
+        kotlinx.coroutines.delay(2_000)
+        response = fetch()
+    }
+    return response?.takeIf { it.isSuccessful }?.body?.takeUnless { it.success == false }?.data
+}
+
+internal fun resolveTorboxCloudMatch(
+    items: List<TorboxCloudItemDto>, infoHash: String?, filename: String?, title: String,
+    season: Int?, episode: Int?, releaseYear: String? = null,
+    usenet: List<TorboxCloudItemDto> = emptyList(),
+): TorboxCloudMatch {
+    val hash = infoHash?.trim()?.takeIf { it.isNotEmpty() }
+    if (hash == null) {
+        val choices = (torboxCloudVideoChoices(items) + torboxCloudVideoChoices(usenet, TorboxPartySource.Usenet)).let { videos ->
+            if (filename.isNullOrBlank()) videos
+            else videos.filter { normalizedTorboxFilename(it.name) == normalizedTorboxFilename(filename) }
+        }
+        val candidates = torboxTitleCandidates(choices, title, season, episode, releaseYear, filename)
+        return when (candidates.size) {
+            0 -> TorboxCloudMatch(TorboxMatchKind.NotFound)
+            1 -> TorboxCloudMatch(TorboxMatchKind.UniqueTitle, candidates.single())
+            else -> TorboxCloudMatch(TorboxMatchKind.Ambiguous)
+        }
+    }
+    val torrents = items.filter { it.hash?.trim().equals(hash, ignoreCase = true) }
+    if (torrents.isEmpty()) return TorboxCloudMatch(TorboxMatchKind.NotFound)
+    val torrent = torrents.singleOrNull() ?: return TorboxCloudMatch(TorboxMatchKind.Ambiguous)
+    val choices = torboxCloudVideoChoices(listOf(torrent))
+    val byHash = matchTorboxCloudFile(listOf(torrent), hash, filename)
+    // When a filename was supplied, absence or ambiguity is final.
+    if (!filename.isNullOrBlank() && byHash == null) return TorboxCloudMatch(TorboxMatchKind.UnclearFile)
+    val direct = byHash?.let { (torrentId, fileId) ->
+        choices.firstOrNull { it.downloadId == torrentId && it.fileId == fileId }
+    }?.takeIf { choice ->
+        // An exact source filename and hash identify the selected episode even when its name is untagged.
+        (season == null && episode == null) ||
+            (!filename.isNullOrBlank() && torboxBasename(choice.name) == torboxBasename(filename) &&
+                EPISODE_TAG.find(torboxBasename(choice.name)) == null) ||
+            torboxEpisodeMatches(torboxBasename(choice.name), season, episode)
+    }
+    val choice = if (!filename.isNullOrBlank()) direct
+        else direct ?: matchTorboxCloudByTitle(choices, title, season, episode, releaseYear)
+    return if (choice == null) TorboxCloudMatch(TorboxMatchKind.UnclearFile) else TorboxCloudMatch(TorboxMatchKind.Exact, choice)
 }
 
 /** Host-side state of the browser HLS source; shown in the party panel. */

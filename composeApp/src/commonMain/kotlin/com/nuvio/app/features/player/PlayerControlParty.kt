@@ -104,6 +104,7 @@ data class PlayerControlTorboxChoice(
     val id: String = "",
     val name: String = "",
     val size: String = "",
+    val bytes: Long = 0L,
 )
 
 @Serializable

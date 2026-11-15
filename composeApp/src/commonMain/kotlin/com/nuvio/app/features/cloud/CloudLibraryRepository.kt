@@ -71,11 +71,14 @@ internal class CloudLibraryStore(
             ?: return CloudLibraryPlaybackResult.MissingCredentials
         val api = providerApis.firstOrNull { it.provider.id == item.providerId }
             ?: return CloudLibraryPlaybackResult.Failed()
-        val torboxFile = if (item.providerId == com.nuvio.app.features.debrid.DebridProviders.TORBOX_ID && item.type == CloudLibraryItemType.Torrent) {
-            val torrentId = item.id.toIntOrNull()
+        val torboxFile = if (item.providerId == com.nuvio.app.features.debrid.DebridProviders.TORBOX_ID && (item.type == CloudLibraryItemType.Torrent || item.type == CloudLibraryItemType.Usenet)) {
+            val downloadId = item.id.toIntOrNull()
             val fileId = file.id?.toIntOrNull()
-            if (torrentId != null && fileId != null && torrentId >= 0 && fileId >= 0)
-                com.nuvio.app.features.debrid.TorboxPartyFile(torrentId, fileId, com.nuvio.app.features.debrid.torboxAccountFingerprint(credential.apiKey)) else null
+            val source = if (item.type == CloudLibraryItemType.Usenet)
+                com.nuvio.app.features.debrid.TorboxPartySource.Usenet
+            else com.nuvio.app.features.debrid.TorboxPartySource.Torrent
+            if (downloadId != null && fileId != null && downloadId >= 0 && fileId >= 0)
+                com.nuvio.app.features.debrid.TorboxPartyFile(downloadId, fileId, com.nuvio.app.features.debrid.torboxAccountFingerprint(credential.apiKey), source) else null
         } else null
         file.playbackUrl?.takeIf { it.isNotBlank() }?.let { url ->
             return CloudLibraryPlaybackResult.Success(

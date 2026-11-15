@@ -159,6 +159,8 @@ export async function gate(context, options = {}) {
   const url = new URL(request.url);
   // Production is never gated, whatever the configuration.
   if (isProductionHost(url.hostname, env)) return next();
+  // Only the Family Beta branch alias may opt out of the preview password.
+  if (url.hostname === 'family-beta.nuvio-watch-friends.pages.dev' && env.FAMILY_BETA_PASSWORD_ENABLED === '0') return next();
   const config = gateConfig(env);
   if (!config) return page(503, 'Nuvio Preview', '<h1>Nuvio Preview</h1><p>Der Preview-Schutz ist nicht eingerichtet. Diese Testversion bleibt gesperrt.</p>');
   if (url.pathname === LOGIN_PATH) {
