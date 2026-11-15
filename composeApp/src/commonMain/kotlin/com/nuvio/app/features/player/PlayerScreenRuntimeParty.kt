@@ -383,11 +383,13 @@ private fun PlayerScreenRuntime.currentPartyBrowserHls(): PartyBrowserHls {
         PartyBrowserHls(url = hostLink.url, label = hostLink.label)
     } else if (keyedUrl != null) {
         PartyBrowserHls(url = keyedUrl, label = "TorBox HLS",
-            propagateToken = (familyHostLink == null && torboxPropagateToken).takeIf { it })
+            propagateToken = (familyHostLink == null && torboxPropagateToken).takeIf { it },
+            germanAudioConfirmed = ready?.browserHls?.germanAudioConfirmed.takeIf { familyHostLink == null })
     } else if (torboxFile != null) {
         PartyBrowserHls(
             url = ready?.url,
             headers = ready?.headers.orEmpty(),
+            germanAudioConfirmed = ready?.browserHls?.germanAudioConfirmed,
             state = if (ready != null) null else com.nuvio.app.features.debrid.torboxBrowserState(torboxPartyPhase),
         )
     } else PartyBrowserHls(state = "unsupported")
@@ -534,7 +536,10 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
                     torboxPreparedFile = torboxFile
                     torboxFamilyOnly = result.familyOnly
                     torboxPropagateToken = result.propagateToken
-                    torboxPartyStream = PartyStream(mediaKey = key, url = result.url, name = "TorBox HLS", streamType = "hls")
+                    torboxPartyStream = PartyStream(
+                        mediaKey = key, url = result.url, name = "TorBox HLS", streamType = "hls",
+                        browserHls = PartyBrowserHls(germanAudioConfirmed = result.germanAudioConfirmed.takeIf { it }),
+                    )
                     torboxPartyPhase = com.nuvio.app.features.debrid.TorboxHlsPhase.Ready
                     torboxPartyStatus = (if (result.familyOnly)
                         "TorBox HLS mit Account-Key vorbereitet. Bei Browser-HLS-Freigabe erhalten ihn alle Party-Mitglieder."

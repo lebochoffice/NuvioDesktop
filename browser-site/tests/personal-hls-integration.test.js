@@ -728,13 +728,13 @@ test('session end or member removal during a pending command never broadcasts it
   assert.equal(h.sync(), false); assert.match(h.get('controlInfo').textContent, /nur der Host/);
 });
 
-test('iOS-style native HLS skips hls.js and quality UI; Android-style hls.js gets tuning and real variants only', async () => {
+test('native HLS shows fixed browser quality; hls.js offers only actual variants', async () => {
   const ios = await harness({debug: true}); ios.player.canPlayType = () => 'maybe';
   ios.session.handlers.stream({media_key: 'movie|tt1||', url: 'https://stream.example.test/ios.m3u8'});
   ios.get('loadStream').fire('click');
   assert.equal(ios.desktopHls(), null); assert.equal(ios.player.src, 'https://stream.example.test/ios.m3u8');
-  assert.equal(ios.get('qualityWrap').hidden, true);
-  assert.match(ios.get('qualityNote').textContent, /vom Browser gewählt/); assert.equal(ios.get('qualityNote').hidden, false);
+  assert.equal(ios.get('quality').disabled, true);
+  assert.deepEqual(ios.get('quality').children.map(o => o.textContent), ['Browser-Automatik']);
   ios.tick(); assert.equal(JSON.parse(ios.get('diagnosticsPanel').children.at(-1).children.at(-1).textContent).playbackMode, 'native-hls');
 
   const android = await harness();
@@ -743,27 +743,29 @@ test('iOS-style native HLS skips hls.js and quality UI; Android-style hls.js get
   const instance = android.desktopHls();
   assert.equal(instance.config.backBufferLength, 30); assert.equal(instance.config.startFragPrefetch, true); assert.equal(instance.config.debug, false);
   instance.levels = [{height: 1080, bitrate: 6e6}]; instance.emit(FakeHls.Events.MANIFEST_PARSED);
-  assert.equal(android.get('qualityWrap').hidden, true); // Single-variant playlists: no invented choices.
-  assert.match(android.get('qualityNote').textContent, /Automatisch · eine Qualität verfügbar/);
+  assert.equal(android.get('quality').disabled, true);
+  assert.deepEqual(android.get('quality').children.map(o => o.textContent), ['1080p · festgelegt']);
   instance.levels = [{height: 720, bitrate: 3e6}, {height: 1080, bitrate: 6e6}, {height: 2160, bitrate: 15e6}];
   instance.emit(FakeHls.Events.MANIFEST_PARSED);
-  assert.equal(android.get('qualityWrap').hidden, false); assert.equal(android.get('qualityNote').hidden, true);
-  assert.deepEqual(android.get('quality').children.map(o => o.textContent), ['Auto', '4K', '1080p', '720p']);
-  android.get('quality').value = '1'; android.get('quality').fire('change'); assert.equal(instance.nextLevel, 1);
+  assert.equal(android.get('quality').disabled, false); assert.equal(android.get('qualityNote').hidden, true);
+  assert.deepEqual(android.get('quality').children.map(o => o.textContent), ['Beste Qualität', 'Automatisch (adaptiv)', '4K / 2160p', '1080p', '720p']);
+  assert.equal(instance.loadLevel, 2);
+  android.get('quality').value = '1080'; android.get('quality').fire('change'); assert.equal(instance.loadLevel, 1);
   instance.emit(FakeHls.Events.LEVEL_SWITCHED, {level: 1});
   assert.equal(android.get('qualityNote').textContent, 'Aktiv: 1080p'); // The actually playing variant is visible.
   assert.equal(android.get('qualityNote').hidden, false);
-  android.get('quality').value = '7'; android.get('quality').fire('change'); assert.equal(instance.nextLevel, 1); // Unknown level ignored.
-  android.get('quality').value = '-1'; android.get('quality').fire('change'); assert.equal(instance.nextLevel, -1);
+  android.get('quality').value = '123'; android.get('quality').fire('change'); assert.equal(instance.loadLevel, 1); // Unknown level ignored.
+  android.get('quality').value = 'auto'; android.get('quality').fire('change'); assert.equal(instance.loadLevel, -1);
 });
 
-test('TorBox single-variant HLS shows a fixed automatic-quality note instead of a selector', async () => {
+test('TorBox single-resolution HLS shows the actual fixed resolution and prefers the higher bitrate', async () => {
   const h = await harness();
   h.session.handlers.stream({media_key: 'movie|tt1||', url: 'https://desktop.example.test/film.mkv', browser_hls: {url: 'https://stream.example.test/torbox.m3u8'}});
   h.get('loadStream').fire('click'); const instance = h.desktopHls();
   instance.levels = [{height: 1080, bitrate: 6e6}, {height: 1080, bitrate: 5e6}]; instance.emit(FakeHls.Events.MANIFEST_PARSED);
-  assert.equal(h.get('qualityWrap').hidden, true);
-  assert.equal(h.get('qualityNote').textContent, 'Automatisch · TorBox liefert eine Qualität');
+  assert.equal(h.get('quality').disabled, true);
+  assert.deepEqual(h.get('quality').children.map(o => o.textContent), ['1080p · festgelegt']);
+  assert.equal(instance.loadLevel, 0);
   h.session.handlers.stream(null);
   assert.equal(h.get('qualityNote').hidden, true); // Cleared with the source.
 });
@@ -980,7 +982,7 @@ test('time formatting and quality note cover hours, unknown durations and native
   h.get('loadStream').fire('click');
   Object.assign(h.player, {duration: 7325, currentTime: 3725}); h.tick();
   assert.equal(h.get('ctlRemaining').textContent, '1:00:00');
-  assert.equal(h.get('qualityNote').hidden, false);
+  assert.deepEqual(h.get('quality').children.map(o => o.textContent), ['Browser-Automatik']);
   h.player.duration = NaN; h.tick(); assert.equal(h.get('ctlSeek').disabled, true);
 });
 
@@ -994,8 +996,8 @@ test('page markup: no banner headline, no hint bar, no permanent side column; co
   assert.match(html, /<label id="codeFallback"[^>]*hidden/);
   assert.match(html, /<p id="message"[^>]*hidden/);
   assert.match(html, /<aside id="infoDrawer"[^>]*hidden/);
-  for (const id of ['ctlPlay', 'ctlBack10', 'ctlFwd10', 'ctlMute', 'ctlSeek', 'ctlFullscreen', 'ctlSubtitles', 'ctlSettings', 'ctlBack', 'syncChip', 'resync', 'membersButton']) assert.match(html, new RegExp(`id="${id}"`));
-  assert.match(html, /id="ctlSolo"[\s\S]*id="ctlSubtitles"[\s\S]*id="ctlSettings"[\s\S]*id="ctlFullscreen"/);
+  for (const id of ['ctlPlay', 'ctlBack10', 'ctlFwd10', 'ctlMute', 'ctlSeek', 'ctlFullscreen', 'subtitleOptions', 'ctlSettings', 'ctlBack', 'syncChip', 'resync', 'membersButton']) assert.match(html, new RegExp(`id="${id}"`));
+  assert.match(html, /id="ctlSolo"[\s\S]*id="ctlSettings"[\s\S]*id="subtitleOptions"[\s\S]*id="ctlFullscreen"/);
   assert.match(html, /id="resync"[^>]*aria-label="Party-Zeit aktualisieren"[^>]*title="Party-Zeit aktualisieren"[^>]*disabled><svg/); // Refresh icon.
   assert.ok(!html.includes('id="displayName"') && !html.includes('id="authSection"') && !html.includes('id="loginButton"'));
   assert.ok(html.indexOf('id="email"') < html.indexOf('id="password"') && html.indexOf('id="password"') < html.indexOf('id="joinButton"')); // Sign-in inline in the invitation.
@@ -1169,10 +1171,11 @@ test('player title: series name · season/episode · episode title; films and ga
 
 test('subtitles: no invented tracks; real hls.js renditions are selectable and "Aus" switches them off', async () => {
   const h = await harness();
-  h.get('ctlSubtitles').fire('click');
-  assert.equal(h.get('subtitleMenu').hidden, false);
+  h.get('ctlSettings').fire('click');
+  h.get('subtitleOptions').open = true; h.get('subtitleOptions').fire('toggle');
+  assert.equal(h.get('subtitleOptions').open, true);
   assert.deepEqual(h.get('subtitleMenu').children.map(c => c.textContent), ['Diese Quelle liefert keine Untertitel.', 'Aus', 'Untertiteldatei laden (.vtt/.srt) …']);
-  h.get('ctlSubtitles').fire('click'); assert.equal(h.get('subtitleMenu').hidden, true);
+  h.get('subtitleOptions').open = false; h.get('subtitleOptions').fire('toggle');
   h.session.handlers.stream({media_key: 'movie|tt1||', url: 'https://stream.example.test/subs.m3u8'});
   h.get('loadStream').fire('click'); const instance = h.desktopHls();
   instance.subtitleTracks = [{name: 'Deutsch', lang: 'de'}, {lang: 'en'}]; instance.subtitleTrack = -1;
@@ -1180,7 +1183,7 @@ test('subtitles: no invented tracks; real hls.js renditions are selectable and "
   const labels = () => h.get('subtitleMenu').children.map(c => c.textContent);
   assert.deepEqual(labels(), ['Untertitel', 'Aus', 'Deutsch', 'en', 'Untertiteldatei laden (.vtt/.srt) …']);
   h.get('subtitleMenu').children[2].fire('click');
-  assert.equal(instance.subtitleTrack, 0); assert.equal(instance.subtitleDisplay, true); assert.equal(h.get('subtitleMenu').hidden, true);
+  assert.equal(instance.subtitleTrack, 0); assert.equal(instance.subtitleDisplay, true);
   h.get('subtitleMenu').children[1].fire('click');
   assert.equal(instance.subtitleTrack, -1); assert.equal(instance.subtitleDisplay, false);
 });
@@ -2390,7 +2393,7 @@ test('a member joins directly into the player and new sources load independently
   const h = await harness({autoHost: true, browserHostShare: true});
   h.session.room = memberRoom();
   h.session.handlers.room(h.session.room);
-  assert.equal(h.get('roomOverview').hidden, false); assert.equal(h.get('playerWrap').hidden, false);
+  assert.equal(h.get('infoDrawer').hidden, true); assert.equal(h.get('playerWrap').hidden, false);
   assert.match(h.get('roomWaiting').textContent, /Warte auf Video vom Host/);
   assert.equal(h.get('roomShareForm').hidden, true); assert.equal(h.get('tabHost').hidden, true);
   assert.equal(h.get('roomTitle').textContent, 'Film');
@@ -2408,7 +2411,7 @@ test('a member joins directly into the player and new sources load independently
   assert.equal(h.get('playerWrap').hidden, false);
   assert.match(h.get('noStream').textContent, /Warte auf Video vom Host/);
   h.session.receive('stream', {member_id: 'host', stream: sharedMp4()});
-  h.get('ctlSettings').fire('click'); h.get('tabParty').fire('click');
+  h.get('ctlSettings').fire('click'); h.get('openPartySettings').fire('click'); h.get('tabParty').fire('click');
   assert.equal(h.get('roomOverview').hidden, false);
   h.session.receive('stream', {member_id: 'host', stream: sharedMp4('https://cdn.example.test/new.mp4')});
   assert.equal(h.get('playerWrap').hidden, false);
@@ -2618,4 +2621,19 @@ test('after host change pending role validation blocks gestures before mutation;
   h.get('ctlSolo').fire('click'); h.get('ctlPlay').fire('click'); await settlePlayback();
   assert.equal(h.player.paused, false); assert.equal(h.sync(), false);
   assert.equal(c.sends.length, sent);
+});
+
+test('a confirmed German TorBox source labels fixed audio; a different unconfirmed source stays neutral', async () => {
+  const h = await harness();
+  const source = {media_key: 'movie|tt1||', url: '', browser_hls: {
+    url: 'https://stream.example.test/german.m3u8', german_audio_confirmed: true,
+  }};
+  const label = () => h.get('audioTrack').children[0].textContent;
+  h.session.handlers.stream(source);
+  h.get('loadStream').fire('click');
+  assert.equal(label(), 'Deutsch · festgelegt');
+  assert.equal(h.get('audioTrack').disabled, true);
+  h.session.handlers.stream({...source, browser_hls: {url: 'https://stream.example.test/other.m3u8'}});
+  h.get('loadStream').fire('click');
+  assert.equal(label(), 'Audio · festgelegt');
 });

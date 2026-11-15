@@ -1061,7 +1061,7 @@ function selectAudioTrack(instance, tracks, index) {
 }
 function clearAudioTracks() {
   const select = $('audioTrack');
-  select.replaceChildren(new Option(loadedStream ? 'Audio · festgelegt' : 'Audio'));
+  select.replaceChildren(new Option(loadedStream?.german_audio_confirmed === true ? 'Deutsch · festgelegt' : loadedStream ? 'Audio · festgelegt' : 'Audio'));
   select.disabled = true;
 }
 function renderAudioTracks(instance, applyPreference = false) {
@@ -1077,7 +1077,7 @@ function renderAudioTracks(instance, applyPreference = false) {
   }
   const select = $('audioTrack');
   select.replaceChildren(...tracks.map((track, i) =>
-    new Option(audioTrackLabel(track, i, tracks.length) + (tracks.length === 1 ? ' · festgelegt' : ''), String(i))));
+    new Option((tracks.length === 1 && !audioTrackLanguage(track) && loadedStream?.german_audio_confirmed === true ? 'Deutsch' : audioTrackLabel(track, i, tracks.length)) + (tracks.length === 1 ? ' · festgelegt' : ''), String(i))));
   select.disabled = tracks.length === 1;
   select.selectedIndex = select.disabled ? 0 : instance ? instance.audioTrack : tracks.findIndex(track => track.enabled);
 }

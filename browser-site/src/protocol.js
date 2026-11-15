@@ -83,6 +83,7 @@ export function browserPartyStream(stream) {
   const label = typeof browser.label === 'string' ? browser.label.replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 80) : '';
   return {media_key: stream.media_key, url, headers: familyBeta ? {} : browser.headers || {},
     response_headers: {}, name: label || 'TorBox HLS', stream_type: 'hls', propagate_token: browser.propagate_token === true,
+    ...(!familyBeta && browser.german_audio_confirmed === true ? {german_audio_confirmed: true} : {}),
     ...(familyBeta ? {family_beta: true} : {})};
 }
 

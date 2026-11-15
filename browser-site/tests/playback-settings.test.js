@@ -13,7 +13,7 @@ const between = (from, to) => {
 };
 
 test('the gear contains subtitles and reuses track selection and local file loading', async () => {
-  assert.match(html, /id="playbackSettings"[\s\S]*id="audioTrack"[\s\S]*id="quality"[\s\S]*id="subtitleOptions"[\s\S]*id="subtitleFile"[\s\S]*id="openPartySettings"/);
+  assert.match(html, /id="playbackSettings"[\s\S]*id="quality"[\s\S]*id="audioTrack"[\s\S]*id="subtitleOptions"[\s\S]*id="subtitleFile"[\s\S]*id="openPartySettings"/);
   assert.doesNotMatch(html, /id="ctlSubtitles"/);
   const make = () => ({
     handlers: {},

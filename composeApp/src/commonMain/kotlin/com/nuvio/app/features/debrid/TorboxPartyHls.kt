@@ -31,7 +31,7 @@ internal sealed interface TorboxPartyHlsResult {
      * never broadcast; only the family share service may hand it to admitted
      * guests. propagateToken: variant playlists need the same `token`.
      */
-    class Ready(val url: String, val familyOnly: Boolean = false, val propagateToken: Boolean = false, val audioStatus: String = "") : TorboxPartyHlsResult
+    class Ready(val url: String, val familyOnly: Boolean = false, val propagateToken: Boolean = false, val audioStatus: String = "", val germanAudioConfirmed: Boolean = false) : TorboxPartyHlsResult
     class Failed(val message: String, val reason: TorboxHlsFailure = TorboxHlsFailure.RequestFailed) : TorboxPartyHlsResult {
         // The account/plan refused access (not a transient failure).
         val denied: Boolean get() = reason == TorboxHlsFailure.Denied
@@ -160,12 +160,18 @@ internal val TORBOX_PLAYLIST_POLL_DELAYS_MS: List<Long> =
 
 private val TORBOX_GERMAN_AUDIO = Regex("^(?:de|deu|ger)(?:[-_][a-z0-9]+)*$|^(?:german|deutsch)(?:$|[ .(].*)")
 
+private data class TorboxAudioSelection(
+    val response: DebridApiResponse<JsonElement>,
+    val status: String,
+    val germanConfirmed: Boolean = false,
+)
+
 private suspend fun preferGermanTorboxAudio(
     response: DebridApiResponse<JsonElement>,
     apiKey: String,
     createForAudio: suspend (Int) -> DebridApiResponse<JsonElement>,
-): Pair<DebridApiResponse<JsonElement>, String> {
-    val unknown = response to "TorBox-Audio: Audio-Metadaten fehlen oder sind ungültig; Standardspur verwendet."
+): TorboxAudioSelection {
+    val unknown = TorboxAudioSelection(response, "TorBox-Audio: Audio-Metadaten fehlen oder sind ungültig; Standardspur verwendet.")
     val data = (response.body as? JsonObject)?.get("data") as? JsonObject ?: return unknown
     val metadata = data["metadata"] as? JsonObject ?: return unknown
     val tracks = metadata["audios"] as? JsonArray ?: return unknown
@@ -184,30 +190,30 @@ private suspend fun preferGermanTorboxAudio(
         }
     }
     val count = tracks.size
-    if (germanTracks.isEmpty()) return response to "TorBox-Audio: Keine eindeutig deutsche Spur in $count gemeldeten Spuren; Standardspur verwendet."
+    if (germanTracks.isEmpty()) return TorboxAudioSelection(response, "TorBox-Audio: Keine eindeutig deutsche Spur in $count gemeldeten Spuren; Standardspur verwendet.")
     val current = (data["audio_index"] as? JsonPrimitive)?.intOrNull
     if (current != null && current in germanTracks)
-        return response to "TorBox-Audio: Deutsch vom Anbieter bestätigt (relativer Index $current, $count Spuren)."
+        return TorboxAudioSelection(response, "TorBox-Audio: Deutsch vom Anbieter bestätigt (relativer Index $current, $count Spuren).", germanConfirmed = true)
     val german = germanTracks.singleOrNull()
-        ?: return response to "TorBox-Audio: Mehrere deutsche Spuren; Standardspur verwendet."
+        ?: return TorboxAudioSelection(response, "TorBox-Audio: Mehrere deutsche Spuren; Standardspur verwendet.")
     if (current == null && german == 0)
-        return response to "TorBox-Audio: Deutsch steht an Index 0; TorBox bestätigt den gewählten Index nicht."
+        return TorboxAudioSelection(response, "TorBox-Audio: Deutsch steht an Index 0; TorBox bestätigt den gewählten Index nicht.")
     val adjusted = try {
         createForAudio(german)
     } catch (cancelled: CancellationException) { throw cancelled }
     catch (_: Exception) {
-        return response to "TorBox-Audio: Anfrage für Deutsch (Index $german) fehlgeschlagen; Standardspur verwendet."
+        return TorboxAudioSelection(response, "TorBox-Audio: Anfrage für Deutsch (Index $german) fehlgeschlagen; Standardspur verwendet.")
     }
     val adjustedData = (adjusted.body as? JsonObject)?.get("data") as? JsonObject
     if (!adjusted.isSuccessful)
-        return response to "TorBox-Audio: Auswahl Deutsch (Index $german) fehlgeschlagen (HTTP ${adjusted.status}); Standardspur verwendet."
+        return TorboxAudioSelection(response, "TorBox-Audio: Auswahl Deutsch (Index $german) fehlgeschlagen (HTTP ${adjusted.status}); Standardspur verwendet.")
     val actual = (adjustedData?.get("audio_index") as? JsonPrimitive)?.intOrNull
     if (actual != german)
-        return response to "TorBox-Audio: Angeforderter Index $german nicht bestätigt (Antwort: ${actual ?: "kein Index"}); Standardspur verwendet."
+        return TorboxAudioSelection(response, "TorBox-Audio: Angeforderter Index $german nicht bestätigt (Antwort: ${actual ?: "kein Index"}); Standardspur verwendet.")
     return when (torboxHlsCandidate(adjusted.body, apiKey)) {
         is TorboxHlsCandidate.Url, is TorboxHlsCandidate.KeyOnlyInTokenParameter ->
-            adjusted to "TorBox-Audio: Deutsch vom Anbieter bestätigt (relativer Index $german, $count Spuren)."
-        else -> response to "TorBox-Audio: Keine verwendbare HLS-Adresse für Deutsch (Index $german); Standardspur verwendet."
+            TorboxAudioSelection(adjusted, "TorBox-Audio: Deutsch vom Anbieter bestätigt (relativer Index $german, $count Spuren).", germanConfirmed = true)
+        else -> TorboxAudioSelection(response, "TorBox-Audio: Keine verwendbare HLS-Adresse für Deutsch (Index $german); Standardspur verwendet.")
     }
 }
 
@@ -231,6 +237,7 @@ internal suspend fun prepareTorboxPartyHls(
     var keyFree = false
     var familyOnly = false
     val audioStatus: String
+    val germanAudioConfirmed: Boolean
     val url = try {
         val response = createStream(apiKey, file)
         val root = response.body as? JsonObject
@@ -241,10 +248,11 @@ internal suspend fun prepareTorboxPartyHls(
             return TorboxPartyHlsResult.Failed("TorBox: API-Anfrage fehlgeschlagen (HTTP ${response.status}). Account, Tarif und Verfügbarkeit prüfen.")
         }
         // Same address TorBox returned (host already checked by the candidate).
-        val (stream, selectionStatus) = preferGermanTorboxAudio(response, apiKey) { audioIndex ->
+        val (stream, selectionStatus, confirmedGerman) = preferGermanTorboxAudio(response, apiKey) { audioIndex ->
             createStreamForAudio(apiKey, file, audioIndex)
         }
         audioStatus = selectionStatus
+        germanAudioConfirmed = confirmedGerman
         val original = (((stream.body as? JsonObject)?.get("data") as? JsonObject)?.get("hls_url") as? JsonPrimitive)?.contentOrNull
         val candidate = torboxHlsCandidate(stream.body, apiKey)
         val keyed = candidate is TorboxHlsCandidate.KeyOnlyInTokenParameter || candidate == TorboxHlsCandidate.ContainsAccountKey
@@ -278,7 +286,7 @@ internal suspend fun prepareTorboxPartyHls(
             catch (cancelled: CancellationException) { throw cancelled }
             catch (_: Exception) { 0 }
         if (manifest == 200 || manifest == TORBOX_PROBE_OK_NEEDS_TOKEN) {
-            return TorboxPartyHlsResult.Ready(url, familyOnly = familyOnly, propagateToken = manifest == TORBOX_PROBE_OK_NEEDS_TOKEN, audioStatus = audioStatus)
+            return TorboxPartyHlsResult.Ready(url, familyOnly = familyOnly, propagateToken = manifest == TORBOX_PROBE_OK_NEEDS_TOKEN, audioStatus = audioStatus, germanAudioConfirmed = germanAudioConfirmed)
         }
         if (keyFree && manifest in listOf(401, 403, 422)) return TorboxPartyHlsResult.Failed(
             "TorBox: Ohne Account-Key liefert TorBox die Playlist nicht (HTTP $manifest). Für die Familienfreigabe muss der Freigabedienst eingerichtet sein.",

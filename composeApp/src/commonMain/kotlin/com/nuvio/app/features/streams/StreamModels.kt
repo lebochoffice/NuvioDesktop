@@ -34,6 +34,8 @@ data class StreamItem(
     val badges: List<StreamBadge> = emptyList(),
     val serverTarget: ServerPlaybackTarget? = null,
     val torboxPartyFile: com.nuvio.app.features.debrid.TorboxPartyFile? = null,
+    /** True when [url] was produced by Nuvio's own debrid resolver, not returned by the add-on. */
+    val debridResolved: Boolean = false,
 ) {
     val streamLabel: String
         get() = name?.takeIf { it.isNotBlank() } ?: "Stream"

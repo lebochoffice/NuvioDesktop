@@ -1,6 +1,7 @@
 package com.nuvio.app
 
 import com.nuvio.app.features.autosync.AutoSyncPreferencesDesktop
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.awt.SwingWindow
@@ -39,6 +40,8 @@ import com.nuvio.app.features.player.desktop.NativePlayerBridge
 import com.nuvio.app.features.player.desktop.applyNativeDesktopWindowChrome
 import com.nuvio.app.features.player.desktop.configureMacosWindowBeforePeer
 import com.nuvio.app.features.player.desktop.installDesktopAppFullscreenShortcuts
+import com.nuvio.app.features.player.desktop.macosTitleBarDoubleClick
+import com.nuvio.app.features.player.desktop.MacosAppMenuBar
 import com.nuvio.app.features.player.desktop.preloadNativePlayerBridgeAsync
 import com.nuvio.app.features.player.desktop.registerDesktopAppFullscreenToggle
 import com.nuvio.app.features.player.desktop.trackMaximizedBoundsForCurrentScreen
@@ -137,15 +140,16 @@ fun main(args: Array<String>) {
             placement = initialPlacement,
         )
         val fullscreenController = remember { DesktopAppFullscreenController() }
+        val closeApplication = {
+            windowsLinks?.close()
+            P2pStreamingEngine.shutdown()
+            DiscordPresenceManager.shutdown()
+            SentryInitializer.close()
+            exitApplication()
+        }
 
         SwingWindow(
-            onCloseRequest = {
-                windowsLinks?.close()
-                P2pStreamingEngine.shutdown()
-                DiscordPresenceManager.shutdown()
-                SentryInitializer.close()
-                exitApplication()
-            },
+            onCloseRequest = closeApplication,
             title = when {
                 smokePlayerUrl != null -> "Nuvio Player Smoke"
                 isWindows && windowsA40Fork -> "Nuvio ${AppVersionConfig.DESKTOP_VERSION_NAME.replaceFirst('-', ' ')}"
@@ -164,6 +168,10 @@ fun main(args: Array<String>) {
                     invitation.dispatch()
                 }
             }
+            MacosAppMenuBar(
+                onCloseRequest = closeApplication,
+                onMinimizeRequest = { windowState.isMinimized = true },
+            )
             SideEffect {
                 window.background = NuvioDesktopNativeBackground
                 window.rootPane.background = NuvioDesktopNativeBackground
@@ -245,8 +253,16 @@ fun main(args: Array<String>) {
             }
 
             if (smokePlayerUrl == null) {
-                ProvideDesktopWindowInsets(isFullscreen = windowState.placement == WindowPlacement.Fullscreen) {
-                    MiddleClickAutoscroll { App() }
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .macosTitleBarDoubleClick(window = window, windowState = windowState),
+                ) {
+                    ProvideDesktopWindowInsets(
+                        isFullscreen = windowState.placement == WindowPlacement.Fullscreen,
+                    ) {
+                        MiddleClickAutoscroll { App() }
+                    }
                 }
             } else {
                 // The player surface reads LocalNuvioPlatformDensity, which only
@@ -268,6 +284,9 @@ fun main(args: Array<String>) {
 private fun configureDesktopChrome() {
     if (System.getProperty("os.name").contains("mac", ignoreCase = true)) {
         System.setProperty("apple.awt.application.appearance", MacosDarkAquaAppearance)
+        // AWT only installs a window's JMenuBar in the macOS screen menu bar when this is set
+        // before AWT starts; otherwise it would be drawn inside our full-window-content window.
+        System.setProperty("apple.laf.useScreenMenuBar", "true")
     }
 }
 

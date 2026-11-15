@@ -58,6 +58,7 @@ data class PartyBrowserHls(
     val rev: Int? = null,
     // The TorBox token must also go on variant/segment requests (relative URIs lose it).
     @SerialName("propagate_token") val propagateToken: Boolean? = null,
+    @SerialName("german_audio_confirmed") val germanAudioConfirmed: Boolean? = null,
 )
 
 @Serializable
