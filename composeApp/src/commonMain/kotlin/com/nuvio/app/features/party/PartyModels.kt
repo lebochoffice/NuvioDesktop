@@ -210,7 +210,27 @@ data class PartyPresence(
     // Watching alone on purpose (local pause/seek, browser "Allein schauen"):
     // shown as "Allein", not as out of sync. Optional; older clients ignore it.
     val solo: Boolean? = null,
+    // Party sync mode, announced only by the host (like `commands`): "event"
+    // = shared actions only, absent = live sync. Never a playback revision, so
+    // older clients (and the official TV app) ignore it and keep live sync.
+    val sync: String? = null,
 )
+
+/**
+ * Party-wide synchronisation behaviour. The host decides; guests follow the
+ * host's announcement. [Live] is the unchanged continuous synchronisation.
+ * [Event] shares play, pause, deliberate seeks, manual sync and the one-time
+ * join alignment, and nothing else: no drift seeks, no tempo nudging and no
+ * party-wide waits for a single buffering member.
+ */
+enum class PartySyncMode(val wire: String?) {
+    Live(null),
+    Event("event");
+
+    companion object {
+        fun fromWire(value: String?): PartySyncMode = if (value == Event.wire) Event else Live
+    }
+}
 
 @Serializable
 internal data class PartyInfo(
@@ -299,6 +319,10 @@ data class ActiveParty(
 
     val canControl: Boolean
         get() = !hostOnly || isHost
+
+    /** The mode the current host announced; a host without the field means live sync. */
+    val announcedSyncMode: PartySyncMode
+        get() = PartySyncMode.fromWire(presence[hostMemberId]?.sync)
 
     fun blocksManualPlayback(playerMediaKey: String, solo: Boolean): Boolean =
         !solo && !canControl && media.key == playerMediaKey

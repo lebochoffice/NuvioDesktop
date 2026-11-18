@@ -49,6 +49,9 @@ data class PlayerControlPartyState(
     val smartLastCorrection: String = "",
     // Result of the host's last "Alle synchronisieren" (live, for about a minute).
     val syncAllStatus: String = "",
+    // Party sync mode chosen by the host: "live" (continuous) or "event" (shared actions only).
+    val syncMode: String = "live",
+    val syncModeEditable: Boolean = false,
     // Short browser HLS state for a status chip ("sent", "ready", "preparing", …).
     val hlsPhase: String = "",
     // Titles for the "different title" card (only while the player is elsewhere).

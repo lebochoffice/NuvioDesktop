@@ -77,6 +77,7 @@ fun main(args: Array<String>) {
     }
     applyDesktopRendererPreference()
     SentryInitializer.start()
+    com.nuvio.app.features.party.DesktopPartySyncTrace.start()
     configureDesktopQuickJsLibrary()
     configureDesktopChrome()
     configureLinuxSwingGlobalsBeforeAwt()

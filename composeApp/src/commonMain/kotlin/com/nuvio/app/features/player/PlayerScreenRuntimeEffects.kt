@@ -32,6 +32,7 @@ import com.nuvio.app.features.player.skip.SkipIntervalLookup
 import com.nuvio.app.features.player.skip.autoSkipKey
 import com.nuvio.app.features.player.skip.autoSkipKeysCompletedBy
 import com.nuvio.app.features.player.skip.resolveSkipIntervalLookup
+import com.nuvio.app.features.player.skip.resolveSkipIntervalsWithRetry
 import com.nuvio.app.features.player.skip.segmentCategory
 import com.nuvio.app.features.player.skip.shouldAutoSkip
 import com.nuvio.app.features.player.skip.internalSkipAction
@@ -52,11 +53,9 @@ import com.nuvio.app.features.watching.application.WatchingState
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withTimeoutOrNull
 import nuvio.composeapp.generated.resources.*
 import org.jetbrains.compose.resources.getString
 
-private const val SKIP_INTERVAL_RESOLVE_TIMEOUT_MS = 4_000L
 
 /**
  * Coarse view of the playback snapshot. The engine publishes a snapshot every 250ms, while the
@@ -681,37 +680,45 @@ private fun PlayerScreenRuntime.BindPlayerMetadataAndSkipEffects() {
         ) ?: return@LaunchedEffect
         if (isNetworkOffline()) return@LaunchedEffect
 
+        // Child of this episode-keyed effect: an episode change cancels it, so late
+        // results can never reach the next episode. Each provider has its own bound;
+        // only incomplete lookups (transient failures) are retried, at most twice.
         launch {
-            val intervals = withTimeoutOrNull(SKIP_INTERVAL_RESOLVE_TIMEOUT_MS) {
-                val imdbFromContent = parentMetaId.takeIf { it.startsWith("tt") }
-                    ?: (metaUiState.meta ?: playerMeta)
-                        ?.takeIf { it.id == parentMetaId }
-                        ?.imdbId
-                        ?.takeIf { it.startsWith("tt") }
-                when (lookup) {
-                    is SkipIntervalLookup.Imdb -> SkipIntroRepository.getSkipIntervals(
-                        imdbId = lookup.imdbId,
-                        season = lookup.season,
-                        episode = lookup.episode,
-                    )
-                    is SkipIntervalLookup.Mal -> SkipIntroRepository.getSkipIntervalsForMal(
-                        malId = lookup.malId,
-                        episode = lookup.episode,
-                        imdbId = imdbFromContent,
-                        imdbSeason = activeSeasonNumber,
-                        imdbEpisode = activeEpisodeNumber ?: lookup.episode,
-                    )
-                    is SkipIntervalLookup.Kitsu -> SkipIntroRepository.getSkipIntervalsForKitsu(
-                        kitsuId = lookup.kitsuId,
-                        episode = lookup.episode,
-                        imdbId = imdbFromContent,
-                        imdbSeason = activeSeasonNumber,
-                        imdbEpisode = activeEpisodeNumber ?: lookup.episode,
-                    )
-                }
-            }
-            apiSkipIntervals = intervals ?: return@launch
-            recomputeMergedSkipIntervals()
+            resolveSkipIntervalsWithRetry(
+                attempt = { partial ->
+                    val imdbFromContent = parentMetaId.takeIf { it.startsWith("tt") }
+                        ?: (metaUiState.meta ?: playerMeta)
+                            ?.takeIf { it.id == parentMetaId }
+                            ?.imdbId
+                            ?.takeIf { it.startsWith("tt") }
+                    when (lookup) {
+                        is SkipIntervalLookup.Imdb -> SkipIntroRepository.getSkipIntervalsOutcome(
+                            imdbId = lookup.imdbId,
+                            season = lookup.season,
+                            episode = lookup.episode,
+                            onIntroDb = partial,
+                        )
+                        is SkipIntervalLookup.Mal -> SkipIntroRepository.getSkipIntervalsForMalOutcome(
+                            malId = lookup.malId,
+                            episode = lookup.episode,
+                            imdbId = imdbFromContent,
+                            imdbSeason = activeSeasonNumber,
+                            imdbEpisode = activeEpisodeNumber ?: lookup.episode,
+                        )
+                        is SkipIntervalLookup.Kitsu -> SkipIntroRepository.getSkipIntervalsForKitsuOutcome(
+                            kitsuId = lookup.kitsuId,
+                            episode = lookup.episode,
+                            imdbId = imdbFromContent,
+                            imdbSeason = activeSeasonNumber,
+                            imdbEpisode = activeEpisodeNumber ?: lookup.episode,
+                        )
+                    }
+                },
+                onIntervals = { intervals ->
+                    apiSkipIntervals = intervals
+                    recomputeMergedSkipIntervals()
+                },
+            )
         }
     }
 

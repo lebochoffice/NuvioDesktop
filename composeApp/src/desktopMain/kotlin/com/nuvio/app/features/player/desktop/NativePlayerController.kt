@@ -36,6 +36,9 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.Json
 import java.awt.Component
+import java.awt.KeyEventDispatcher
+import java.awt.KeyboardFocusManager
+import java.awt.Window
 import java.awt.event.WindowAdapter
 import java.awt.event.WindowEvent
 import java.util.concurrent.CountDownLatch
@@ -427,7 +430,35 @@ internal class NativePlayerController(
             }
         }
         window.addWindowFocusListener(listener)
-        return { window.removeWindowFocusListener(listener) }
+        // Space that reaches AWT means the controls WebView does not own focus
+        // (it never sees the key then). Route it through the regular
+        // keyboardToggle path, which stays party-aware, and hand focus back.
+        val spaceFallback = DesktopPlayerSpaceFallback()
+        val dispatcher = KeyEventDispatcher { event ->
+            val eligible = handle != 0L && !releaseRequested && isHostDisplayable() &&
+                event.component?.let { SwingUtilities.getWindowAncestor(it) ?: it as? Window } === window
+            when (spaceFallback.onKey(event.id, event.keyCode, event.keyChar, event.modifiersEx, eligible)) {
+                DesktopPlayerSpaceFallback.Result.Ignore -> false
+                DesktopPlayerSpaceFallback.Result.Consume -> {
+                    event.consume()
+                    true
+                }
+                DesktopPlayerSpaceFallback.Result.Toggle -> {
+                    event.consume()
+                    log.d { "space reached AWT instead of the controls WebView; toggling and refocusing" }
+                    handlePlayerEvent("keyboardToggle", 0.0)
+                    requestKeyboardFocus()
+                    true
+                }
+            }
+        }
+        val focusManager = KeyboardFocusManager.getCurrentKeyboardFocusManager()
+        focusManager.addKeyEventDispatcher(dispatcher)
+        return {
+            window.removeWindowFocusListener(listener)
+            focusManager.removeKeyEventDispatcher(dispatcher)
+            spaceFallback.reset()
+        }
     }
 
     @Synchronized

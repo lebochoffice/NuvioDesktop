@@ -376,10 +376,11 @@ const buildPartyMembers = party => {
     invite.appendChild(partyElement("span", "party-open-seat-label", partyLabel("openSeat")));
     section.appendChild(invite);
   }
+  section.appendChild(buildPartySyncMode(party));
   // Own player back to the party time / everyone to the host's party time.
   if (party.canSyncAll) section.appendChild(partyIconTextButton("icon-sync", "Alle synchronisieren", "party-sync-button", "syncAll", () => send("partySyncAll", 0)));
   if (party.canSyncMe) {
-    section.appendChild(partyIconTextButton("icon-sync", "Mich synchronisieren", "party-sync-button", "syncMe", () => closeAndSendParty("partySyncMe")));
+    section.appendChild(partyIconTextButton("icon-sync", party.syncMode === "event" ? "Jetzt synchronisieren" : "Mich synchronisieren", "party-sync-button", "syncMe", () => closeAndSendParty("partySyncMe")));
     section.appendChild(partyButtonElement(party.solo ? "Zur Party" : "Allein schauen", "compact", "solo", () => closeAndSendParty("partySolo")));
   }
   const syncAll = String(party.syncAllStatus || "").trim();
@@ -391,6 +392,40 @@ const buildPartyMembers = party => {
   smart.appendChild(partyElement("span", "", "Intelligente Wiedergabe"));
   section.appendChild(smart);
   return section;
+};
+
+// Party sync mode: the host chooses, guests see what is active. Event sync
+// keeps every player independent between shared actions.
+const PARTY_SYNC_MODES = [
+  ["live", "Live-Sync", "Kontinuierliche Synchronisierung: Abweichungen werden automatisch korrigiert, bei Puffern wartet die Party."],
+  ["event", "Ereignis-Sync", "Nur gemeinsame Aktionen: Play, Pause, Spulen und „Jetzt synchronisieren“. Jeder spielt mit eigenem Puffer weiter, ohne automatische Korrekturen."],
+];
+const buildPartySyncMode = party => {
+  const mode = party.syncMode === "event" ? "event" : "live";
+  const card = partyElement("div", "party-card party-sync-mode");
+  card.appendChild(partyElement("p", "party-card-title", "Synchronisierung"));
+  if (party.syncModeEditable) {
+    const row = partyElement("div", "party-inline-row");
+    row.setAttribute("role", "radiogroup");
+    row.setAttribute("aria-label", "Synchronisierungsmodus der Party");
+    PARTY_SYNC_MODES.forEach(([value, label]) => {
+      const button = partyCompactButton(label, `syncMode:${value}`, () => {
+        if (value !== mode) send("partySyncMode", value === "event" ? 1 : 0);
+      }, value === mode ? "primary" : "");
+      button.setAttribute("role", "radio");
+      button.setAttribute("aria-checked", String(value === mode));
+      row.appendChild(button);
+    });
+    card.appendChild(row);
+  } else {
+    card.appendChild(partyElement("p", "party-row-label", mode === "event" ? "Ereignis-Sync (vom Host gewählt)" : "Live-Sync (vom Host gewählt)"));
+  }
+  const explanation = PARTY_SYNC_MODES.find(([value]) => value === mode)[2];
+  card.appendChild(partyElement("p", "party-detail", explanation));
+  if (mode === "event" && party.isHost) {
+    card.appendChild(partyElement("p", "party-detail", "Offizielle Nuvio-TV-Apps kennen diesen Modus nicht und korrigieren weiter automatisch."));
+  }
+  return card;
 };
 
 // Shared start (host, while paused): length 1-10 s, readiness of the others,
@@ -452,7 +487,9 @@ const buildPartySmart = party => {
   const autoSeek = party.smartAutoSeekEnabled !== false;
   const tempo = party.smartNudgeEnabled !== false;
   let explanation;
-  if (!autoSync) {
+  if (party.syncMode === "event") {
+    explanation = "Ereignis-Sync ist aktiv: Es gibt keine automatischen Seek- oder Tempo-Korrekturen. Die Schalter unten gelten erst wieder im Live-Sync.";
+  } else if (!autoSync) {
     explanation = "Automatische Korrekturen sind aus. Party-Befehle und manuelles Synchronisieren bleiben verfügbar.";
   } else if (autoSeek && tempo) {
     explanation = "Kleine Abweichungen werden per Tempo ausgeglichen, größere per Seek.";

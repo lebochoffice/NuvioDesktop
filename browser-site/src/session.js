@@ -13,6 +13,8 @@ export async function callRpc(client, name, args = {}) {
 // announces it in its status and is the only sequencer. Guests send commands
 // with their own ID and never assign revisions themselves.
 export const COMMAND_PROTOCOL = 1;
+// Optional host status field "sync": only "event" switches to event sync.
+export const syncModeOf = value => value === 'event' ? 'event' : 'live';
 // Technical timeout for a missing host answer; never a lock on new commands.
 export const ACK_TIMEOUT_MS = 4000;
 const COMMAND_TRANSMISSIONS = 2; // first send + one retry with the same ID
@@ -63,6 +65,9 @@ export class PartySession {
     this.reconnectNotBefore = 0;
     this.closing = null;
     this.hostCommands = false; this.commands = new Map(); this.latestCommand = null;
+    // Party sync mode: announced by the host in its status ("sync": "event");
+    // absent means live sync. A browser host announces its own choice.
+    this.syncMode = 'live'; this.hostSyncMode = 'live';
     this.browserHostLinksEnabled = false;
     this.browserHostLinks = false;
     this.hostStream = null; // Browser host only: the link it currently shares (memory only).
@@ -737,6 +742,7 @@ export class PartySession {
     if (event === 'status') {
       if (payload.member_id === this.room.info.host_member_id) {
         this.hostCommands = payload.commands === COMMAND_PROTOCOL;
+        if (!this.isHost()) this.setSyncMode(syncModeOf(payload.sync));
         const supported = payload.browser_host_links === 1 && payload.media_key === mediaKey(this.room.info.media);
         if (this.browserHostLinks !== supported && payload.media_key === mediaKey(this.room.info.media)) {
           this.browserHostLinks = supported;
@@ -857,6 +863,8 @@ export class PartySession {
       // New epoch: commands for the previous host or film never become valid.
       if (hostChanged) {
         this.hostCommands = false;
+        // The new host announces its own mode; until then the party is live.
+        this.setSyncMode(this.isHost() ? this.hostSyncMode : 'live');
         this.previousHostId = previousHostId || this.previousHostId;
         this.waitingForHostState = true;
       }
@@ -924,7 +932,22 @@ export class PartySession {
   }
   presencePayload(fields = this.positionFields()) {
     return {...this.presence, member_id: this.room.memberId, media_key: mediaKey(this.room.info.media), ...fields,
-      ...(this.isHost() ? {browser_host_links: Number(this.browserHostLinksEnabled)} : {})};
+      ...(this.isHost() ? {browser_host_links: Number(this.browserHostLinksEnabled)} : {}),
+      ...(this.isHost() && this.hostSyncMode === 'event' ? {sync: 'event'} : {})};
+  }
+  setSyncMode(mode) {
+    const next = syncModeOf(mode);
+    if (this.syncMode === next) return;
+    this.syncMode = next;
+    this.emit('syncMode', next);
+  }
+  // Host only: announce the party mode in the own status/presence. Never a
+  // playback revision, so nobody re-positions because the mode changed.
+  async setHostSyncMode(mode) {
+    if (!this.isHost()) throw new Error('Nur der Host bestimmt den Synchronisierungsmodus.');
+    this.hostSyncMode = syncModeOf(mode);
+    this.setSyncMode(this.hostSyncMode);
+    await this.sendPresence();
   }
   async broadcastStatus(fields) {
     if (!this.room || !this.channel) return;
@@ -946,7 +969,7 @@ export class PartySession {
     // Position and drift are broadcast data. One pending timer sends only the
     // latest meaningful status, never a queue of historical updates.
     const payload = this.presencePayload();
-    const signature = JSON.stringify([payload.status, payload.solo, payload.media_key, payload.browser_host_links]);
+    const signature = JSON.stringify([payload.status, payload.solo, payload.media_key, payload.browser_host_links, payload.sync]);
     if (signature === this.presenceTrackSignature || this.presenceTrackTimer) return;
     const now = performance.now();
     const wait = Math.max(this.presenceTrackAt + PRESENCE_TRACK_INTERVAL_MS, this.reconnectNotBefore) - now;
@@ -1044,6 +1067,7 @@ export class PartySession {
     this.hostOfferDeferred = false;
     this.browserHostLinks = false;
     this.hostCommands = false; this.commands.clear(); this.latestCommand = null; this.memberStatus.clear(); this.resetHostOffer();
+    this.syncMode = 'live'; this.hostSyncMode = 'live';
     this.commandTimers.forEach(clearTimeout); this.commandTimers.clear();
     if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
     this.reconnectAttempts = 0;

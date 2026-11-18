@@ -681,8 +681,11 @@ internal fun PlayerScreenRuntime.RenderPlayerRuntimeUi(
             )
         }
 
+        // Desktop draws this overlay inside the controls WebView (pauseOverlay* fields of
+        // the controls state). A second Compose layer above the native SwingPanel is
+        // redundant there and is the only Compose change at the moment Space stopped working.
         AnimatedVisibility(
-            visible = playerSettingsUiState.pauseOverlayEnabled && pausedOverlayVisible && !controlsVisible && !playerControlsLocked && !isInPip && fold == null,
+            visible = !isDesktop && playerSettingsUiState.pauseOverlayEnabled && pausedOverlayVisible && !controlsVisible && !playerControlsLocked && !isInPip && fold == null,
             enter = fadeIn(animationSpec = tween(durationMillis = 220)),
             exit = fadeOut(animationSpec = tween(durationMillis = 180)),
         ) {

@@ -38,6 +38,8 @@ internal object SkipIntroApi {
         return try {
             val text = httpGetText(url)
             json.decodeFromString<IntroDbSegmentsResponse>(text)
+        } catch (cancelled: CancellationException) {
+            throw cancelled // An episode change or timeout must cancel, not count as "no data".
         } catch (_: Exception) {
             null
         }
@@ -108,8 +110,15 @@ internal object SkipIntroApi {
         val types = "types=op&types=ed&types=recap&types=mixed-op&types=mixed-ed"
         val url = "${ANISKIP_BASE}skip-times/$malId/$episode?$types&episodeLength=0"
         return try {
-            val text = httpGetText(url)
-            json.decodeFromString<AniSkipResponse>(text)
+            val response = com.nuvio.app.features.addons.httpRequestRaw(
+                method = "GET",
+                url = url,
+                headers = mapOf("Accept" to "application/json"),
+                body = "",
+            )
+            aniSkipResponseOf(response.status, response.body)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (_: Exception) {
             null
         }
@@ -135,6 +144,18 @@ internal object SkipIntroApi {
             null
         }
     }
+}
+
+private val aniSkipJson = Json { ignoreUnknownKeys = true; isLenient = true }
+
+/**
+ * AniSkip answers an episode without data with HTTP 404 {"found":false}. That is a
+ * real empty answer (cacheable), unlike 5xx/429/network errors, which are transient (null).
+ */
+internal fun aniSkipResponseOf(status: Int, body: String): AniSkipResponse? = when {
+    status == 404 -> AniSkipResponse(found = false)
+    status !in 200..299 -> null
+    else -> runCatching { aniSkipJson.decodeFromString<AniSkipResponse>(body) }.getOrNull()
 }
 
 internal fun introDbMovieSegmentsUrl(baseUrl: String, imdbId: String): String =

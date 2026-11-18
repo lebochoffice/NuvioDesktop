@@ -198,6 +198,14 @@
           </div>
           <p id="suggestStatus" class="room-share-note" role="status"></p>
         </article>
+        <div id="syncModeCard" class="sync-mode-card" hidden>
+          <p class="sync-mode-title"><span>Synchronisierung</span> <strong id="syncModeLabel">Live-Sync</strong></p>
+          <div id="syncModeChoice" class="sync-mode-choice" role="radiogroup" aria-label="Synchronisierungsmodus der Party" hidden>
+            <button id="syncModeLive" type="button" class="btn small ghost" role="radio" aria-checked="true">Live-Sync</button>
+            <button id="syncModeEvent" type="button" class="btn small ghost" role="radio" aria-checked="false">Ereignis-Sync</button>
+          </div>
+          <p id="syncModeHint" class="muted small"></p>
+        </div>
         <div class="party-footer">
           <div class="party-sync-actions">
             <button id="drawerResync" type="button" class="btn small ghost" disabled>Mich synchronisieren</button>

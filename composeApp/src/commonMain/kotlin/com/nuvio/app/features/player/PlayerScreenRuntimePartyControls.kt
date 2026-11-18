@@ -96,6 +96,7 @@ internal fun PlayerScreenRuntime.rememberPartyControlsState(): PlayerControlPart
     val hlsSuggestion by PartyRepository.hlsSuggestion.collectAsStateWithLifecycle()
     val mediaRequest by PartyRepository.mediaRequest.collectAsStateWithLifecycle()
     val countdown by PartyRepository.countdown.collectAsStateWithLifecycle()
+    val syncMode by PartyRepository.syncMode.collectAsStateWithLifecycle()
     val notice = rememberPartyNotice()
     val avatar = rememberProfileAvatar()
     val clipboard = LocalClipboardManager.current
@@ -279,7 +280,11 @@ internal fun PlayerScreenRuntime.rememberPartyControlsState(): PlayerControlPart
             "$partyStatLastCorrection vor ${((nowMs - at).coerceAtLeast(0L) / 1000L)} s"
         }.orEmpty(),
         canSyncMe = !party.isHost && !elsewhere,
-        canSyncAll = party.isHost && !hostSolo && !elsewhere && party.members.size > 1,
+        // Event sync has no host-wide re-anchor: each guest aligns with "Jetzt synchronisieren".
+        canSyncAll = party.isHost && !hostSolo && !elsewhere && party.members.size > 1 &&
+            syncMode == com.nuvio.app.features.party.PartySyncMode.Live,
+        syncMode = if (syncMode == com.nuvio.app.features.party.PartySyncMode.Event) "event" else "live",
+        syncModeEditable = party.isHost && !hostSolo,
         syncAllStatus = partySyncAllAt?.takeIf { party.isHost && nowMs - it < SYNC_ALL_STATUS_MS }
             ?.let { requestedAt -> syncAllSummary(party, playback, nowMs, nowMs - requestedAt) }.orEmpty(),
         hlsPhase = when {
@@ -525,6 +530,11 @@ internal fun PlayerScreenRuntime.handlePartyControlsEvent(type: String, value: D
             partySmartNudge = value >= 0.5
             if (!partySmartNudge) clearPartyNudge()
             PlayerSettingsStorage.savePartyCorrectionPreference(PartyCorrectionPreference.TempoNudge, partySmartNudge)
+        }
+        "partySyncMode" -> if (PartyRepository.state.value.party?.isHost == true) {
+            val mode = if (value >= 0.5) com.nuvio.app.features.party.PartySyncMode.Event else com.nuvio.app.features.party.PartySyncMode.Live
+            if (mode == com.nuvio.app.features.party.PartySyncMode.Event) clearPartyNudge()
+            PartyRepository.setSyncMode(mode)
         }
         "partyLeave" -> leaveParty()
         "partyEnd" -> endParty()

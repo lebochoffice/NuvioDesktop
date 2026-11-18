@@ -68,13 +68,17 @@ export function proposalFrom(payload, room, partyMediaKey, allowFamily = false) 
   return {memberId, name, url: link.url, kind: link.kind, host: linkHost(link.url)};
 }
 
-// Reject redirects and foreign origins before Fetch sends a request.
+// Reject redirects and non-TorBox targets before Fetch sends a request.
 export function familyHlsRequest(source, target, init) {
   const link = classifyShareLink(source, true);
   if (!link.family) throw new Error('Ungültige Familienquelle.');
   const playlist = new URL(link.url), resource = new URL(target, playlist);
-  if (resource.origin !== playlist.origin || resource.username || resource.password)
-    throw new Error('Die Playlist verweist auf eine andere Medienadresse.');
+  // TorBox may place variants and segments on another one of its own CDN
+  // hosts. Keep the token inside the existing HTTPS TorBox allowlist; never
+  // copy it to an arbitrary origin or follow an unchecked redirect.
+  if (resource.protocol !== 'https:' || !isTorboxStreamHost(resource.hostname) ||
+      resource.port || resource.username || resource.password)
+    throw new Error('Die Playlist verweist auf ein unzulässiges Medienziel.');
   return new Request(withFamilyToken(resource.href, playlist.searchParams.get('token')),
     {...init, credentials: 'omit', cache: 'no-store', redirect: 'error', referrerPolicy: 'no-referrer'});
 }

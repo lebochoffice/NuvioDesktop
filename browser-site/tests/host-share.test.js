@@ -24,7 +24,7 @@ test('the shared link is an ordinary host stream offer for the party title, with
   assert.ok(hostShareStream('http://cdn.example.test/a.mp4', 'movie|tt1||').problem);
 });
 
-test('family HLS keeps its synthetic token only on requests to the exact playlist origin', () => {
+test('family HLS keeps its synthetic token on HTTPS TorBox CDN targets only', () => {
   const source = 'https://media.tb-cdn.io/path/master.m3u8?token=SYNTHETIC_MEDIA_TOKEN';
   assert.ok(classifyShareLink(source).problem);
   const {stream} = hostShareStream(source, 'movie|tt1||', true);
@@ -38,8 +38,10 @@ test('family HLS keeps its synthetic token only on requests to the exact playlis
   assert.equal(request.cache, 'no-store');
   assert.equal(request.referrerPolicy, 'no-referrer');
   assert.equal(request.headers.get('range'), 'bytes=0-1023');
-  for (const target of ['https://other.tb-cdn.io/seg.ts', 'https://example.test/seg.ts', 'http://media.tb-cdn.io/seg.ts'])
-    assert.throws(() => familyHlsRequest(source, target), /andere Medienadresse/);
+  assert.equal(familyHlsRequest(source, 'https://other.tb-cdn.io/seg.ts').url,
+    'https://other.tb-cdn.io/seg.ts?token=SYNTHETIC_MEDIA_TOKEN');
+  for (const target of ['https://example.test/seg.ts', 'http://media.tb-cdn.io/seg.ts', 'https://user:pw@other.tb-cdn.io/seg.ts'])
+    assert.throws(() => familyHlsRequest(source, target), /unzulässiges Medienziel/);
   assert.ok(classifyShareLink('https://api.torbox.app/path/master.m3u8?token=SYNTHETIC', true).problem);
   assert.ok(classifyShareLink('https://media.tb-cdn.io/path/video.mp4?token=SYNTHETIC', true).problem);
 });

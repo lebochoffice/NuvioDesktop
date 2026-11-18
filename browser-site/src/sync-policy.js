@@ -7,7 +7,8 @@ export const SYNC = Object.freeze({
   nudgeStartS: .25,       // PartySync.NUDGE_START_MS
   nudgeStopS: .08,        // PartySync.NUDGE_STOP_MS (hysteresis, no rate flapping)
   nudgeFactor: .05,       // PartySync.NUDGE_FACTOR
-  seekCooldownMs: 4000,   // No corrective re-seek chase while segments still load.
+  seekHoldMs: 2000,       // Two regular sync ticks to distinguish drift from a transient stall.
+  seekCooldownMs: 4000,   // Minimum gap after a seek, independent of media events.
   stallReportMs: 2500,    // Short mobile stalls must not pause the whole party.
   readyHoldMs: 750,       // Hysteresis: stay "buffering" until playback is stable.
   waitBudget: 2,          // Party-wide waits one browser may cause per window ...
@@ -44,6 +45,18 @@ export function correctionFor({drift, paused, nudging, rate = 1}) {
     return {kind: 'nudge', rate: Math.max(.25, Math.min(4, rate * (drift > 0 ? 1 - SYNC.nudgeFactor : 1 + SYNC.nudgeFactor)))};
   }
   return {kind: 'in_sync', rate};
+}
+
+// Event sync (mirrors Desktop PartySync.eventNeedsPosition): a new revision
+// moves the position only as a deliberate jump of the party timeline with an
+// unchanged play state. Play/pause, re-anchors, rate changes, coordinator
+// waits and duplicates return null (no seek). Join alignment and "Jetzt
+// synchronisieren" are explicit and handled by the caller.
+export function eventSyncSeekReason(previous, next, expectedPositionMs) {
+  if (!previous || !next || previous === next || next.waiting || previous.waiting) return null;
+  if (!!previous.paused !== !!next.paused) return null;
+  const jumpMs = Math.abs(next.position_ms - expectedPositionMs(previous, next.at));
+  return jumpMs > SYNC.seekPausedS * 1000 ? 'host_jump' : null;
 }
 
 // A buffered target is reached instantly. An unbuffered target needs a new

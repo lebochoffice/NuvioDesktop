@@ -101,6 +101,27 @@ internal object PartySync {
         }
     }
 
+    /** Coordinator waits and ordinary re-anchors are not user seek commands. */
+    fun needsImmediatePosition(previous: PartyPlayback?, next: PartyPlayback, forced: Boolean): Boolean =
+        !next.waiting && (forced || next.commandId != null || previous?.let {
+            abs(next.positionMs - expectedPositionMs(it, next.at)) > PAUSED_TOLERANCE_MS
+        } == true)
+
+    /**
+     * Event sync: does this revision move the local position? Only an explicit
+     * alignment (first state after joining, "Jetzt synchronisieren") or a
+     * deliberate jump of the party timeline with an unchanged play state. Play
+     * and pause apply at each member's own position; re-anchors, rate changes,
+     * coordinator waits and duplicates never seek.
+     */
+    fun eventNeedsPosition(previous: PartyPlayback?, next: PartyPlayback, align: Boolean): Boolean {
+        if (next.waiting) return false
+        if (align) return true
+        val last = previous ?: return false
+        if (last.waiting || last.paused != next.paused) return false
+        return abs(next.positionMs - expectedPositionMs(last, next.at)) > PAUSED_TOLERANCE_MS
+    }
+
     fun pendingApply(pendingPaused: Boolean, shouldPlay: Boolean, isPlaying: Boolean, driftMs: Long): PendingApply = when {
         shouldPlay == pendingPaused -> PendingApply.Superseded
         isPlaying == pendingPaused -> PendingApply.Waiting

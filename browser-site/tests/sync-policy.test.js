@@ -1,6 +1,21 @@
 import {test} from 'node:test';
 import {strict as assert} from 'node:assert';
-import {SYNC, HLS_TUNING, bufferedRanges, bufferAhead, correctionFor, seekTarget, SeekLead, StallTracker, qualityOptions} from '../src/sync-policy.js';
+import {SYNC, HLS_TUNING, bufferedRanges, bufferAhead, correctionFor, seekTarget, SeekLead, StallTracker, qualityOptions, eventSyncSeekReason} from '../src/sync-policy.js';
+import {expectedPositionMs} from '../src/protocol.js';
+
+test('event sync: only a deliberate timeline jump with unchanged play state moves the position', () => {
+  const base = {seq: 1, member_id: 'host', paused: false, position_ms: 10000, rate: 1, at: 0};
+  const at = (seq, fields) => ({...base, seq, ...fields});
+  assert.equal(eventSyncSeekReason(base, at(2, {paused: true, position_ms: 15000, at: 5000}), expectedPositionMs), null); // Pause.
+  assert.equal(eventSyncSeekReason(at(1, {paused: true}), at(2, {paused: false, position_ms: 30000}), expectedPositionMs), null); // Play.
+  assert.equal(eventSyncSeekReason(base, at(2, {position_ms: 15200, at: 5000}), expectedPositionMs), null); // Re-anchor.
+  assert.equal(eventSyncSeekReason(base, at(2, {rate: 1.5, position_ms: 15000, at: 5000}), expectedPositionMs), null); // Speed.
+  assert.equal(eventSyncSeekReason(base, at(2, {position_ms: 60000, at: 5000}), expectedPositionMs), 'host_jump'); // Forward.
+  assert.equal(eventSyncSeekReason(base, at(2, {position_ms: 2000, at: 5000}), expectedPositionMs), 'host_jump'); // Back.
+  assert.equal(eventSyncSeekReason(base, at(2, {paused: true, waiting: true, position_ms: 15000, at: 5000}), expectedPositionMs), null); // Coordinator wait.
+  assert.equal(eventSyncSeekReason(base, base, expectedPositionMs), null); // Duplicate.
+  assert.equal(eventSyncSeekReason(null, base, expectedPositionMs), null); // Join alignment is explicit, not a jump.
+});
 
 const ranges = list => ({length: list.length, start: i => list[i][0], end: i => list[i][1]});
 
@@ -62,8 +77,9 @@ test('mobile fairness: after the wait budget a guest catches up alone until the 
 test('quality options list distinct heights with the highest-bitrate rendition at each height', () => {
   assert.deepEqual(qualityOptions([{height: 1080, bitrate: 6e6}]), [{value: 0, height: 1080, label: '1080p'}]);
   assert.deepEqual(qualityOptions([]), []); assert.deepEqual(qualityOptions(undefined), []);
-  assert.deepEqual(qualityOptions([{height: 720, bitrate: 3e6}, {height: 2160, bitrate: 15e6}, {height: 1080, bitrate: 5e6}, {height: 1080, bitrate: 7e6}, {}]), [
-    {value: 1, height: 2160, label: '4K / 2160p'}, {value: 3, height: 1080, label: '1080p'}, {value: 0, height: 720, label: '720p'}]);
+  assert.deepEqual(qualityOptions([{height: 720, bitrate: 3e6}, {height: 2160, bitrate: 15e6}, {height: 1080, bitrate: 5e6}, {height: 1080, bitrate: 7e6}, {height: 1440, bitrate: 9e6}, {}]), [
+    {value: 1, height: 2160, label: '4K / 2160p'}, {value: 4, height: 1440, label: '1440p'},
+    {value: 3, height: 1080, label: '1080p'}, {value: 0, height: 720, label: '720p'}]);
   assert.deepEqual(qualityOptions([{height: 480}, {height: 360}]).map(o => o.label), ['480p', '360p']);
 });
 

@@ -425,6 +425,11 @@ input[type=range]:disabled { cursor: default; opacity: .5; }
 .room-share-note { margin: 0; color: var(--text-3); font-size: 12px; }
 .room-share-note:empty { display: none; }
 .room-proposals h3 { font-size: 13px; color: var(--text-2); }
+.sync-mode-card { display: grid; gap: 6px; padding: 10px 12px; border: 1px solid rgba(255,255,255,.12); border-radius: 12px; margin-bottom: 10px; }
+.sync-mode-title { display: flex; justify-content: space-between; gap: 8px; margin: 0; font-size: 13px; }
+.sync-mode-choice { display: flex; flex-wrap: wrap; gap: 6px; }
+.sync-mode-choice [aria-checked="true"] { border-color: currentColor; font-weight: 600; }
+.sync-mode-card p.muted { margin: 0; }
 .party-footer { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 8px; }
 .party-sync-actions { display: grid; gap: 8px; }
 

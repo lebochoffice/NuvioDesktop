@@ -7,10 +7,12 @@ import {createRealtimeTrace} from './realtime-trace.js';
 import {PersonalHlsSource, personalHlsUrlProblem} from './personal-hls.js';
 import {loadRoomTitle, resolveRoomMedia, roomMediaForEpisode, searchRoomMedia} from './room-media.js';
 import {classifyShareLink, familyHlsRequest, hostShareStream, proposalFrom} from './host-share.js';
-import {SYNC, HLS_TUNING, bufferedRanges, bufferAhead, correctionFor, seekTarget, SeekLead, StallTracker, qualityOptions} from './sync-policy.js';
+import {SYNC, HLS_TUNING, bufferedRanges, bufferAhead, correctionFor, seekTarget, SeekLead, StallTracker, qualityOptions, eventSyncSeekReason} from './sync-policy.js';
+import {detectHlsCapabilities, selectHlsPlayback} from './hls-capabilities.js';
 
 const $ = id => document.getElementById(id);
 const player = $('player');
+const currentHlsCapabilities = () => detectHlsCapabilities(Hls, player, globalThis);
 const url = import.meta.env.VITE_SUPABASE_URL?.trim();
 const key = import.meta.env.VITE_SUPABASE_ANON_KEY?.trim();
 // Shared browser control when the host allows it (host_only=false):
@@ -63,15 +65,77 @@ let suppressUntil = 0, loading = false, buffering = false;
 let pendingChat = null;
 let pendingSeek = null, internalHlsSeek = null, pendingPlay = null, ownSeek = null;
 let waitingForTarget = false;
-let lastAlignedPlayback = null;
+let lastSyncPlayback = null, prioritySeek = null, seekDriftSince = null;
 let presenceRoom = null, lastPresence = null;
 const stallTracker = new StallTracker(), seekLead = new SeekLead();
-let nudging = false, lastCorrectiveSeekAt = -Infinity, seekSettled = true, leadSeekStartedAt = null;
+let nudging = false, lastCorrectiveSeekAt = -Infinity, leadSeekStartedAt = null;
 let bufferingEvents = 0, segmentStats = {loadMs: null, durationS: null};
+const STREAM_START_WARN_MS = 20_000, STREAM_START_FAIL_MS = 90_000;
+const PLAY_CONFIRM_MS = 20_000, BUFFER_NOTICE_MS = 12_000;
+let streamStart = null, playbackStart = null, playAttemptAt = null, bufferingSinceMs = null, bufferingNoticeShown = false;
+
+function beginStreamStart(phase) {
+  streamStart = {phase, since: performance.now(), warned: false};
+}
+function streamStartPhase(phase) {
+  if (!streamStart || streamStart.phase === phase) return;
+  streamStart = {phase, since: performance.now(), warned: false};
+}
+function streamStartText(phase, failed = false) {
+  if (phase === 'playlist') return failed
+    ? 'HLS-Zugriff fehlgeschlagen: Die Playlist wurde nicht rechtzeitig geladen. Verbindung, Freigabe oder abgelaufenen Link prüfen.'
+    : 'Lade HLS-Playlist …';
+  if (phase === 'segments') return failed
+    ? 'HLS-Segmente konnten nicht rechtzeitig geladen werden. Zugriff, Mobilverbindung und Medienserver prüfen.'
+    : 'HLS-Playlist geladen. Lade Videosegmente …';
+  return failed
+    ? 'Videosegmente wurden geladen, aber der Browser konnte keine abspielbaren Metadaten erzeugen. Codec oder Format wird wahrscheinlich nicht unterstützt.'
+    : 'Videosegmente geladen. Warte auf Videometadaten …';
+}
+function checkMediaStartHealth() {
+  const now = performance.now();
+  if (loading && streamStart) {
+    const elapsed = now - streamStart.since;
+    if (elapsed >= STREAM_START_FAIL_MS) {
+      const phase = streamStart.phase, message = streamStartText(phase, true);
+      streamStart = null;
+      failVideo(message, phase === 'metadata' ? 'media_error' : 'hls_error');
+      return;
+    }
+    if (elapsed >= STREAM_START_WARN_MS && !streamStart.warned) {
+      streamStart.warned = true;
+      status(streamStartText(streamStart.phase), true);
+    }
+  }
+  if (pendingPlay && playAttemptAt != null && now - playAttemptAt >= PLAY_CONFIRM_MS) {
+    pauseLocally(); playAttemptAt = null; autoStarting = false; autoStartPhase = 'blocked';
+    syncEnabled = false; $('autoplayStart').hidden = false; presence();
+    status('Der Browser hat den Wiedergabestart nicht bestätigt. Tippe auf „Wiedergabe starten“.', true);
+  }
+  if (playbackStart && !pendingPlay && !player.paused && !effectivePlayback()?.paused) {
+    const elapsed = now - playbackStart.since;
+    if (Math.abs(player.currentTime - playbackStart.position) >= .1) playbackStart = null;
+    else if (elapsed >= STREAM_START_FAIL_MS) {
+      playbackStart = null;
+      failVideo('Die Wiedergabe wurde angefordert, aber der Browser meldet auch nach 90 Sekunden keinen Fortschritt. Decoder, Codec oder Videosegmente sind auf diesem Gerät wahrscheinlich nicht verwendbar.', 'media_error');
+      return;
+    } else if (elapsed >= STREAM_START_WARN_MS && !playbackStart.warned) {
+      playbackStart.warned = true;
+      status('Wiedergabe angefordert, aber noch ohne bestätigten Fortschritt. Warte auf Decoder und Videopuffer …', true);
+    }
+  }
+  if (buffering && bufferingSinceMs != null && now - bufferingSinceMs >= BUFFER_NOTICE_MS && !bufferingNoticeShown) {
+    bufferingNoticeShown = true;
+    status('Der Videopuffer ist leer. Segmente werden weiter geladen; bei anhaltendem Zustand Quelle, Codec und Mobilverbindung prüfen.', true);
+  }
+}
 // Guest control: optimistic command until the server confirms or rejects it.
 let pendingCommand = null, queuedCommand = null, userSeekPending = false;
 let expectedPauses = 0, mediaPointerDown = false, mediaGestureUntil = -1;
 let lastPlaybackError = 'none', debugOutput = null;
+const playbackEvents = [];
+let diagnosticBufferStart = null;
+let diagnosticSeekCount = 0;
 let personalReadinessMessage = '';
 // Personal link: follow the party time automatically once the VOD is ready.
 // Bounded retries; never while watching alone, never after the user left sync.
@@ -128,6 +192,7 @@ const session = client ? new PartySession(client, deviceId, {
       resyncNow();
     }
   },
+  syncMode: mode => syncModeChanged(mode),
   playback: () => {
     if (awaitingHandoff) { finishBrowserHandoff(); return; }
     updatePersonalHlsReadiness();
@@ -288,7 +353,9 @@ const session = client ? new PartySession(client, deviceId, {
       // Automatic mode: load at once (new episode or renewed link) and follow
       // the current party time after metadata, like the big play button.
       startStream();
-      status('Host-Stream wird automatisch geladen. Der Anbieter der Quelle erhält dabei deine IP-Adresse.');
+      // A synchronous capability failure from loadStream() already contains
+      // the actionable reason and must not be overwritten by this generic note.
+      if (loadedStream) status('Host-Stream wird automatisch geladen. Der Anbieter der Quelle erhält dabei deine IP-Adresse.');
     }
     else { $('noStream').textContent = 'Stream bereit. Tippe auf ▶, um gemeinsam zu schauen.'; status('Stream bereit. Tippe auf ▶ zum Abspielen.'); }
   },
@@ -448,7 +515,8 @@ function renderPartyRoom() {
   const room = session?.room, host = session?.isHost?.() === true;
   renderProposalForm();
   $('tabHost').hidden = !host;
-  $('hostSyncAll').hidden = !host;
+  // Event sync has no host-wide re-anchor; each guest uses "Jetzt synchronisieren".
+  $('hostSyncAll').hidden = !host || session?.syncMode === 'event';
   if (!room) {
     $('roomOverview').hidden = true;
     hostShared = null; hostMenuRoom = null; awaitingHandoff = false; proposals.length = 0;
@@ -773,7 +841,7 @@ function friendlyError(e) {
   return messages[e?.code || e?.message] || e?.message || 'Unbekannter Fehler';
 }
 function pauseLocally() {
-  pendingPlay = null; suppressUntil = performance.now() + 1000;
+  pendingPlay = null; playbackStart = null; suppressUntil = performance.now() + 1000;
   // Match the actual pause event even if the browser dispatches it much later.
   if (!player.paused) expectedPauses++;
   player.pause();
@@ -787,7 +855,7 @@ function resetVideo(reason = 'Persönliche Quelle entfernt. Für diesen Film kan
   cancelPersonalAutoSync();
   pendingSeek = internalHlsSeek = pendingPlay = ownSeek = null;
   waitingForTarget = false;
-  lastAlignedPlayback = null; lastPresence = null;
+  lastPresence = null;
   resetSyncState(); renderQuality(null); clearAudioTracks(); clearSubtitles();
   mediaPointerDown = false; mediaGestureUntil = -1; lastPlaybackError = 'none';
   personalHls.clear();
@@ -863,6 +931,9 @@ function presence() {
   // A play promise or a routine seek is not itself a reason to pause everyone.
   const stallState = stallTracker.update(performance.now(), !!loadedStream && syncEnabled && (buffering || waitingForTarget || loading));
   if (loadedStream) state = syncEnabled ? stallState : 'behind';
+  // Event sync: the host never waits for anyone, so there is no wait budget to
+  // exhaust; a stalled guest simply shows "Puffert" and continues on its own.
+  if (session.syncMode === 'event' && syncEnabled && state === 'behind') state = 'buffering';
   // Waiting for consent or an unsupported source must never stall the whole party.
   if (loading && !syncEnabled) state = 'browsing';
   const gap = session.playback ? Math.max(5000, expectedPositionMs(session.playback, session.now()) - player.currentTime * 1000) : 5000;
@@ -889,6 +960,22 @@ function applySync(forcePlay = false) {
   if (!syncEnabled || !p || !loadedStream) return;
   // Host pause must not wait for metadata, seekability or buffer recovery.
   if (p.paused) { pendingPlay = null; if (!player.paused) pauseLocally(); }
+  // Accepted revisions can merely re-anchor the same timeline. Only a real
+  // position jump, initial alignment or explicit resync may bypass the drift gate.
+  // Event sync (host decides): play/pause continue at the own position; only a
+  // deliberate timeline jump with unchanged play state, the join alignment or
+  // "Jetzt synchronisieren" moves the position, and nothing corrects drift.
+  const eventSync = session?.syncMode === 'event';
+  if (forcePlay || !lastSyncPlayback) prioritySeek = 'align';
+  else if (p !== lastSyncPlayback) {
+    // A pending alignment or jump stays pending; play/pause never adds a seek.
+    if (eventSync) prioritySeek = eventSyncSeekReason(lastSyncPlayback, p, expectedPositionMs) ?? prioritySeek;
+    else if (p.waiting) prioritySeek = null;
+    else if (Math.abs(p.position_ms - expectedPositionMs(lastSyncPlayback, p.at)) >
+        (p.paused ? SYNC.seekPausedS : SYNC.seekPlayingS) * 1000) prioritySeek = 'host_jump';
+  }
+  if (p !== lastSyncPlayback) recordPlaybackEvent('party_state');
+  lastSyncPlayback = p;
   if (player.readyState < 1) return;
   let desired = expectedPositionMs(p, session.now()) / 1000;
   if (personalHls.active) {
@@ -911,13 +998,14 @@ function applySync(forcePlay = false) {
   const rate = p.rate ?? 1;
   const correction = correctionFor({drift, paused: p.paused, nudging, rate});
   const needsSeek = correction.kind === 'seek';
-  // Queue the latest accepted command during a native seek. Once seeked fires,
-  // apply it immediately, including when the old target was still buffering.
-  // For the same command, never re-seek while segments still load; after a
-  // corrective seek, wait until playback resumed or the cooldown elapsed.
-  const newCommand = lastAlignedPlayback !== p || forcePlay;
-  const recovered = seekSettled || performance.now() - lastCorrectiveSeekAt >= SYNC.seekCooldownMs;
-  if (!pendingSeek && !player.seeking && needsSeek && (newCommand || (!buffering && recovered))) {
+  const now = performance.now();
+  if (!needsSeek) prioritySeek = null;
+  if (!needsSeek || p.waiting || buffering || pendingSeek || player.seeking) seekDriftSince = null;
+  else seekDriftSince ??= now;
+  const driftSeek = !eventSync && seekDriftSince != null && now - seekDriftSince >= SYNC.seekHoldMs &&
+    now - lastCorrectiveSeekAt >= SYNC.seekCooldownMs;
+  const seekReason = prioritySeek || (driftSeek ? 'sustained_drift' : null);
+  if (!pendingSeek && !player.seeking && needsSeek && seekReason) {
     suppressUntil = performance.now() + 1000;
     try {
       // Unbuffered targets need a download while the party continues: land
@@ -925,34 +1013,39 @@ function applySync(forcePlay = false) {
       const target = seekTarget({desired, paused: p.paused, ranges: bufferedRanges(player.buffered), leadS: seekLead.seconds, duration: player.duration});
       pendingSeek = {seconds: target.seconds, at: performance.now()};
       player.currentTime = target.seconds;
-      lastAlignedPlayback = p;
-      lastCorrectiveSeekAt = performance.now(); seekSettled = false;
+      prioritySeek = seekDriftSince = null;
+      lastCorrectiveSeekAt = now;
+      recordPlaybackEvent('seek', {reason: seekReason, targetSeconds: target.seconds});
       leadSeekStartedAt = !target.buffered && !p.paused ? performance.now() : null;
     }
     catch {
       pendingSeek = null;
       lastPlaybackError = 'seek_failed';
       syncEnabled = false; pauseLocally(); presence();
-     
+
       const message = 'Der Browser konnte den Party-Zeitpunkt nicht anspringen. Bitte einen suchbaren VOD-Stream verwenden und erneut synchronisieren.';
       if (personalHls.active) $('personalHlsStatus').textContent = message;
       status(message, true); return;
     }
   }
-  if (!needsSeek) lastAlignedPlayback = p;
   // Hysteresis like Desktop (start 250 ms, stop 80 ms): no per-tick rate
   // flapping. No nudging while stalled or seeking; it cannot help there.
-  nudging = correction.kind === 'nudge' && !buffering && !pendingSeek && !player.seeking;
+  nudging = !eventSync && correction.kind === 'nudge' && !buffering && !pendingSeek && !player.seeking;
   const nextRate = nudging ? correction.rate : rate;
-  if (player.playbackRate !== nextRate) player.playbackRate = nextRate;
+  if (player.playbackRate !== nextRate) {
+    player.playbackRate = nextRate;
+    recordPlaybackEvent('rate');
+  }
   if (!p.paused && !pendingPlay && (forcePlay || player.paused)) {
     suppressUntil = performance.now() + 1000;
     const playbackSource = loadedStream;
-    const attempt = {}; pendingPlay = attempt;
-    const finished = () => { if (pendingPlay === attempt) pendingPlay = null; };
+    const attempt = {}; pendingPlay = attempt; playAttemptAt = performance.now();
+    playbackStart = {since: performance.now(), position: player.currentTime, warned: false};
+    const finished = () => { if (pendingPlay === attempt) { pendingPlay = null; playAttemptAt = null; } };
     const rejected = error => {
       if (pendingPlay !== attempt) return;
       finished();
+      playbackStart = null;
       if (loadedStream !== playbackSource || !syncEnabled) return;
       lastPlaybackError = ['AbortError', 'NotAllowedError', 'NotSupportedError'].includes(error?.name) ? error.name : 'play_failed';
       // pause(), load() or newer host commands can legitimately interrupt play.
@@ -973,7 +1066,7 @@ function applySync(forcePlay = false) {
       $('autoplayStart').hidden = error?.name !== 'NotAllowedError';
       autoStarting = false;
       syncEnabled = false; presence();
-     
+
       const message = error?.name === 'NotAllowedError'
         ? 'Der Browser hat den automatischen Start blockiert. Tippe auf „Wiedergabe starten“.'
         : 'Wiedergabestart fehlgeschlagen. Bitte erneut synchronisieren; bei wiederholtem Fehler eine andere kompatible Quelle laden.';
@@ -999,10 +1092,10 @@ function failVideo(message, errorCode = 'media_error') {
     return;
   }
   lastPlaybackError = errorCode;
+  streamStart = null; playbackStart = null; playAttemptAt = null; bufferingSinceMs = null; bufferingNoticeShown = false;
   cancelPersonalAutoSync();
   pendingSeek = internalHlsSeek = pendingPlay = ownSeek = null;
   waitingForTarget = false;
-  lastAlignedPlayback = null;
   resetSyncState(); renderQuality(null); clearAudioTracks();
   if (personalHls.active) $('personalHlsStatus').textContent = message;
   personalHls.dispose();
@@ -1016,15 +1109,16 @@ function failVideo(message, errorCode = 'media_error') {
 }
 function resetSyncState() {
   stallTracker.reset(); seekLead.reset();
-  nudging = false; lastCorrectiveSeekAt = -Infinity; seekSettled = true; leadSeekStartedAt = null;
+  lastSyncPlayback = prioritySeek = seekDriftSince = null;
+  nudging = false; lastCorrectiveSeekAt = -Infinity; leadSeekStartedAt = null;
   bufferingEvents = 0; segmentStats = {loadMs: null, durationS: null};
   pendingCommand = queuedCommand = null; userSeekPending = false;
   startAfterLoad = false; autoStarting = false; awaitingPartyState = false; autoStartPhase = null;
+  streamStart = null; playbackStart = null; playAttemptAt = null; bufferingSinceMs = null; bufferingNoticeShown = false;
 }
 // Playback resumed after a corrective seek: learn the real recovery delay.
 function mediaResumed() {
   if (leadSeekStartedAt != null) { seekLead.observe(performance.now() - leadSeekStartedAt); leadSeekStartedAt = null; }
-  seekSettled = true;
 }
 const currentHls = () => hls || personalHls.instance;
 const AUDIO_PREFERENCE_KEY = 'nuvio.browser.audioPreference';
@@ -1101,14 +1195,79 @@ player.audioTracks?.addEventListener('change', () => {
   if (!currentHls()) renderAudioTracks(null);
 });
 
+// Mobile HLS analysis (memory only, numbers and fixed labels): does each
+// segment load faster than it plays, at which bitrate, with retries or CDN
+// host changes? The host name itself is never kept beyond the comparison.
+let hlsHealth = null;
+const freshHlsHealth = () => ({segments: 0, slowSegments: 0, slowStreak: 0, hostChanges: 0, lastHost: null,
+  fragmentRetries: 0, lastBytes: null, lastThroughputKbps: null, lastLevelBitrateKbps: null, hintShown: false});
+let streamLoads = 0;
+function noteSegmentHealth(instance, frag, loadMs, durationS) {
+  const health = hlsHealth ??= freshHlsHealth();
+  const bytes = Number(frag?.stats?.total || frag?.stats?.loaded);
+  const levelBitrate = Number(instance.levels?.[frag?.level]?.bitrate);
+  health.segments++;
+  health.lastBytes = Number.isFinite(bytes) && bytes > 0 ? bytes : null;
+  health.lastThroughputKbps = health.lastBytes && loadMs > 0 ? Math.round(health.lastBytes * 8 / loadMs) : null;
+  health.lastLevelBitrateKbps = Number.isFinite(levelBitrate) && levelBitrate > 0 ? Math.round(levelBitrate / 1000) : null;
+  // Slower than real time: the segment took longer to load than to play.
+  const slow = Number.isFinite(durationS) && durationS > 0 && Number.isFinite(loadMs) && loadMs > durationS * 1000;
+  if (slow) { health.slowSegments++; health.slowStreak++; } else health.slowStreak = 0;
+  try {
+    const host = new URL(frag?.url).host;
+    if (health.lastHost && host !== health.lastHost) health.hostChanges++;
+    health.lastHost = host;
+  } catch { /* Relative or opaque fragment address: nothing to compare. */ }
+  // Display only: a fixed quality that persistently loads slower than real time
+  // cannot play without stalls. Suggest the adaptive mode; never switch silently.
+  const variants = qualityOptions(instance.levels);
+  if (!health.hintShown && health.slowStreak >= 3 && variants.length > 1 && qualityPreference !== 'auto') {
+    health.hintShown = true;
+    const have = health.lastThroughputKbps, need = health.lastLevelBitrateKbps;
+    $('qualityNote').textContent = `Segmente laden langsamer als die Wiedergabe${have && need ? ` (${(have / 1000).toFixed(1)} von ${(need / 1000).toFixed(1)} Mbit/s)` : ''}. „Automatisch (adaptiv)“ kann das Puffern vermeiden.`;
+    $('qualityNote').hidden = false;
+  }
+}
+const videoCodecFamily = codec => {
+  const value = String(codec || '').toLowerCase();
+  return /^(hvc1|hev1)/.test(value) ? 'hevc' : /^avc/.test(value) ? 'avc' : /^av01/.test(value) ? 'av1'
+    : /^vp0?9/.test(value) ? 'vp9' : value ? 'other' : null;
+};
+
 function watchHlsInstance(instance) {
+  hlsHealth = freshHlsHealth();
+  recordPlaybackEvent('hls_instance');
+  for (const [hlsEvent, label] of [[Hls.Events.FRAG_LOADING, 'segment_loading'], [Hls.Events.FRAG_BUFFERED, 'segment_buffered']]) {
+    instance.on(hlsEvent, (_event, data) => {
+      if (currentHls() !== instance) return;
+      if (hlsEvent === Hls.Events.FRAG_LOADING) streamStartPhase('segments');
+      recordPlaybackEvent(label, {durationSeconds: data?.frag?.duration});
+    });
+  }
+  instance.on(Hls.Events.ERROR, (_event, error) => {
+    if (currentHls() !== instance) return;
+    const category = ['bufferStalledError', 'bufferSeekOverHole', 'bufferNudgeOnStall', 'bufferFullError',
+      'fragLoadError', 'fragLoadTimeOut', 'manifestLoadError', 'manifestLoadTimeOut',
+      'manifestIncompatibleCodecsError', 'bufferAddCodecError', 'bufferIncompatibleCodecsError', 'fragParsingError', 'fragDecryptError'].includes(error?.details)
+      ? error.details : error?.fatal ? 'fatal' : 'other';
+    if (!error?.fatal && ['fragLoadError', 'fragLoadTimeOut'].includes(error?.details) && hlsHealth) hlsHealth.fragmentRetries++;
+    recordPlaybackEvent('hls_error', {reason: category});
+  });
   instance.on(Hls.Events.AUDIO_TRACKS_UPDATED, () => queueMicrotask(() => {
     if (currentHls() === instance) renderAudioTracks(instance, true);
   }));
   instance.on(Hls.Events.AUDIO_TRACK_SWITCHED, () => {
     if (currentHls() === instance) renderAudioTracks(instance);
   });
-  instance.on(Hls.Events.MANIFEST_PARSED, () => { if (currentHls() === instance) renderQuality(instance); });
+  instance.on(Hls.Events.MANIFEST_PARSED, () => {
+    if (currentHls() !== instance) return;
+    streamStartPhase('segments');
+    recordPlaybackEvent('manifest_parsed');
+    renderQuality(instance);
+  });
+  instance.on(Hls.Events.LEVELS_UPDATED, () => {
+    if (currentHls() === instance) renderQuality(instance);
+  });
   instance.on(Hls.Events.SUBTITLE_TRACKS_UPDATED, () => { if (currentHls() === instance) renderSubtitles(); });
   // Shows the variant actually playing, so a manual choice is verifiable.
   instance.on(Hls.Events.LEVEL_SWITCHED, (_event, data) => {
@@ -1121,7 +1280,10 @@ function watchHlsInstance(instance) {
     const loading = data?.frag?.stats?.loading, duration = Number(data?.frag?.duration);
     if (currentHls() !== instance || !loading) return;
     const loadMs = Number(loading.end) - Number(loading.start);
+    streamStartPhase('metadata');
     segmentStats = {loadMs: Number.isFinite(loadMs) && loadMs >= 0 ? Math.round(loadMs) : null, durationS: Number.isFinite(duration) ? Math.round(duration * 10) / 10 : null};
+    noteSegmentHealth(instance, data?.frag, loadMs, duration);
+    recordPlaybackEvent('segment_loaded', {durationSeconds: duration, loadMs});
   });
 }
 const QUALITY_PREFERENCE_KEY = 'nuvio.browser.videoQuality';
@@ -1255,7 +1417,43 @@ function controlBlockedReason() {
   if (session.waitingForHostState) return 'host_state_pending';
   return 'allowed';
 }
+const SYNC_MODE_HINT = {
+  live: 'Live-Sync: Abweichungen werden automatisch korrigiert; bei anhaltendem Puffern wartet die Party.',
+  event: 'Ereignis-Sync: Nur Play, Pause, Spulen und „Jetzt synchronisieren“ gelten für alle. Jeder spielt mit eigenem Puffer weiter, ohne automatische Korrekturen.',
+};
+function renderSyncMode() {
+  const room = session?.room, mode = session?.syncMode === 'event' ? 'event' : 'live';
+  $('syncModeCard').hidden = !room;
+  if (!room) return;
+  const host = session.isHost();
+  $('syncModeLabel').textContent = mode === 'event' ? 'Ereignis-Sync' : 'Live-Sync';
+  $('syncModeChoice').hidden = !host;
+  $('syncModeLive').setAttribute('aria-checked', String(mode === 'live'));
+  $('syncModeEvent').setAttribute('aria-checked', String(mode === 'event'));
+  $('syncModeHint').textContent = SYNC_MODE_HINT[mode] + (host ? '' : ' Der Host bestimmt den Modus.');
+  $('hostSyncAll').hidden = !host || mode === 'event';
+  $('drawerResync').textContent = mode === 'event' ? 'Jetzt synchronisieren' : 'Mich synchronisieren';
+}
+function chooseSyncMode(mode) {
+  if (!session?.isHost?.()) return;
+  session.setHostSyncMode(mode).catch(() => status('Synchronisierungsmodus nicht gesendet. Party-Verbindung prüfen.', true));
+}
+$('syncModeLive').addEventListener('click', () => chooseSyncMode('live'));
+$('syncModeEvent').addEventListener('click', () => chooseSyncMode('event'));
+// Mode changes never re-position: live sync resumes corrections on the next
+// tick; event sync drops the tempo nudge and any pending drift correction now.
+function syncModeChanged(mode) {
+  if (mode === 'event') {
+    nudging = false; seekDriftSince = null;
+    if (prioritySeek === 'sustained_drift') prioritySeek = null;
+    const rate = effectivePlayback()?.rate ?? 1;
+    if (loadedStream && player.playbackRate !== rate) player.playbackRate = rate;
+  }
+  recordPlaybackEvent('sync_mode', {reason: mode});
+  renderSyncMode(); presence(); renderPlayerUi();
+}
 function renderControlInfo() {
+  renderSyncMode();
   const info = session?.room?.info, allowed = guestControl();
   $('controlInfo').textContent = !info ? 'Steuerung: nur der Host.'
     : !guestControlEnabled ? 'Steuerung: Play/Pause und Springen steuert der Desktop-Host. Gemeinsame Browsersteuerung ist in dieser Version ausgeschaltet. Lokale Bedienung trennt dich von der Party-Zeit.'
@@ -1300,7 +1498,14 @@ function renderPlayerUi() {
   for (const id of ['ctlBack10', 'ctlFwd10']) $(id).disabled = !seekable;
   // Badge states come only from the real sync/connection state.
   const [label, tone] = connectionLost && session?.room ? (realtimeReconnecting ? ['Verbinde neu …', 'warn'] : ['Verbindung unterbrochen', 'lost'])
-    : soloMode ? ['Allein', 'off'] : !syncEnabled ? ['Nicht synchron', 'off'] : buffering || waitingForTarget ? ['Puffert …', 'warn'] : ['Synchron', ''];
+    : soloMode ? ['Allein', 'off']
+    : loading ? [streamStart?.phase === 'playlist' ? 'Lade Playlist …' : streamStart?.phase === 'segments' ? 'Lade Segmente …' : 'Lade Videodaten …', 'warn']
+    : awaitingPartyState ? ['Warte auf Host-Zeit …', 'warn']
+    : waitingForTarget ? ['Warte auf suchbare Position …', 'warn']
+    : pendingPlay ? ['Starte Wiedergabe …', 'warn']
+    : !syncEnabled ? ['Nicht synchron', 'off']
+    : buffering ? [bufferingSinceMs != null && performance.now() - bufferingSinceMs >= BUFFER_NOTICE_MS ? 'Videopuffer leer' : 'Lade Video …', 'warn']
+    : ['Synchron', ''];
   $('syncChip').hidden = !loadedStream;
   $('syncChip').textContent = label; $('syncChip').className = tone ? `sync-chip ${tone}` : 'sync-chip';
   renderSoloUi();
@@ -1378,7 +1583,7 @@ function enterSolo() {
   cancelPersonalAutoSync();
   soloMode = true; syncEnabled = false; resumeAfterReconnect = false;
   awaitingHandoff = handoffSourceReady = false;
-  pendingPlay = null; pendingSeek = ownSeek = null; userSeekPending = false;
+  pendingPlay = null; playbackStart = null; pendingSeek = ownSeek = null; userSeekPending = false;
   if (player.playbackRate !== 1) player.playbackRate = 1; // No party nudging any more.
   status('Du schaust allein weiter. Play, Pause und Springen gelten nur für dich. „Zur Party“ übernimmt wieder die Party-Zeit.');
   presence(); renderSoloUi(); renderPlayerUi();
@@ -1388,7 +1593,7 @@ function enterSolo() {
 function keepAfterPartyEnd(reason) { return (reason === 'ended' || reason === 'host_left') && !!loadedStream && !loadedStream.family_beta; }
 function continueLocally(message) {
   soloMode = true; syncEnabled = false; resumeAfterReconnect = false;
-  pendingPlay = null; pendingSeek = ownSeek = null; userSeekPending = false;
+  pendingPlay = null; playbackStart = null; pendingSeek = ownSeek = null; userSeekPending = false;
   if (player.playbackRate !== 1) player.playbackRate = 1;
   status(message); presence(); renderSoloUi(); renderPlayerUi();
 }
@@ -1665,20 +1870,28 @@ function loadStream() {
   if (problem) return status(problem, true);
   if (hls) { hls.destroy(); hls = null; }
   pauseLocally(); player.removeAttribute('src'); player.load();
-  loadedStream = stream; loading = true; syncEnabled = false;
+  loadedStream = stream; loading = true; syncEnabled = false; streamLoads++;
+  beginStreamStart(streamIsHls(stream) ? 'playlist' : 'metadata');
   clearAudioTracks(); renderQuality(null);
   renderPartyRoom();
   $('resync').disabled = true; $('loadStream').hidden = true;
   status('Quelle wird geladen. Erst nach erfolgreichem Laden ist die Synchronisierung verfügbar.');
   try {
     if (streamIsHls(stream)) {
-      if (!stream.family_beta && player.canPlayType('application/vnd.apple.mpegurl') && !Object.keys(stream.headers || {}).length) { player.src = stream.url; renderQuality(null, true); }
-      else if (Hls.isSupported()) {
+      // A Worker-delivered Family source carries its token only in local memory,
+      // but has the same child-playlist requirements as a direct Family-Beta
+      // source. Native HLS cannot reliably restore that token on variants and
+      // segments, so both Family paths must use the checked hls.js loader.
+      const protectedFamily = stream.family_beta || familyStream?.url === stream.url;
+      const playbackPath = selectHlsPlayback(currentHlsCapabilities(),
+        {protectedFamily, requestHeaders: Object.keys(stream.headers || {}).length > 0});
+      if (playbackPath === 'native') { player.src = stream.url; renderQuality(null, true); }
+      else if (playbackPath === 'hlsjs') {
         // TorBox link with token: variants/segments that lost the query get the same token.
         let ownToken = null;
         try { ownToken = stream.propagate_token === true ? new URL(stream.url).searchParams.get('token') : null; } catch { ownToken = null; }
         const familyToken = (familyStream && familyStream.url === stream.url ? familyStream.token : null) || ownToken;
-        const instance = new Hls({...HLS_TUNING, debug: false, enableWorker: true, ...(stream.family_beta ? {
+        const instance = new Hls({...HLS_TUNING, debug: false, enableWorker: true, useMediaCapabilities: true, ...(protectedFamily ? {
           progressive: true,
           fetchSetup: async (context, init) => familyHlsRequest(stream.url, context.url, init),
         } : {xhrSetup: (xhr, requestUrl) => {
@@ -1688,7 +1901,7 @@ function loadStream() {
           xhr.withCredentials = false;
           for (const [name, value] of Object.entries(stream.headers || {})) xhr.setRequestHeader(name, value);
         }})});
-        if (stream.family_beta && instance.config.loader === Hls.DefaultConfig.loader) {
+        if (protectedFamily && instance.config.loader === Hls.DefaultConfig.loader) {
           instance.destroy();
           return failVideo('Dieser Browser kann TorBox-HLS mit geschützter Weiterleitungsprüfung nicht laden.');
         }
@@ -1697,12 +1910,21 @@ function loadStream() {
         instance.on(Hls.Events.ERROR, (_event, error) => {
           if (personalHls.active || hls !== instance || loadedStream !== stream) return;
           if (!error.fatal && ['bufferSeekOverHole', 'bufferNudgeOnStall'].includes(error.details)) internalHlsSeek = {seconds: player.currentTime};
+          const code = Number(error?.response?.code ?? error?.networkDetails?.status);
+          if ([401, 403].includes(code)) return failVideo('HLS-Zugriff fehlgeschlagen: Playlist oder Segment wurde vom Medienserver abgewiesen. Freigabe oder Link können abgelaufen sein.', 'hls_error');
+          if ([404, 410].includes(code)) return failVideo('HLS-Playlist oder Segment ist nicht mehr verfügbar. Der Host muss die Freigabe erneuern.', 'hls_error');
           if (error.fatal) failVideo(error.type === Hls.ErrorTypes.NETWORK_ERROR
-            ? 'HLS-Netzwerkfehler: Manifest, Segmente und ggf. Schlüssel benötigen gültige HTTPS-Links und CORS-Freigaben des Medienservers. Auch abgelaufene Links sind möglich.'
-            : 'HLS-Medienfehler: Codec, Container oder Verschlüsselung wird vom Browser nicht unterstützt. Eine andere Quelle wählen.');
+            ? 'HLS-Netzwerkfehler: Manifest oder Segmente konnten nicht geladen werden. Mobilverbindung, CORS und Gültigkeit der Freigabe prüfen.'
+            : ['manifestIncompatibleCodecsError', 'bufferAddCodecError', 'bufferIncompatibleCodecsError', 'fragParsingError', 'fragDecryptError'].includes(error.details)
+              ? 'Videoformat nicht unterstützt: Codec, Segmentformat oder Verschlüsselung kann dieser Browser nicht wiedergeben.'
+              : 'HLS-Medienfehler: Codec, Container oder Verschlüsselung wird vom Browser nicht unterstützt. Eine andere Quelle wählen.');
         });
         instance.loadSource(stream.url); instance.attachMedia(player);
-      } else return failVideo('Dieser Browser unterstützt weder natives HLS noch die benötigte Media-Source-Erweiterung.');
+      } else return failVideo(protectedFamily
+        ? 'Dieser Browser kann geschütztes Family-HLS nicht laden. Dafür werden hls.js, MediaSource oder ManagedMediaSource und ein kontrollierter Streaming-Fetch benötigt; natives HLS kann die erforderliche Tokenweitergabe nicht sicher übernehmen.'
+        : playbackPath === 'unsupported-headers'
+          ? 'Diese HLS-Quelle benötigt geschützte Anfrage-Header. Natives HLS kann sie nicht kontrolliert weitergeben und hls.js mit MediaSource ist in diesem Browser nicht verfügbar.'
+          : 'Dieser Browser unterstützt weder natives HLS noch die benötigte Media-Source-Erweiterung.');
     } else player.src = stream.url;
     presence();
   } catch { failVideo('Die Quelle konnte nicht geöffnet werden. HTTPS, Format und Zugriffsrechte prüfen.'); }
@@ -2120,7 +2342,7 @@ function resyncNow() {
   pendingPlay = null; // An explicit retry owns a new start attempt.
   syncEnabled = true;
   session.requestState().catch(() => status('Aktueller Host-Zustand konnte nicht angefragt werden. Realtime-Verbindung prüfen.', true));
- 
+
   applySync(true); presence(); renderPlayerUi();
   if (syncEnabled && loadedStream && autoStartPhase !== 'muted') autoStartPhase = !player.paused ? 'playing' : 'synced';
   if (syncEnabled && !waitingForTarget && session.playback.paused) { autoStarting = false; status('Der Host hat pausiert. Die Wiedergabe startet, sobald er fortsetzt.'); }
@@ -2136,6 +2358,8 @@ player.addEventListener('resize', () => {
 });
 player.addEventListener('loadedmetadata', () => {
   if (!loadedStream) return;
+  recordPlaybackEvent('loadedmetadata');
+  streamStart = null;
   renderAudioTracks(currentHls(), !currentHls());
   if (personalHls.active) { updatePersonalHlsReadiness(true); return; }
   loading = false; $('noStream').hidden = true; $('resync').disabled = false;
@@ -2220,13 +2444,52 @@ player.addEventListener('play', () => {
   presence(); renderPlayerUi();
 });
 // load() cancels old media tasks; their pause events may never be delivered.
-player.addEventListener('emptied', () => { expectedPauses = 0; clearAudioTracks(); });
-player.addEventListener('waiting', () => { if (!buffering) bufferingEvents++; buffering = true; presence(); });
-player.addEventListener('playing', () => { $('autoplayStart').hidden = true; buffering = false; mediaResumed(); applySync(); finishSourceRecovery(); presence(); });
+player.addEventListener('emptied', () => { diagnosticBufferStart = null; expectedPauses = 0; clearAudioTracks(); });
+player.addEventListener('waiting', () => {
+  if (!buffering) {
+    bufferingEvents++;
+    bufferingSinceMs = performance.now();
+    bufferingNoticeShown = false;
+  }
+  buffering = true;
+  seekDriftSince = null;
+  recordPlaybackEvent('waiting');
+  presence();
+});
+player.addEventListener('stalled', () => recordPlaybackEvent('stalled'));
+player.addEventListener('playing', () => { playbackStart = null; recordPlaybackEvent('playing'); $('autoplayStart').hidden = true; buffering = false; bufferingSinceMs = null; bufferingNoticeShown = false; mediaResumed(); applySync(); finishSourceRecovery(); presence(); });
+player.addEventListener('timeupdate', () => {
+  if (playbackStart && Math.abs(player.currentTime - playbackStart.position) >= .1) playbackStart = null;
+});
 // Autoplay fallback: the tap itself starts playback at the current party time.
 $('autoplayStart').addEventListener('click', () => { $('autoplayStart').hidden = true; markGesture(); resyncNow(); });
-player.addEventListener('canplay', () => { buffering = false; mediaResumed(); applySync(); finishSourceRecovery(); presence(); });
+player.addEventListener('canplay', () => { recordPlaybackEvent('canplay'); buffering = false; mediaResumed(); applySync(); finishSourceRecovery(); presence(); });
 player.addEventListener('error', () => { if (loadedStream && player.error) failVideo('Video nicht abspielbar: möglicher Codec-/Containerfehler, CORS, DRM, abgelaufener Link oder fehlende Zugriffsrechte. Der Browser nennt die Ursache häufig nicht genauer.'); });
+// Observe native media events too: hls.js/browser seeks are not all issued by applySync.
+for (const event of ['seeking', 'seeked', 'ratechange', 'pause']) {
+  player.addEventListener(event, () => recordPlaybackEvent('media_' + event));
+}
+function recordPlaybackEvent(event, {reason, targetSeconds, durationSeconds, loadMs} = {}) {
+  if (!debugEnabled) return;
+  const p = effectivePlayback();
+  const monotonicMs = performance.now();
+  if (event === 'waiting') diagnosticBufferStart ??= monotonicMs;
+  const bufferDurationMs = diagnosticBufferStart == null ? null : monotonicMs - diagnosticBufferStart;
+  // canplay means data is available; playing confirms that playback resumed.
+  if (event === 'playing') diagnosticBufferStart = null;
+  const round = value => Number.isFinite(value) ? Math.round(value * 1000) / 1000 : null;
+  if (event === 'seek') diagnosticSeekCount++;
+  playbackEvents.push({at: Date.now(), monotonicMs: round(monotonicMs), event, reason, targetSeconds: round(targetSeconds),
+    positionSeconds: round(player.currentTime), paused: player.paused, seeking: player.seeking, solo: soloMode,
+    bufferDurationMs: round(bufferDurationMs), clockOffsetMs: round(session?.now?.() - Date.now()),
+    bufferAheadSeconds: round(bufferAhead(bufferedRanges(player.buffered), player.currentTime)),
+    driftSeconds: p ? round(player.currentTime - expectedPositionMs(p, session.now()) / 1000) : null,
+    segmentDurationSeconds: round(durationSeconds), segmentLoadMs: loadMs >= 0 ? round(loadMs) : null,
+    playbackRate: round(player.playbackRate), playbackSeq: p?.seq ?? null,
+    hostPaused: p?.paused ?? null, hostWaiting: p?.waiting === true,
+    readyState: player.readyState, syncActive: syncEnabled});
+  if (playbackEvents.length > 120) playbackEvents.shift();
+}
 function renderSyncDebug() {
   if (!debugEnabled) return;
   if (!debugOutput) {
@@ -2237,6 +2500,7 @@ function renderSyncDebug() {
     $('showDiagnostics').hidden = true;
   }
   const d = session?.diagnostics || {}, p = session?.playback;
+  const capabilities = currentHlsCapabilities();
   const number = value => Number.isFinite(value) ? value : null;
   const choice = (value, allowed) => allowed.includes(value) ? value : null;
   const hostPosition = p ? expectedPositionMs(p, session.now()) / 1000 : null;
@@ -2289,10 +2553,31 @@ function renderSyncDebug() {
     videoWidth: number(player.videoWidth), videoHeight: number(player.videoHeight),
     bandwidthKbps: currentHls() && Number.isFinite(currentHls().bandwidthEstimate) ? Math.round(currentHls().bandwidthEstimate / 1000) : null,
     qualityVariants: currentHls() ? number(currentHls().levels?.length) : null,
+    // HLS buffer analysis: required vs. delivered rate, codec, retries, CDN changes.
+    qualityMode: !currentHls() ? null : qualityPreference === 'best' || qualityPreference === 'auto' ? qualityPreference : 'fixed',
+    abrActive: currentHls() ? currentHls().autoLevelEnabled === true : null,
+    levelHeight: number(Number(currentHls()?.levels?.[currentHls()?.currentLevel]?.height)),
+    levelBitrateKbps: number(Math.round(Number(currentHls()?.levels?.[currentHls()?.currentLevel]?.bitrate) / 1000)),
+    videoCodecFamily: currentHls() ? videoCodecFamily(currentHls().levels?.[currentHls().currentLevel]?.videoCodec) : null,
+    lastSegmentBytes: number(hlsHealth?.lastBytes), lastSegmentThroughputKbps: number(hlsHealth?.lastThroughputKbps),
+    lastSegmentLevelBitrateKbps: number(hlsHealth?.lastLevelBitrateKbps),
+    segmentsLoaded: number(hlsHealth?.segments), segmentsSlowerThanRealtime: number(hlsHealth?.slowSegments),
+    slowSegmentStreak: number(hlsHealth?.slowStreak), fragmentRetries: number(hlsHealth?.fragmentRetries),
+    cdnHostChanges: number(hlsHealth?.hostChanges), sourceLoads: number(streamLoads),
     audioTracks: number(audioTracks(currentHls()).length),
     bufferAheadSeconds: number(Math.round(bufferAhead(bufferedRanges(player.buffered), player.currentTime) * 10) / 10),
     lastSegmentLoadMs: number(segmentStats.loadMs), lastSegmentDurationSeconds: number(segmentStats.durationS),
     bufferingEvents: number(bufferingEvents), stallsSinceLoad: number(stallTracker.stalls),
+    mediaStartPhase: choice(streamStart?.phase, ['playlist', 'segments', 'metadata']),
+    mediaStartElapsedMs: streamStart ? number(Math.round(performance.now() - streamStart.since)) : null,
+    playConfirmationPendingMs: pendingPlay && playAttemptAt != null ? number(Math.round(performance.now() - playAttemptAt)) : null,
+    playbackProgressPendingMs: playbackStart ? number(Math.round(performance.now() - playbackStart.since)) : null,
+    hlsJsSupported: capabilities.hlsJs,
+    nativeHlsSupported: capabilities.nativeHls,
+    mediaSourceAvailable: capabilities.mediaSource,
+    managedMediaSourceAvailable: capabilities.managedMediaSource,
+    secureFamilyLoaderSupported: capabilities.hlsJs && capabilities.streamingFetch,
+    automaticSeekCount: diagnosticSeekCount, playbackEvents,
     partyWaitsInWindow: number(stallTracker.waits.length), selfCatchUp: stallTracker.selfCatchUp === true,
     seekLeadSeconds: number(Math.round(seekLead.seconds * 100) / 100), rateNudging: nudging,
     playbackRate: number(player.playbackRate),
@@ -2301,6 +2586,7 @@ function renderSyncDebug() {
     lastCommandResult: choice(d.lastCommandResult, ['confirmed', 'stored_not_broadcast', 'broadcast', 'persisted', 'persist_failed', 'broadcast_failed', 'host_only', 'not_confirmed', 'closed', 'rpc_failed', 'pending', 'accepted', 'applied', 'rejected', 'unknown']),
     // Host-sequenced commands: fixed labels only, never IDs.
     hostSequencer: session?.hostCommands === true,
+    syncMode: choice(session?.syncMode, ['live', 'event']),
     autoStart: choice(autoStartPhase, ['loaded', 'synced', 'playing', 'blocked', 'muted']), awaitingPartyState, soloMode,
     latestCommandStatus: choice(session?.latestCommand?.status, ['pending', 'accepted', 'applied', 'rejected', 'unknown']),
     latestCommandReason: choice(session?.latestCommand?.reason, ['host_only', 'superseded', 'stale_epoch', 'not_member', 'invalid', 'rejected']),
@@ -2312,7 +2598,7 @@ let lastPositionReportAt = -Infinity;
 if (session) session.positionProvider = () => loadedStream && Number.isFinite(player.currentTime)
   ? {position_ms: player.currentTime * 1000, playing: !player.paused} : null;
 setInterval(() => {
-  applySync(); presence(); renderControlInfo(); renderSyncDebug();
+  applySync(); checkMediaStartHealth(); presence(); renderPlayerUi(); renderControlInfo(); renderSyncDebug();
   if (session?.room && loadedStream && performance.now() - lastPositionReportAt >= POSITION_REPORT_MS) {
     lastPositionReportAt = performance.now();
     session.reportPosition?.().catch?.(() => {});

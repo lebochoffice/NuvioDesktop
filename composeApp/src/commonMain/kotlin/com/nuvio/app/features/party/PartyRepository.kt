@@ -72,6 +72,20 @@ object PartyRepository {
     private val _playback = MutableStateFlow<PartyPlayback?>(null)
     val playback: StateFlow<PartyPlayback?> = _playback.asStateFlow()
 
+    // The host's own choice; guests follow the host's announced presence field.
+    private val _hostSyncMode = MutableStateFlow(PartySyncMode.Live)
+    private var hostSyncModeParty: String? = null
+
+    /** Effective party sync mode for this device (host: own choice, guest: announced by the host). */
+    val syncMode: StateFlow<PartySyncMode> = combine(_state, _hostSyncMode) { state, own ->
+        val party = state.party
+        when {
+            party == null -> PartySyncMode.Live
+            party.isHost -> own
+            else -> party.announcedSyncMode
+        }
+    }.stateIn(scope, SharingStarted.Eagerly, PartySyncMode.Live)
+
     private val _events = MutableSharedFlow<PartyEvent>(extraBufferCapacity = 16)
     val events: SharedFlow<PartyEvent> = _events.asSharedFlow()
 
@@ -170,6 +184,9 @@ object PartyRepository {
     private var waitStartedAt: TimeMark? = null
     private var resumedAt: TimeMark? = null
     private val ignoredWaiting = mutableSetOf<String>()
+    private val waitGate = PartyWaitGate()
+    private val coordinatorTime = kotlin.time.TimeSource.Monotonic.markNow()
+    private fun coordinatorNowMs() = coordinatorTime.elapsedNow().inWholeMilliseconds
     private var rejoining = false
     private val commands = PartyCommandLedger()
     private var appliedReported: String? = null
@@ -243,6 +260,24 @@ object PartyRepository {
             val party = _state.value.party ?: return@launch
             val snapshot = runRemote { PartyApi.removeMember(party.id, deviceId(), memberId) } ?: return@launch
             applySnapshot(snapshot)
+        }
+    }
+
+    /**
+     * Host only: switch the party between live sync and event sync. The mode
+     * travels in the host's status/presence (optional field, ignored by older
+     * clients), never as a playback revision, so no member re-positions just
+     * because the mode changed. Reconnects re-announce it with the presence.
+     */
+    fun setSyncMode(mode: PartySyncMode) {
+        scope.launch {
+            val party = _state.value.party ?: return@launch
+            if (!party.isHost || _hostSyncMode.value == mode) return@launch
+            _hostSyncMode.value = mode
+            hostSyncModeParty = party.id
+            val presence = encodePresence(ownPresence(party))
+            runCatching { channel?.track(presence) }
+            runCatching { channel?.send("status", presence) }
         }
     }
 
@@ -427,7 +462,7 @@ object PartyRepository {
             positionMs = previous?.positionMs, positionAt = previous?.positionAt, playing = previous?.playing, solo = solo.takeIf { it })
         if (next == localPresence) return
         localPresence = next
-        if (status == PartyMemberStatus.Ready) ignoredWaiting.remove(party.memberId)
+        waitGate.observe(next, coordinatorNowMs())
         updateParty { it.copy(presence = it.presence + (party.memberId to next)) }
         presenceJob?.cancel()
         presenceJob = sessionScope?.launch {
@@ -450,6 +485,7 @@ object PartyRepository {
             val base = localPresence?.takeIf { it.mediaKey == party.media.key } ?: return@launch
             val next = base.copy(positionMs = positionMs.coerceAtLeast(0L), positionAt = clock.nowMs(), playing = playing)
             localPresence = next
+            waitGate.observe(next, coordinatorNowMs())
             updateParty { it.copy(presence = it.presence + (party.memberId to next)) }
             runCatching { channel?.send("status", encodePresence(next)) }
         }
@@ -507,11 +543,17 @@ object PartyRepository {
         sessionScope = session
         channel = partyChannel
         localPresence = null
+        waitGate.clear()
         ignoredWaiting.clear()
         waitStartedAt = null
         resumedAt = null
         commands.clear()
         appliedReported = null
+        // A rejoin of the same party keeps the host's choice; a new party starts live.
+        if (hostSyncModeParty != party.id) {
+            hostSyncModeParty = party.id
+            _hostSyncMode.value = PartySyncMode.Live
+        }
         _playback.value = playback?.takeIf { it.mediaKey == null || it.mediaKey == party.media.key }
         _state.value = PartyUiState(party = party)
         session.launch {
@@ -543,6 +585,7 @@ object PartyRepository {
         val closingChannel = channel
         channel = null
         localPresence = null
+        waitGate.clear()
         _playback.value = null
         _sharedStream.value = null
         _hlsSuggestion.value = null
@@ -566,11 +609,13 @@ object PartyRepository {
 
     private suspend fun onConnection(connected: Boolean) {
         if (!connected) {
+            waitGate.clear()
             updateParty { current -> current.copy(connected = false, presence = current.presence.filterKeys { it == current.memberId }) }
             return
         }
         updateParty { it.copy(connected = true) }
         val party = _state.value.party ?: return
+        waitGate.observe(ownPresence(party), coordinatorNowMs())
         val presence = encodePresence(ownPresence(party))
         runCatching { channel?.track(presence) }
         runCatching { channel?.send("status", presence) }
@@ -583,7 +628,7 @@ object PartyRepository {
     private suspend fun onMessage(event: String, payload: JsonObject) {
         val party = _state.value.party ?: return
         when (event) {
-            "state" -> decode(payload, PartyPlayback.serializer())?.let(::accept)
+            "state" -> decode(payload, PartyPlayback.serializer())?.let { accept(it, PartySyncTrace.Source.Realtime) }
             "command" -> onCommand(party, payload)
             "state_request" -> {
                 if (payload.string("member_id") == party.memberId) return
@@ -721,8 +766,9 @@ object PartyRepository {
             if (key == party.memberId || key in presence) return@forEach
             val decoded = decode(value.state, PartyPresence.serializer()) ?: PartyPresence(memberId = key)
             presence[key] = decoded.copy(memberId = key)
-            if (decoded.status == PartyMemberStatus.Ready) ignoredWaiting.remove(key)
+            waitGate.observe(decoded.copy(memberId = key), coordinatorNowMs())
         }
+        waitGate.retain(presence.keys)
         updateParty { it.copy(presence = presence) }
         if (left.isNotEmpty()) sessionScope?.launch { requestState(party) }
     }
@@ -734,7 +780,8 @@ object PartyRepository {
     private fun applyStatus(status: PartyPresence) {
         val party = _state.value.party ?: return
         if (status.memberId == party.memberId) return
-        if (status.status == PartyMemberStatus.Ready) ignoredWaiting.remove(status.memberId)
+        if (party.members.none { it.id == status.memberId }) return
+        if (!waitGate.observe(status, coordinatorNowMs())) return
         updateParty { it.copy(presence = it.presence + (status.memberId to status)) }
     }
 
@@ -804,7 +851,7 @@ object PartyRepository {
             )
         }
         if (info.media.key != _state.value.party?.media?.key) applyMedia(info.media, info.playback)
-        info.playback?.let(::accept)
+        info.playback?.let { accept(it, PartySyncTrace.Source.Snapshot) }
     }
 
     private fun applyMedia(media: PartyMedia, playback: PartyPlayback?) {
@@ -817,16 +864,17 @@ object PartyRepository {
             if (_hlsSuggestion.value?.mediaKey != media.key) _hlsSuggestion.value = null
             if (_countdown.value?.mediaKey != media.key) _countdown.value = null
             ignoredWaiting.clear()
+            waitGate.clear()
             waitStartedAt = null
             _events.tryEmit(PartyEvent.MediaChanged(media))
             // A stream offer can arrive before the media update on its own broadcast flow.
             if (!party.isHost) sessionScope?.launch { requestState(party) }
         } else {
-            playback?.let(::accept)
+            playback?.let { accept(it, PartySyncTrace.Source.Realtime) }
         }
     }
 
-    private fun accept(candidate: PartyPlayback) {
+    private fun accept(candidate: PartyPlayback, source: PartySyncTrace.Source) {
         val party = _state.value.party ?: return
         if (candidate.mediaKey != null && candidate.mediaKey != party.media.key) return
         if (party.hostOnly && candidate.memberId != party.hostMemberId) return
@@ -837,6 +885,7 @@ object PartyRepository {
             if (current.waiting) ignoredWaiting += PartySync.waitingMemberIds(party, emptySet())
         }
         _playback.value = candidate
+        PartySyncTrace.record(PartySyncTrace.Event.Playback, source, candidate)
         if (candidate.actorId == party.memberId) return
         val action = PartySync.actionOf(current, candidate) ?: return
         val name = party.member(candidate.actorId)?.displayName ?: return
@@ -851,6 +900,7 @@ object PartyRepository {
         at: Long = clock.nowMs(),
         origin: String? = null,
         commandId: String? = null,
+        source: PartySyncTrace.Source = PartySyncTrace.Source.Local,
     ) {
         val party = _state.value.party ?: return
         if (!party.canControl) return
@@ -863,6 +913,8 @@ object PartyRepository {
         }
         if (!waiting) waitStartedAt = null
         _playback.value = next
+        PartySyncTrace.record(PartySyncTrace.Event.Playback,
+            if (commandId != null) PartySyncTrace.Source.Command else source, next)
         runCatching { channel?.send("state", encodePlayback(next)) }
         schedulePersist()
     }
@@ -933,19 +985,43 @@ object PartyRepository {
             }
             val playback = _playback.value ?: continue
             if (playback.mediaKey != null && playback.mediaKey != party.media.key) continue
-            val waiting = PartySync.waitingMemberIds(party, ignoredWaiting)
+            // Event sync: a buffering member only waits itself. A wait that was
+            // running when the host switched modes ends at once.
+            val eventSync = if (party.isHost) _hostSyncMode.value == PartySyncMode.Event else party.announcedSyncMode == PartySyncMode.Event
+            if (eventSync) {
+                waitStartedAt = null
+                if (playback.paused && playback.waiting) {
+                    PartySyncTrace.record(PartySyncTrace.Event.WaitEnded, PartySyncTrace.Source.Coordinator,
+                        playback, waitingMembers = 0, expectedMs = playback.positionMs)
+                    publish(paused = false, positionMs = playback.positionMs, rate = playback.rate, waiting = false,
+                        source = PartySyncTrace.Source.Coordinator)
+                }
+                continue
+            }
+            val now = coordinatorNowMs()
+            ignoredWaiting.removeAll(waitGate.recovered(now))
+            val waiting = waitGate.waiting(party, ignoredWaiting, now)
             if (!playback.paused) {
                 val graceOver = resumedAt?.let { it.elapsedNow() > RESUME_GRACE } ?: true
                 if (waiting.isNotEmpty() && graceOver) {
                     val position = PartySync.expectedPositionMs(playback, clock.nowMs())
-                    publish(paused = true, positionMs = position, rate = playback.rate, waiting = true)
+                    PartySyncTrace.record(PartySyncTrace.Event.WaitStarted, PartySyncTrace.Source.Coordinator,
+                        playback, waitingMembers = waiting.size, expectedMs = position,
+                        localWaiting = party.memberId in waiting,
+                        loadingMembers = waiting.count { party.presence[it]?.status == PartyMemberStatus.Loading },
+                        bufferingMembers = waiting.count { party.presence[it]?.status == PartyMemberStatus.Buffering })
+                    publish(paused = true, positionMs = position, rate = playback.rate, waiting = true,
+                        source = PartySyncTrace.Source.Coordinator)
                     waitStartedAt = clock.mark()
                 }
             } else if (playback.waiting) {
                 val started = waitStartedAt ?: clock.mark().also { waitStartedAt = it }
                 if (waiting.isEmpty() || started.elapsedNow() > WAIT_LIMIT) {
+                    PartySyncTrace.record(PartySyncTrace.Event.WaitEnded, PartySyncTrace.Source.Coordinator,
+                        playback, waitingMembers = waiting.size, expectedMs = playback.positionMs)
                     ignoredWaiting += waiting
-                    publish(paused = false, positionMs = playback.positionMs, rate = playback.rate, waiting = false)
+                    publish(paused = false, positionMs = playback.positionMs, rate = playback.rate, waiting = false,
+                        source = PartySyncTrace.Source.Coordinator)
                 }
             }
         }
@@ -1046,7 +1122,9 @@ object PartyRepository {
     // "command" events instead of their own revisions.
     private fun encodePresence(presence: PartyPresence): JsonObject {
         val party = _state.value.party
-        val announced = if (party?.isHost == true && presence.memberId == party.memberId) presence.copy(commands = PartyCommands.PROTOCOL) else presence
+        val announced = if (party?.isHost == true && presence.memberId == party.memberId) {
+            presence.copy(commands = PartyCommands.PROTOCOL, sync = _hostSyncMode.value.wire)
+        } else presence
         return PartyApi.json.encodeToJsonElement(PartyPresence.serializer(), announced).jsonObject
     }
 

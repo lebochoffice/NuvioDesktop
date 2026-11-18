@@ -15,6 +15,7 @@ import * as syncPolicy from '../src/sync-policy.js';
 import {loadRoomTitle, resolveRoomMedia, roomMediaForEpisode} from '../src/room-media.js';
 import * as hostShareModule from '../src/host-share.js';
 import {createRealtimeTrace} from '../src/realtime-trace.js';
+import * as hlsCapabilitiesModule from '../src/hls-capabilities.js';
 
 const privateUrl = 'https://media.example.test/private/master?token=INTEGRATION_PRIVATE_SENTINEL';
 const vod = {live: false, totalduration: 120, fragments: [{start: 0, duration: 120}]};
@@ -32,20 +33,25 @@ class Element {
 }
 class FakeHls {
   static DefaultConfig = {loader: class XhrLoader {}};
-  static Events = {LEVEL_LOADED: 'level', ERROR: 'error', MANIFEST_PARSED: 'manifest', FRAG_LOADED: 'frag', LEVEL_SWITCHED: 'switched', SUBTITLE_TRACKS_UPDATED: 'subtitles'};
+  static ErrorTypes = {NETWORK_ERROR: 'networkError', MEDIA_ERROR: 'mediaError'};
+  static Events = {LEVEL_LOADED: 'level', LEVELS_UPDATED: 'levels-updated', ERROR: 'error', MANIFEST_PARSED: 'manifest', FRAG_LOADING: 'frag-loading', FRAG_LOADED: 'frag', FRAG_BUFFERED: 'frag-buffered', LEVEL_SWITCHED: 'switched', SUBTITLE_TRACKS_UPDATED: 'subtitles'};
   static isSupported() { return true; }
   constructor(config) { this.config = config; this.listeners = new Map(); }
-  on(event, callback) { this.listeners.set(event, callback); }
+  on(event, callback) {
+    const callbacks = this.listeners.get(event) ?? [];
+    callbacks.push(callback);
+    this.listeners.set(event, callbacks);
+  }
   loadSource(value) { this.source = value; }
   attachMedia() {}
   destroy() { this.destroyed = true; this.source = null; }
-  emit(event, data) { this.listeners.get(event)?.(event, data); }
+  emit(event, data) { for (const callback of this.listeners.get(event) ?? []) callback(event, data); }
 }
 // autoHost: stored preference ('0'/'1'); null = first visit (default on). The
 // existing tests keep the manual flow, so the default here is a stored 'off'.
 // joined: party code remembered in this tab (reload rejoin); fakeJoin records
 // joins instead of calling the backend and leaves the room empty until then.
-async function harness({debug = false, guestControl = false, guestJoin = false, rpc = null, path = '/', autoHost = false, joined = null, fakeJoin = false, share = null, catalog = null, searchCatalog = null, browserHostShare = false} = {}) {
+async function harness({debug = false, guestControl = false, guestJoin = false, rpc = null, path = '/', autoHost = false, joined = null, fakeJoin = false, share = null, catalog = null, searchCatalog = null, browserHostShare = false, hlsSupported = true} = {}) {
   const elements = new Map(), storageWrites = [], sent = [], timers = [], historyCalls = [], mediaActions = new Map(), copiedLinks = [];
   const location = {pathname: path, origin: 'https://watch.example.test'};
   let clock = 0, tick = () => {};
@@ -82,9 +88,10 @@ async function harness({debug = false, guestControl = false, guestJoin = false, 
     signOut: async () => { authSession = null; },
     signInAnonymously: async () => { anonymousSignIns.push(1); return {data: {}}; }}};
   const windowEvents = new Map();
+  class HarnessHls extends FakeHls { static isSupported() { return hlsSupported; } }
   const context = vm.createContext({
-    ...protocol, ...syncPolicy, ...hostShareModule, createRealtimeTrace, PersonalHlsSource, personalHlsUrlProblem, Hls: FakeHls, PartySession: FakeSession,
-    createClient: () => client, callRpc: (_client, name, args) => { if (rpc?.[name]) return rpc[name](args); throw Error('Unexpected RPC'); }, URL, Blob,
+    ...protocol, ...syncPolicy, ...hostShareModule, ...hlsCapabilitiesModule, createRealtimeTrace, PersonalHlsSource, personalHlsUrlProblem, Hls: HarnessHls, PartySession: FakeSession,
+    createClient: () => client, callRpc: (_client, name, args) => { if (rpc?.[name]) return rpc[name](args); throw Error('Unexpected RPC'); }, URL, Blob, AbortController, ReadableStream, Request,
     // Family share Worker double: share.handle(action, body, headers) -> {status, body}.
     fetch: async (url, init) => {
       if (!share) throw Error('Unexpected fetch');
@@ -504,8 +511,11 @@ test('a new host seek can escape buffering without repeating seeks for every clo
   hostTime += 10000; h.tick(); h.tick(); assert.equal(writes, 1);
   h.session.receive('state', {...playback, seq: 2, position_ms: 45000, paused: false, at: hostTime});
   assert.equal(current, 45); assert.equal(writes, 2);
-  hostTime += 10000; h.tick(); assert.equal(writes, 2);
-  h.player.fire('canplay'); assert.equal(current, 55); assert.equal(writes, 3);
+  hostTime += 10000; h.advance(10000); h.tick(); assert.equal(writes, 2);
+  h.player.fire('canplay'); assert.equal(writes, 2);
+  h.player.buffered = {length: 1, start: () => 10, end: () => 20};
+  h.session.receive('state', {...playback, seq: 3, position_ms: 15000, paused: false, at: hostTime});
+  assert.equal(current, 15); assert.equal(writes, 3); // A backward host jump is immediate too.
 });
 
 test('internal HLS events preserve sync; host-only prevents native seek defaults while solo permits them', async () => {
@@ -625,6 +635,9 @@ async function playingGuest(options) {
 
 test('mobile network: repeated sustained stalls use a wait budget, then the guest catches up alone', async () => {
   const h = await playingGuest();
+  // A real browser confirms the start with "playing"; the fake media clock never
+  // advances, so without it the 90-second no-progress guard would fire below.
+  h.player.fire('playing');
   const stall = () => { h.player.fire('waiting'); h.advance(2500); h.tick(); const state = h.sent.at(-1)[0];
     h.player.fire('canplay'); h.advance(750); h.tick(); assert.equal(h.sent.at(-1)[0], 'ready'); return state; };
   assert.equal(stall(), 'buffering'); assert.equal(stall(), 'buffering');
@@ -641,8 +654,11 @@ test('stall recovery: no re-seek while segments load, then one catch-up seek ahe
   assert.equal(writes, 1); assert.equal(current, 5);
   h.player.fire('waiting'); h.advance(2000); hostTime += 2000; h.tick(); h.tick();
   assert.equal(writes, 1); // Seek chase prevented while the target segment loads.
-  h.player.fire('playing'); // Recovered after 2 s: lead learned, land ahead.
-  assert.equal(writes, 2); assert.equal(current, 9);
+  h.player.fire('playing'); // Recovered after 2 s: lead learned, cooldown still applies.
+  assert.equal(writes, 1);
+  h.advance(1999); hostTime += 1999; h.tick(); assert.equal(writes, 1);
+  h.advance(1); hostTime += 1; h.tick();
+  assert.equal(writes, 2); assert.equal(current, 11);
   h.player.buffered = {length: 1, start: () => 0, end: () => 60};
   h.session.receive('state', {...playback, seq: 2, paused: false, position_ms: 30000, at: hostTime});
   assert.equal(writes, 3); assert.equal(current, 30); // Buffered target: exact, no lead.
@@ -756,6 +772,13 @@ test('native HLS shows fixed browser quality; hls.js offers only actual variants
   assert.equal(android.get('qualityNote').hidden, false);
   android.get('quality').value = '123'; android.get('quality').fire('change'); assert.equal(instance.loadLevel, 1); // Unknown level ignored.
   android.get('quality').value = 'auto'; android.get('quality').fire('change'); assert.equal(instance.loadLevel, -1);
+  // hls.js may discard a level after an asynchronous MediaCapabilities check.
+  // The menu must follow the actually playable levels rather than keep offering 4K.
+  instance.levels = [{height: 1080, bitrate: 6e6}];
+  instance.emit(FakeHls.Events.LEVELS_UPDATED);
+  assert.equal(instance.loadLevel, 0);
+  assert.equal(android.get('quality').disabled, true);
+  assert.deepEqual(android.get('quality').children.map(o => o.textContent), ['1080p · festgelegt']);
 });
 
 test('TorBox single-resolution HLS shows the actual fixed resolution and prefers the higher bitrate', async () => {
@@ -1038,7 +1061,9 @@ test('own controls: ±10 s, fullscreen, drawer, participants strip and connectio
   h.get('drawerScrim').fire('click'); assert.equal(h.get('infoDrawer').hidden, true);
   h.get('ctlSettings').fire('click'); h.get('tabAdvanced').fire('click'); assert.equal(h.get('panelAdvanced').hidden, false); h.get('drawerClose').fire('click');
   h.session.handlers.connection('CHANNEL_ERROR'); assert.equal(h.get('syncChip').textContent, 'Verbindung unterbrochen');
-  h.session.handlers.connection('SUBSCRIBED'); h.get('resync').fire('click'); h.tick();
+  h.session.handlers.connection('SUBSCRIBED'); h.get('resync').fire('click');
+  // The chip shows "Starte Wiedergabe …" until play() resolves; the next tick re-renders it.
+  await settlePlayback(); h.tick();
   assert.equal(h.get('syncChip').textContent, 'Synchron');
 });
 
@@ -1637,6 +1662,7 @@ test('Allein schauen survives a realtime loss; "Zur Party" returns to the curren
   h.session.receive('state', {...playback, seq: 6, paused: false, position_ms: 70000});
   h.get('ctlSolo').fire('click'); await settlePlayback();
   assert.equal(h.sync(), true); assert.equal(h.player.currentTime, 70);
+  h.tick(); // The resolved play() is reflected in the chip on the next regular render.
   assert.equal(h.get('ctlSolo').textContent, 'Allein schauen'); assert.equal(h.get('syncChip').textContent, 'Synchron');
 });
 
@@ -2000,13 +2026,103 @@ test('an admitted guest fetches the original address with its own session, loads
   assert.match(h.get('streamInfo').textContent, /TorBox \(Familie\)/);
   h.metadata(); await settlePlayback();
   assert.equal(h.sync(), true); assert.equal(h.player.currentTime, 5); // Party time, no Sync click.
-  const opened = [], xhr = {open: (...args) => opened.push(args), setRequestHeader() {}};
-  instance.config.xhrSetup(xhr, 'https://flux-007.wnam.tb-cdn.io/stream/p/720.m3u8');
-  assert.equal(opened[0][1], 'https://flux-007.wnam.tb-cdn.io/stream/p/720.m3u8?token=FAKE_ACCOUNT_TOKEN_FOR_TESTS');
-  opened.length = 0; instance.config.xhrSetup(xhr, 'https://cdn.example.test/other.ts');
-  assert.equal(opened.length, 0); // Never to other hosts.
+  const variant = await instance.config.fetchSetup(
+    {url: 'https://other.tb-cdn.io/stream/p/720.m3u8'}, {headers: {Range: 'bytes=0-1023'}});
+  assert.equal(variant.url, 'https://other.tb-cdn.io/stream/p/720.m3u8?token=FAKE_ACCOUNT_TOKEN_FOR_TESTS');
+  assert.equal(variant.headers.get('range'), 'bytes=0-1023');
+  await assert.rejects(instance.config.fetchSetup({url: 'https://cdn.example.test/other.ts'}, {}), /unzulässiges Medienziel/);
   assert.ok(!JSON.stringify(h.storageWrites).includes('FAKE_ACCOUNT_TOKEN_FOR_TESTS')); // Memory only.
   assert.ok(!JSON.stringify(h.sent).includes('FAKE_ACCOUNT_TOKEN_FOR_TESTS'));
+});
+
+test('an iOS-style native-HLS-only browser reports protected Family HLS as unsupported instead of buffering forever', async () => {
+  const h = await harness({autoHost: true, share: familyWorker(), rpc: familySignedIn, hlsSupported: false});
+  h.player.canPlayType = type => type === 'application/vnd.apple.mpegurl' ? 'maybe' : '';
+  h.session.receive('stream', {member_id: 'host', stream: familyOffer()});
+  await settlePlayback();
+  assert.equal(h.desktopHls(), null);
+  assert.equal(h.run('loadedStream'), null);
+  assert.match(h.get('message').textContent, /geschütztes Family-HLS.*MediaSource|ManagedMediaSource/);
+  assert.doesNotMatch(h.get('message').textContent, /Puffert/);
+});
+
+test('mobile Family HLS distinguishes playlist, segment and metadata start timeouts', async () => {
+  for (const [phase, prepare, expected] of [
+    ['playlist', () => {}, /Playlist wurde nicht rechtzeitig geladen/],
+    ['segments', instance => instance.emit(FakeHls.Events.MANIFEST_PARSED, {}), /Segmente konnten nicht rechtzeitig geladen/],
+    ['metadata', instance => instance.emit(FakeHls.Events.FRAG_LOADED,
+      {frag: {duration: 6, stats: {loading: {start: 0, end: 120}}}}), /keine abspielbaren Metadaten/],
+  ]) {
+    const h = await harness({autoHost: true, share: familyWorker(), rpc: familySignedIn});
+    h.session.receive('stream', {member_id: 'host', stream: familyOffer()});
+    await settlePlayback();
+    const instance = h.desktopHls();
+    prepare(instance);
+    assert.equal(h.run('streamStart.phase'), phase);
+    h.advance(90_000); h.tick();
+    assert.equal(h.desktopHls(), null);
+    assert.match(h.get('message').textContent, expected);
+  }
+});
+
+test('a mobile decoder error and an unresolved play request become explicit terminal states', async () => {
+  const codec = await harness({autoHost: true, share: familyWorker(), rpc: familySignedIn});
+  codec.session.receive('stream', {member_id: 'host', stream: familyOffer()});
+  await settlePlayback();
+  codec.desktopHls().emit(FakeHls.Events.ERROR,
+    {fatal: true, type: FakeHls.ErrorTypes.MEDIA_ERROR, details: 'manifestIncompatibleCodecsError'});
+  assert.equal(codec.desktopHls(), null);
+  assert.match(codec.get('message').textContent, /Videoformat nicht unterstützt/);
+
+  const pending = await harness({autoHost: true, share: familyWorker(), rpc: familySignedIn});
+  pending.session.playback = {...playback, paused: false};
+  pending.player.play = () => new Promise(() => {});
+  pending.session.receive('stream', {member_id: 'host', stream: familyOffer()});
+  await settlePlayback();
+  pending.metadata();
+  assert.equal(pending.run('pendingPlay !== null'), true);
+  pending.advance(20_000); pending.tick();
+  assert.equal(pending.sync(), false);
+  assert.equal(pending.get('autoplayStart').hidden, false);
+  assert.match(pending.get('message').textContent, /Wiedergabestart nicht bestätigt/);
+});
+
+test('expired or revoked Family-HLS resources fail explicitly without exposing their address', async () => {
+  for (const [code, message] of [[403, /abgelaufen/], [410, /nicht mehr verfügbar/]]) {
+    const h = await harness({autoHost: true, share: familyWorker(), rpc: familySignedIn});
+    h.session.receive('stream', {member_id: 'host', stream: familyOffer()});
+    await settlePlayback();
+    h.desktopHls().emit(FakeHls.Events.ERROR,
+      {fatal: true, type: FakeHls.ErrorTypes.NETWORK_ERROR, response: {code}, url: FAMILY_URL});
+    assert.equal(h.desktopHls(), null);
+    assert.match(h.get('message').textContent, message);
+    assert.doesNotMatch(h.get('message').textContent, /FAKE_ACCOUNT_TOKEN_FOR_TESTS|tb-cdn\.io/);
+  }
+});
+
+test('a resolved play request still needs real playback progress before mobile start is confirmed', async () => {
+  const stalled = await harness({autoHost: true, share: familyWorker(), rpc: familySignedIn});
+  stalled.session.playback = {...playback, paused: false};
+  stalled.session.receive('stream', {member_id: 'host', stream: familyOffer()});
+  await settlePlayback();
+  stalled.metadata(); await settlePlayback();
+  assert.equal(stalled.run('pendingPlay'), null);
+  assert.equal(stalled.run('playbackStart !== null'), true);
+  stalled.advance(20_000); stalled.tick();
+  assert.match(stalled.get('message').textContent, /noch ohne bestätigten Fortschritt/);
+  stalled.advance(70_000); stalled.tick();
+  assert.equal(stalled.desktopHls(), null);
+  assert.match(stalled.get('message').textContent, /nach 90 Sekunden keinen Fortschritt/);
+
+  const playing = await harness({autoHost: true, share: familyWorker(), rpc: familySignedIn});
+  playing.session.playback = {...playback, paused: false};
+  playing.session.receive('stream', {member_id: 'host', stream: familyOffer()});
+  await settlePlayback();
+  playing.metadata(); await settlePlayback();
+  playing.player.currentTime += .2; playing.player.fire('timeupdate');
+  playing.advance(90_000); playing.tick();
+  assert.notEqual(playing.desktopHls(), null);
+  assert.equal(playing.sync(), true);
 });
 
 test('a reconnect re-offer uses the per-guest grant and does not reload; withdrawing the admission stops playback', async () => {
@@ -2582,6 +2698,9 @@ test('local recovery diagnosis exposes counts and socket state, never channel to
   assert.equal(data.socketConnected, true); assert.equal(data.lastHeartbeatAt, 1234);
   assert.equal(data.recoveryExpected, 2); assert.equal(data.recoveryReplies, 1);
   assert.equal(data.recoveryResult, 'timeout');
+  assert.equal(data.hlsJsSupported, true); assert.equal(data.nativeHlsSupported, false);
+  assert.equal(data.mediaSourceAvailable, false); assert.equal(data.managedMediaSourceAvailable, false);
+  assert.equal(data.secureFamilyLoaderSupported, true);
   assert.ok(!JSON.stringify(data).includes('PRIVATE_TOPIC_SENTINEL'));
   assert.ok(!JSON.stringify(data).includes('INTEGRATION_PRIVATE_SENTINEL'));
 });
@@ -2636,4 +2755,379 @@ test('a confirmed German TorBox source labels fixed audio; a different unconfirm
   h.session.handlers.stream({...source, browser_hls: {url: 'https://stream.example.test/other.m3u8'}});
   h.get('loadStream').fire('click');
   assert.equal(label(), 'Audio · festgelegt');
+});
+async function playingSharedGuest(options) {
+  const h = await harness(options);
+  h.session.playback = {...playback, paused: false};
+  h.session.handlers.stream({media_key: 'movie|tt1||', url: '', browser_hls: {
+    url: 'https://stream.example.test/shared.m3u8',
+  }});
+  h.get('loadStream').fire('click');
+  h.metadata(); await settlePlayback(); h.player.fire('seeked');
+  h.player.readyState = 4;
+  return h;
+}
+
+test('continuous host revisions and position reports do not re-seek during recurring short HLS stalls', async () => {
+  const h = await playingSharedGuest(), other = await playingSharedGuest();
+  const instance = h.desktopHls();
+  let current = 5, otherTime = 5, writes = 0, hostTime = 1000, reports = 0, resumedMs = 0;
+  h.session.now = () => hostTime;
+  h.session.reportPosition = async () => { reports++; };
+  other.session.now = () => hostTime;
+  Object.defineProperty(other.player, 'currentTime', {get: () => otherTime, set: () => assert.fail('unnecessary seek for another guest')});
+  h.player.duration = other.player.duration = 300;
+  Object.defineProperty(h.player, 'currentTime', {get: () => current, set: value => { current = value; writes++; }});
+  for (let seconds = 1; seconds <= 180; seconds++) {
+    hostTime = 1000 + seconds * 1000; h.advance(1000 - resumedMs); other.advance(1000 - resumedMs); resumedMs = 0;
+    current = 5 + seconds - .6;
+    otherTime = 5 + seconds - .3;
+    if (seconds % 15 === 0) {
+      // A brief local stall coincides with an ordinary re-anchor of the same host timeline.
+      current -= 1.1;
+      h.player.fire('waiting');
+      const update = {...playback, seq: seconds + 10, position_ms: 5000 + seconds * 1000,
+        paused: false, at: hostTime};
+      h.session.receive('state', update); other.session.receive('state', update);
+      h.advance(600); other.advance(600); hostTime += 600; otherTime += .6;
+      h.player.fire('canplay');
+      resumedMs = 600;
+    }
+    h.tick(); other.tick();
+  }
+  assert.ok(reports >= 15);
+  assert.equal(other.player.paused, false);
+  assert.equal(h.desktopHls(), instance);
+  assert.equal(writes, 0);
+  assert.ok(h.sent.every(([state]) => state !== 'buffering'));
+});
+
+test('local playback events correlate slow segments and stalls without collecting URL or token data', async () => {
+  const h = await playingSharedGuest({debug: true});
+  const instance = h.desktopHls();
+  const frag = {duration: 4, url: 'https://stream.example.test/secret.m4s?token=secret-sample',
+    stats: {loading: {start: 100, end: 5100}}};
+  h.player.buffered = {length: 0};
+  instance.emit(FakeHls.Events.FRAG_LOADING, {frag});
+  h.player.fire('waiting'); h.player.fire('stalled');
+  h.advance(5000); h.tick();
+  assert.equal(h.sent.at(-1)[0], 'buffering');
+  instance.emit(FakeHls.Events.ERROR, {details: 'bufferStalledError', url: frag.url});
+  instance.emit(FakeHls.Events.FRAG_LOADED, {frag});
+  instance.emit(FakeHls.Events.FRAG_BUFFERED, {frag});
+  h.player.fire('playing'); h.tick();
+  const debug = debugData(h), events = debug.playbackEvents;
+  assert.equal(events.filter(event => event.event === 'hls_instance').length, 1);
+  assert.equal(events.find(event => event.event === 'waiting').bufferAheadSeconds, 0);
+  assert.equal(events.find(event => event.event === 'segment_loaded').segmentLoadMs, 5000);
+  assert.equal(events.find(event => event.event === 'segment_loaded').segmentDurationSeconds, 4);
+  assert.equal(events.find(event => event.event === 'hls_error').reason, 'bufferStalledError');
+  assert.ok(events.some(event => event.event === 'stalled'));
+  assert.doesNotMatch(JSON.stringify(events), /example\.test|secret-sample/);
+  for (let i = 0; i < 130; i++) h.player.fire('stalled');
+  h.tick(); assert.equal(debugData(h).playbackEvents.length, 120);
+
+  const off = await playingGuest();
+  off.player.fire('waiting');
+  assert.equal(off.run('playbackEvents.length'), 0);
+});
+
+// Coordinator state is sent by the Desktop host and must preserve the loaded HLS instance.
+test('mixed-party coordinator wait and resume immediately change play intent without a second seek', async () => {
+  const guests = [await playingSharedGuest({debug: true}), await playingSharedGuest()];
+  for (const h of guests) {
+    const instance = h.desktopHls();
+    let position = 5, writes = 0;
+    Object.defineProperty(h.player, 'currentTime', {get: () => position, set: value => { position = value; writes++; }});
+    const wait = {...playback, seq: 20, paused: true, waiting: true, position_ms: 5800, at: 1800};
+    h.session.now = () => 1800;
+    h.session.receive('state', wait);
+    assert.equal(h.player.paused, true);
+    assert.equal(writes, 0);
+    h.advance(1000);
+    h.session.now = () => 2800;
+    h.session.receive('state', {...wait, seq: 21, paused: false, waiting: false, at: 2800});
+    await settlePlayback(); h.tick();
+    assert.equal(h.player.paused, false);
+    assert.equal(writes, 0);
+    assert.equal(h.desktopHls(), instance);
+    h.advance(250);
+    h.session.receive('state', {...wait, seq: 22, paused: true, waiting: false, position_ms: 20_000, at: 3050});
+    assert.equal(h.player.paused, true);
+    assert.equal(position, 20);
+    assert.equal(writes, 1); // A deliberate Host seek still bypasses the drift delay.
+  }
+});
+
+test('P0 ten minutes stable guest timeline and new revisions preserve buffer without seeks', async () => {
+  const h = await playingSharedGuest();
+  const instance = h.desktopHls();
+  let now = 1000, current = 5, seeks = 0;
+  h.session.now = () => now;
+  h.player.duration = 1000;
+  Object.defineProperty(h.player, 'currentTime', {get: () => current, set: value => { current = value; seeks++; }});
+  for (let i = 1; i <= 600; i++) {
+    now += 1000; h.advance(1000); current = 5 + i - .1;
+    if (i % 20 === 0) h.session.receive('state', {...playback, seq: i + 10,
+      paused: false, position_ms: (5 + i) * 1000, at: now});
+    h.tick();
+    assert.equal(h.player.paused, false);
+    assert.equal(h.player.playbackRate, 1);
+  }
+  assert.equal(seeks, 0);
+  assert.equal(h.desktopHls(), instance);
+});
+
+test('P0 solo ignores host corrections without source reload and returns to party', async () => {
+  const h = await playingSharedGuest({debug: true});
+  const instance = h.desktopHls();
+  h.run('enterSolo()');
+  const current = h.player.currentTime;
+  h.session.receive('state', {...playback, seq: 70, paused: true, position_ms: 60000});
+  h.advance(20000); h.tick();
+  assert.equal(h.player.currentTime, current);
+  assert.equal(h.player.paused, false);
+  assert.equal(h.player.playbackRate, 1);
+  assert.equal(h.desktopHls(), instance);
+  h.run('resyncNow()');
+  await settlePlayback();
+  assert.equal(h.player.currentTime, 60);
+  assert.equal(h.player.paused, true);
+  assert.equal(h.desktopHls(), instance);
+});
+
+test('P0 diagnostics distinguish two short buffer episodes and native seeks even in solo', async () => {
+  const h = await playingSharedGuest({debug: true});
+  h.run('enterSolo()');
+  h.player.fire('waiting'); h.advance(600);
+  h.player.fire('canplay'); h.advance(200); h.player.fire('playing');
+  h.advance(300); h.player.fire('waiting'); h.advance(700); h.player.fire('playing');
+  h.player.fire('seeking'); h.player.fire('seeked'); h.player.fire('ratechange');
+  const events = debugData(h).playbackEvents;
+  assert.deepEqual(events.filter(e => e.event === 'playing' && e.bufferDurationMs != null).map(e => e.bufferDurationMs), [800, 700]);
+  assert.equal(events.find(e => e.event === 'canplay' && e.bufferDurationMs != null).bufferDurationMs, 600);
+  for (const event of ['media_seeking', 'media_seeked', 'media_ratechange'])
+    assert.ok(events.some(e => e.event === event && e.solo && !e.syncActive));
+  assert.equal(h.run('diagnosticBufferStart'), null);
+});
+
+test('P0 automatic seek cannot repeat during one-second decoder recovery but explicit seek wins', async () => {
+  const h = await playingSharedGuest();
+  let current = 2, writes = 0;
+  Object.defineProperty(h.player, 'currentTime', {get: () => current, set: value => {current = value; writes++;}});
+  h.tick(); h.advance(4000); h.tick(); // Initial alignment also starts the four-second cooldown.
+  assert.equal(writes, 1);
+  current = 2; // Simulated stale decoder/keyframe snapshot after the first correction.
+  h.player.fire('waiting'); h.advance(500);
+  h.player.fire('seeked'); h.player.fire('canplay'); h.player.fire('playing');
+  h.advance(500); h.tick();
+  assert.equal(writes, 1);
+  h.session.receive('state', {...playback, seq: 100, paused: true, position_ms: 60000});
+  assert.equal(writes, 2);
+  assert.equal(current, 60);
+  assert.equal(h.player.paused, true);
+});
+
+// --- Event sync ("Ereignis-Sync"): announced by the host's status, never a revision.
+const hostStatus = (h, sync) => h.session.receive('status', {member_id: 'host', status: 'ready', media_key: 'movie|tt1||', commands: 1, ...(sync ? {sync} : {})});
+const countSeeks = (h, start) => {
+  const seeks = {current: start, writes: 0};
+  Object.defineProperty(h.player, 'currentTime', {get: () => seeks.current, set: value => {seeks.current = value; seeks.writes++;}});
+  return seeks;
+};
+
+test('event sync: the host announcement switches the mode; a status without the field means live', async () => {
+  const h = await readyGuest();
+  assert.equal(h.session.syncMode, 'live');
+  hostStatus(h, 'event');
+  assert.equal(h.session.syncMode, 'event');
+  assert.equal(h.get('syncModeLabel').textContent, 'Ereignis-Sync');
+  assert.equal(h.get('drawerResync').textContent, 'Jetzt synchronisieren');
+  assert.equal(h.get('syncModeChoice').hidden, true); // Guests see the mode but cannot change it.
+  hostStatus(h, null); // An older host or a switch back: no field = live.
+  assert.equal(h.session.syncMode, 'live');
+  // A guest's own status can never change the party mode.
+  h.session.room.members = [{id: 'host'}, {id: 'g2'}];
+  h.session.receive('status', {member_id: 'g2', status: 'ready', media_key: 'movie|tt1||', sync: 'event'});
+  assert.equal(h.session.syncMode, 'live');
+});
+
+test('event sync: host play continues at the own position, a duplicated play does not restart', async () => {
+  const h = await readyGuest(); hostStatus(h, 'event');
+  const seeks = countSeeks(h, 3); // Own position 2 s behind the paused party frame.
+  let plays = 0; h.player.play = () => { plays++; h.player.paused = false; return Promise.resolve(); };
+  h.session.receive('state', {...playback, seq: 2, paused: false});
+  await settlePlayback();
+  assert.equal(plays, 1); assert.equal(h.player.paused, false);
+  assert.equal(seeks.writes, 0); assert.equal(seeks.current, 3); // No seek because of play.
+  h.session.receive('state', {...playback, seq: 2, paused: false}); // Duplicate delivery.
+  h.session.receive('state', {...playback, seq: 3, paused: false, position_ms: 5200, at: 1200}); // Re-anchor.
+  h.tick(); await settlePlayback();
+  assert.equal(plays, 1); assert.equal(seeks.writes, 0);
+});
+
+test('event sync: host pause stops every guest at its own position without a seek', async () => {
+  const h = await playingGuest(); hostStatus(h, 'event');
+  const seeks = countSeeks(h, 7); // 2 s ahead of the party.
+  h.session.receive('state', {...playback, seq: 6, paused: true, position_ms: 5000});
+  assert.equal(h.player.paused, true); assert.equal(seeks.writes, 0); assert.equal(seeks.current, 7);
+  h.session.receive('state', {...playback, seq: 6, paused: true, position_ms: 5000}); // Duplicate.
+  h.advance(10000); h.tick(); h.tick();
+  assert.equal(seeks.writes, 0);
+});
+
+test('event sync: a deliberate seek forward or back jumps once, with no follow-up correction', async () => {
+  const h = await playingGuest(); hostStatus(h, 'event');
+  const seeks = countSeeks(h, 5);
+  h.session.receive('state', {...playback, seq: 6, paused: false, position_ms: 60000});
+  assert.equal(seeks.writes, 1); assert.equal(seeks.current, 60);
+  seeks.current = 58; // Landed on a keyframe 2 s early.
+  for (let i = 0; i < 6; i++) { h.advance(2500); h.tick(); }
+  assert.equal(seeks.writes, 1); // No corrective re-seek afterwards.
+  h.session.receive('state', {...playback, seq: 7, paused: false, position_ms: 20000});
+  assert.equal(seeks.writes, 2); assert.equal(seeks.current, 20);
+  h.session.receive('state', {...playback, seq: 8, paused: false, position_ms: 20100}); // Mere re-anchor.
+  h.tick();
+  assert.equal(seeks.writes, 2);
+});
+
+test('event sync: "Jetzt synchronisieren" aligns once to the host time and respects the host pause', async () => {
+  const h = await playingGuest(); hostStatus(h, 'event');
+  const seeks = countSeeks(h, 30);
+  h.session.receive('state', {...playback, seq: 6, paused: true, position_ms: 5000});
+  h.get('drawerResync').fire('click'); await settlePlayback();
+  assert.equal(seeks.writes, 1); assert.equal(seeks.current, 5);
+  assert.equal(h.player.paused, true); // Host is paused: the manual sync does not start playback.
+  seeks.current = 9;
+  for (let i = 0; i < 4; i++) { h.advance(2500); h.tick(); }
+  assert.equal(seeks.writes, 1); // Afterwards no continuous drift correction.
+});
+
+test('event sync: no periodic auto-seeks and no tempo nudging during normal playback', async () => {
+  const h = await playingGuest(); hostStatus(h, 'event');
+  const seeks = countSeeks(h, 10); // 5 s ahead: live sync would seek after the hold.
+  for (let i = 0; i < 8; i++) { h.advance(2500); h.tick(); }
+  assert.equal(seeks.writes, 0);
+  seeks.current = 5.4; h.tick(); h.tick(); // Live sync would nudge to 0.95.
+  assert.equal(h.player.playbackRate, 1);
+});
+
+test('event sync: a buffering guest waits alone, shows "Puffert" and continues at its own position', async () => {
+  const h = await playingGuest(); hostStatus(h, 'event');
+  const seeks = countSeeks(h, 5);
+  for (let round = 0; round < 4; round++) { // Live sync would exhaust the wait budget ("behind").
+    h.player.fire('waiting'); h.advance(2600); h.tick();
+    assert.equal(h.sent.at(-1)[0], 'buffering');
+    h.player.fire('canplay'); h.player.fire('playing'); h.advance(800); h.tick();
+    assert.equal(h.sent.at(-1)[0], 'ready');
+  }
+  assert.equal(seeks.writes, 0); // No catch-up seek after the stall.
+  assert.equal(h.sync(), true);
+  h.get('drawerResync').fire('click'); await settlePlayback();
+  assert.equal(seeks.writes, 0); // Already at the party time: manual sync stays possible but is a no-op.
+});
+
+test('event sync: a guest joining during the film aligns once, then runs independently', async () => {
+  const h = await harness(); hostStatus(h, 'event');
+  h.session.playback = {...playback, paused: false, position_ms: 40000};
+  h.enter(); h.metadata();
+  h.source().instance.emit(FakeHls.Events.LEVEL_LOADED, {details: vod});
+  assert.equal(h.player.currentTime, 40); // One-time alignment on join.
+  h.player.fire('seeked');
+  h.get('resync').fire('click'); await settlePlayback();
+  const seeks = countSeeks(h, 44);
+  for (let i = 0; i < 6; i++) { h.advance(2500); h.tick(); }
+  assert.equal(seeks.writes, 0);
+});
+
+test('event sync: stale, foreign and host-only-violating revisions are ignored', async () => {
+  const h = await playingGuest(); hostStatus(h, 'event');
+  const seeks = countSeeks(h, 5);
+  h.session.receive('state', {...playback, seq: 1, paused: true, position_ms: 90000}); // Older seq.
+  h.session.receive('state', {...playback, seq: 50, member_id: 'g2', paused: true, position_ms: 90000}); // Not the host (host_only).
+  assert.equal(seeks.writes, 0); assert.equal(h.player.paused, false);
+});
+
+test('event sync: switching modes never re-positions; live sync resumes its corrections afterwards', async () => {
+  const h = await playingGuest();
+  const seeks = countSeeks(h, 9); // 4 s ahead.
+  hostStatus(h, 'event');
+  for (let i = 0; i < 4; i++) { h.advance(2500); h.tick(); }
+  assert.equal(seeks.writes, 0);
+  hostStatus(h, null); // Back to live sync: the existing drift correction applies again.
+  for (let i = 0; i < 4; i++) { h.advance(2500); h.tick(); }
+  assert.equal(seeks.writes, 1);
+});
+
+test('event sync: a browser host announces the mode in its own status, never as a revision', async () => {
+  const h = await readyGuest();
+  h.session.room.info.host_member_id = 'guest'; h.session.room.memberId = 'guest';
+  h.session.room.members = [{id: 'guest'}];
+  h.session.handlers.room(h.session.room);
+  const payloads = [];
+  h.session.channel = {send: async message => { payloads.push(message); return 'ok'; }, track: async () => 'ok', state: 'joined'};
+  h.session.sendPresence = async () => { payloads.push({type: 'presence', payload: h.session.presencePayload()}); };
+  const revisions = h.session.playback;
+  h.get('syncModeEvent').fire('click'); await settlePlayback();
+  assert.equal(h.session.syncMode, 'event');
+  assert.equal(payloads.at(-1).payload.sync, 'event');
+  assert.equal(h.session.playback, revisions); // No playback revision was produced.
+  h.get('syncModeLive').fire('click'); await settlePlayback();
+  assert.equal('sync' in payloads.at(-1).payload, false);
+});
+
+// --- Mobile HLS buffer analysis: measurements only, plus a display-only hint.
+const slowSegment = (index, {bytes = 6e6, loadMs = 7000, duration = 4, level = 2, host = 'cdn1.example.test'} = {}) =>
+  ({frag: {duration, level, url: `https://${host}/seg${index}.ts?token=secret-sample`, stats: {total: bytes, loading: {start: 0, end: loadMs}}}});
+
+test('HLS analysis: segments slower than real time at a fixed quality are measured and explained', async () => {
+  const h = await playingSharedGuest({debug: true});
+  const instance = h.desktopHls();
+  instance.levels = [{height: 720, bitrate: 3e6}, {height: 1080, bitrate: 6e6}, {height: 2160, bitrate: 25e6, videoCodec: 'hvc1.2.4.L153.B0'}];
+  instance.emit(FakeHls.Events.MANIFEST_PARSED);
+  assert.equal(instance.loadLevel, 2); // Default "Beste Qualität" keeps the top variant (unchanged).
+  instance.currentLevel = 2; instance.autoLevelEnabled = false;
+  instance.emit(FakeHls.Events.FRAG_LOADED, slowSegment(1));
+  instance.emit(FakeHls.Events.FRAG_LOADED, slowSegment(2));
+  assert.equal(h.get('qualityNote').textContent.includes('langsamer'), false); // Not after two segments.
+  instance.emit(FakeHls.Events.FRAG_LOADED, slowSegment(3, {host: 'cdn2.example.test'}));
+  assert.match(h.get('qualityNote').textContent, /langsamer als die Wiedergabe \(6\.9 von 25\.0 Mbit\/s\).*Automatisch \(adaptiv\)/);
+  assert.equal(instance.loadLevel, 2); // Display only: the quality is never switched silently.
+  instance.emit(FakeHls.Events.ERROR, {details: 'fragLoadError', fatal: false});
+  h.tick();
+  const data = debugData(h);
+  assert.equal(data.qualityMode, 'best'); assert.equal(data.abrActive, false);
+  assert.equal(data.levelHeight, 2160); assert.equal(data.levelBitrateKbps, 25000); assert.equal(data.videoCodecFamily, 'hevc');
+  assert.equal(data.lastSegmentThroughputKbps, 6857); assert.equal(data.lastSegmentLevelBitrateKbps, 25000);
+  assert.equal(data.segmentsSlowerThanRealtime, 3); assert.equal(data.slowSegmentStreak, 3);
+  assert.equal(data.fragmentRetries, 1); assert.equal(data.cdnHostChanges, 1); assert.equal(data.sourceLoads, 1);
+  const text = JSON.stringify(data);
+  assert.equal(text.includes('cdn1.example.test') || text.includes('secret-sample'), false); // No hosts or tokens.
+});
+
+test('HLS analysis: fast segments, adaptive mode or a single variant never show the hint', async () => {
+  const h = await playingSharedGuest({debug: true});
+  const instance = h.desktopHls();
+  instance.levels = [{height: 720, bitrate: 3e6}, {height: 1080, bitrate: 6e6}];
+  instance.emit(FakeHls.Events.MANIFEST_PARSED);
+  for (let i = 0; i < 5; i++) instance.emit(FakeHls.Events.FRAG_LOADED, slowSegment(i, {loadMs: 1500, level: 1}));
+  assert.equal(h.get('qualityNote').textContent.includes('langsamer'), false);
+  h.get('quality').value = 'auto'; h.get('quality').fire('change');
+  for (let i = 0; i < 5; i++) instance.emit(FakeHls.Events.FRAG_LOADED, slowSegment(i, {level: 1}));
+  assert.equal(h.get('qualityNote').textContent.includes('langsamer'), false); // ABR already adapts.
+  h.tick(); assert.equal(debugData(h).segmentsSlowerThanRealtime, 5);
+  h.get('quality').value = 'best'; h.get('quality').fire('change');
+  instance.levels = [{height: 2160, bitrate: 25e6}]; instance.emit(FakeHls.Events.LEVELS_UPDATED);
+  for (let i = 0; i < 5; i++) instance.emit(FakeHls.Events.FRAG_LOADED, slowSegment(i, {level: 0}));
+  assert.equal(h.get('qualityNote').textContent.includes('langsamer'), false); // No variant to choose: nothing to suggest.
+});
+
+test('HLS analysis: an incompatible HEVC/4K-only source fails with the codec message, not endless buffering', async () => {
+  const h = await playingSharedGuest({debug: true});
+  const instance = h.desktopHls();
+  instance.levels = [{height: 2160, bitrate: 25e6, videoCodec: 'hvc1.2.4.L153.B0'}];
+  instance.emit(FakeHls.Events.MANIFEST_PARSED);
+  instance.emit(FakeHls.Events.ERROR, {fatal: true, type: FakeHls.ErrorTypes.MEDIA_ERROR, details: 'manifestIncompatibleCodecsError'});
+  assert.match(h.get('message').textContent, /Videoformat nicht unterstützt/);
+  assert.equal(h.sync(), false);
 });
