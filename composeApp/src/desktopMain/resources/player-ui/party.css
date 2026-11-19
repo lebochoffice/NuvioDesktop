@@ -1600,6 +1600,46 @@
   transform: rotate(-90deg);
 }
 
+.party-sync-mode-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.party-sync-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, .14);
+  color: var(--theme-text-secondary);
+  font-size: 13px;
+}
+
+.party-sync-option.checked {
+  border-color: var(--theme-text-primary);
+  color: var(--theme-text-primary);
+  font-weight: 600;
+}
+
+.party-sync-option:disabled,
+.party-sync-option[aria-disabled="true"] {
+  cursor: default;
+}
+
+.party-sync-option:disabled {
+  opacity: .55;
+}
+
+.party-sync-info-toggle[aria-expanded="true"] {
+  color: var(--theme-text-primary);
+}
+
+.party-sync-info .party-detail.current {
+  color: var(--theme-text-primary);
+}
+
 .party-countdown {
   display: flex;
   flex-direction: column;

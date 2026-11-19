@@ -199,12 +199,18 @@
           <p id="suggestStatus" class="room-share-note" role="status"></p>
         </article>
         <div id="syncModeCard" class="sync-mode-card" hidden>
-          <p class="sync-mode-title"><span>Synchronisierung</span> <strong id="syncModeLabel">Live-Sync</strong></p>
-          <div id="syncModeChoice" class="sync-mode-choice" role="radiogroup" aria-label="Synchronisierungsmodus der Party" hidden>
-            <button id="syncModeLive" type="button" class="btn small ghost" role="radio" aria-checked="true">Live-Sync</button>
-            <button id="syncModeEvent" type="button" class="btn small ghost" role="radio" aria-checked="false">Ereignis-Sync</button>
+          <p class="sync-mode-title"><span>Synchronisierung</span> <strong id="syncModeLabel" class="sr-only">Live-Sync</strong></p>
+          <div id="syncModeChoice" class="sync-mode-choice" role="radiogroup" aria-label="Synchronisierungsmodus der Party">
+            <button id="syncModeLive" type="button" class="sync-mode-option" role="radio" aria-checked="true"><span class="sync-mode-radio" aria-hidden="true"></span>Live-Sync</button>
+            <button id="syncModeEvent" type="button" class="sync-mode-option" role="radio" aria-checked="false"><span class="sync-mode-radio" aria-hidden="true"></span>Ereignis-Sync</button>
           </div>
-          <p id="syncModeHint" class="muted small"></p>
+          <p id="syncModeHint" class="muted small" hidden></p>
+          <button id="syncModeInfoToggle" type="button" class="sync-mode-info-toggle" aria-expanded="false" aria-controls="syncModeInfo">Wie funktioniert dieser Modus?</button>
+          <div id="syncModeInfo" class="sync-mode-info" hidden>
+            <p class="muted small"><strong>Live-Sync:</strong> Abweichungen werden automatisch korrigiert; bei anhaltendem Puffern wartet die Party.</p>
+            <p class="muted small"><strong>Ereignis-Sync:</strong> Nur Play, Pause, Spulen, „Jetzt synchronisieren“ und „Alle synchronisieren“ gelten für alle. Jeder spielt mit eigenem Puffer weiter, ohne automatische Korrekturen.</p>
+            <p class="muted small">Offizielle Nuvio-TV-Apps kennen den Ereignis-Sync nicht und korrigieren weiter automatisch.</p>
+          </div>
         </div>
         <div class="party-footer">
           <div class="party-sync-actions">

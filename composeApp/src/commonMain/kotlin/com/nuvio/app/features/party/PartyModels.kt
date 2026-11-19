@@ -159,6 +159,11 @@ data class PartyPlayback(
     // memberId remains the publisher (the host). Never persisted.
     @SerialName("origin_member_id") val originMemberId: String? = null,
     @SerialName("command_id") val commandId: String? = null,
+    // "Alle synchronisieren" (fork, optional, wire-only, never persisted): a
+    // host revision carrying a one-time alignment ID. Supporting members align
+    // once to this revision in both sync modes; older clients see an ordinary
+    // revision (unchanged behavior). Honored only from the current host.
+    @SerialName("sync_all") val syncAll: String? = null,
 ) {
     /** Member whose action produced this revision. */
     val actorId: String?
@@ -214,7 +219,13 @@ data class PartyPresence(
     // = shared actions only, absent = live sync. Never a playback revision, so
     // older clients (and the official TV app) ignore it and keep live sync.
     val sync: String? = null,
+    // Member understands the one-time "sync_all" alignment (fork, optional).
+    // Members without it (older apps, official TV app) are reported separately.
+    @SerialName("sync_all") val syncAllSupport: Int? = null,
 )
+
+/** Version of the one-time "Alle synchronisieren" alignment a member announces. */
+internal const val PARTY_SYNC_ALL_PROTOCOL = 1
 
 /**
  * Party-wide synchronisation behaviour. The host decides; guests follow the
@@ -228,7 +239,11 @@ enum class PartySyncMode(val wire: String?) {
     Event("event");
 
     companion object {
+        /** Protocol fallback: a host without the field (older app, TV) means live sync. */
         fun fromWire(value: String?): PartySyncMode = if (value == Event.wire) Event else Live
+
+        /** What a host of this build actively announces for a new party (it can switch to live). */
+        val NewPartyDefault: PartySyncMode get() = Event
     }
 }
 

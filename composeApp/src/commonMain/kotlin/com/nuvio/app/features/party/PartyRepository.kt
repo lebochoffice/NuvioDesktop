@@ -369,6 +369,24 @@ object PartyRepository {
     }
 
     /**
+     * "Alle synchronisieren" (host only): an ordinary host revision of the current
+     * party time, sequenced and persisted like every other host revision, plus a
+     * fresh one-time alignment ID. Supporting members align once to it in both
+     * modes; a duplicate or older delivery has the same or a lower seq and is never
+     * applied twice. Older clients see an ordinary re-anchor (unchanged behavior).
+     */
+    fun publishSyncAll(paused: Boolean, positionMs: Long, rate: Float) {
+        if (_hostSolo.value) return
+        val at = clock.nowMs()
+        scope.launch {
+            val party = _state.value.party ?: return@launch
+            if (_hostSolo.value || !party.isHost) return@launch
+            publish(paused = paused, positionMs = positionMs, rate = rate, waiting = false, at = at,
+                syncAll = "sa-${at.toString(36)}-${kotlin.random.Random.nextLong().toULong().toString(36)}")
+        }
+    }
+
+    /**
      * The local player reached a revision the host sequenced from a guest
      * command. Sent once per command; informational for the guest only.
      */
@@ -549,10 +567,12 @@ object PartyRepository {
         resumedAt = null
         commands.clear()
         appliedReported = null
-        // A rejoin of the same party keeps the host's choice; a new party starts live.
+        // A rejoin of the same party keeps the host's choice. A new party starts in
+        // event sync, which this host then actively announces ("sync": "event");
+        // the protocol fallback for hosts without the field stays live sync.
         if (hostSyncModeParty != party.id) {
             hostSyncModeParty = party.id
-            _hostSyncMode.value = PartySyncMode.Live
+            _hostSyncMode.value = PartySyncMode.NewPartyDefault
         }
         _playback.value = playback?.takeIf { it.mediaKey == null || it.mediaKey == party.media.key }
         _state.value = PartyUiState(party = party)
@@ -878,6 +898,9 @@ object PartyRepository {
         val party = _state.value.party ?: return
         if (candidate.mediaKey != null && candidate.mediaKey != party.media.key) return
         if (party.hostOnly && candidate.memberId != party.hostMemberId) return
+        // Only the current host may request the one-time alignment; from anyone
+        // else the revision stays an ordinary one.
+        val candidate = if (candidate.syncAll != null && candidate.memberId != party.hostMemberId) candidate.copy(syncAll = null) else candidate
         val current = _playback.value
         if (!PartySync.isNewer(candidate, current)) return
         if (current != null && current.paused && !candidate.paused) {
@@ -901,12 +924,13 @@ object PartyRepository {
         origin: String? = null,
         commandId: String? = null,
         source: PartySyncTrace.Source = PartySyncTrace.Source.Local,
+        syncAll: String? = null,
     ) {
         val party = _state.value.party ?: return
         if (!party.canControl) return
         val current = _playback.value
         val next = nextPlayback(party, paused, positionMs, rate, waiting, party.media.key, at)
-            .copy(originMemberId = origin, commandId = commandId)
+            .copy(originMemberId = origin, commandId = commandId, syncAll = syncAll?.takeIf { party.isHost })
         if (current != null && current.paused && !paused) {
             resumedAt = clock.mark()
             if (current.waiting && !waiting) ignoredWaiting += PartySync.waitingMemberIds(party, emptySet())
@@ -945,7 +969,7 @@ object PartyRepository {
             delay(PERSIST_DELAY)
             val party = _state.value.party ?: return@launch
             // Command fields are wire-only; the stored row keeps the existing schema.
-            val playback = _playback.value?.copy(originMemberId = null, commandId = null) ?: return@launch
+            val playback = _playback.value?.copy(originMemberId = null, commandId = null, syncAll = null) ?: return@launch
             runRemote { PartyApi.update(party.id, deviceId(), null, playback) }?.let { applySnapshot(it) }
         }
     }
@@ -1122,9 +1146,13 @@ object PartyRepository {
     // "command" events instead of their own revisions.
     private fun encodePresence(presence: PartyPresence): JsonObject {
         val party = _state.value.party
-        val announced = if (party?.isHost == true && presence.memberId == party.memberId) {
-            presence.copy(commands = PartyCommands.PROTOCOL, sync = _hostSyncMode.value.wire)
-        } else presence
+        val own = party != null && presence.memberId == party.memberId
+        val announced = when {
+            own && party?.isHost == true ->
+                presence.copy(commands = PartyCommands.PROTOCOL, sync = _hostSyncMode.value.wire, syncAllSupport = PARTY_SYNC_ALL_PROTOCOL)
+            own -> presence.copy(syncAllSupport = PARTY_SYNC_ALL_PROTOCOL)
+            else -> presence
+        }
         return PartyApi.json.encodeToJsonElement(PartyPresence.serializer(), announced).jsonObject
     }
 

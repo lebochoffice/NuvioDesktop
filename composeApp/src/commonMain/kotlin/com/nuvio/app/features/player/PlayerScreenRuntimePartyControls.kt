@@ -280,9 +280,8 @@ internal fun PlayerScreenRuntime.rememberPartyControlsState(): PlayerControlPart
             "$partyStatLastCorrection vor ${((nowMs - at).coerceAtLeast(0L) / 1000L)} s"
         }.orEmpty(),
         canSyncMe = !party.isHost && !elsewhere,
-        // Event sync has no host-wide re-anchor: each guest aligns with "Jetzt synchronisieren".
-        canSyncAll = party.isHost && !hostSolo && !elsewhere && party.members.size > 1 &&
-            syncMode == com.nuvio.app.features.party.PartySyncMode.Live,
+        // Both modes: an explicit one-time alignment (sync_all), not a drift correction.
+        canSyncAll = party.isHost && !hostSolo && !elsewhere && party.members.size > 1,
         syncMode = if (syncMode == com.nuvio.app.features.party.PartySyncMode.Event) "event" else "live",
         syncModeEditable = party.isHost && !hostSolo,
         syncAllStatus = partySyncAllAt?.takeIf { party.isHost && nowMs - it < SYNC_ALL_STATUS_MS }
@@ -623,7 +622,7 @@ private const val SYNC_ALL_SETTLE_MS = 2_500L
  * (never assumed): offline and "Allein" members are listed separately and do
  * not block; a member counts as synced only with a fresh in-sync report.
  */
-private fun syncAllSummary(
+internal fun syncAllSummary(
     party: com.nuvio.app.features.party.ActiveParty,
     playback: com.nuvio.app.features.party.PartyPlayback?,
     nowMs: Long,
@@ -634,12 +633,18 @@ private fun syncAllSummary(
     val online = others - offline.toSet()
     val states = online.associateWith { PartySync.memberSync(party.presence[it.id], playback, party.media.key, nowMs).state }
     val solo = online.filter { states[it] == com.nuvio.app.features.party.MemberSync.Solo }
-    val joined = online - solo.toSet()
+    // Older apps and the official TV app do not announce the one-time alignment:
+    // never count them as synchronized by this action, list them separately.
+    val unsupported = (online - solo.toSet()).filter {
+        party.presence[it.id]?.syncAllSupport != com.nuvio.app.features.party.PARTY_SYNC_ALL_PROTOCOL
+    }
+    val joined = online - solo.toSet() - unsupported.toSet()
     val synced = joined.filter { states[it] == com.nuvio.app.features.party.MemberSync.Synced }
     val pending = joined - synced.toSet()
     val extras = listOfNotNull(
         solo.size.takeIf { it > 0 }?.let { "$it allein" },
         offline.size.takeIf { it > 0 }?.let { "$it offline" },
+        unsupported.size.takeIf { it > 0 }?.let { "$it ohne Unterstützung (ältere App/TV)" },
     ).joinToString(" · ").let { if (it.isEmpty()) "" else " · $it" }
     return when {
         joined.isEmpty() -> "Niemand schaut gerade gemeinsam$extras"

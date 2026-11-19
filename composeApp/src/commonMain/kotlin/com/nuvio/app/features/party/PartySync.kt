@@ -122,6 +122,14 @@ internal object PartySync {
         return abs(next.positionMs - expectedPositionMs(last, next.at)) > PAUSED_TOLERANCE_MS
     }
 
+    /**
+     * "Alle synchronisieren": a revision with a one-time alignment ID counts only
+     * when the current host published it and this device is not that host.
+     */
+    fun isSyncAllAlignment(playback: PartyPlayback, party: ActiveParty): Boolean =
+        playback.syncAll != null && !playback.waiting && playback.memberId != null &&
+            playback.memberId == party.hostMemberId && party.memberId != party.hostMemberId
+
     fun pendingApply(pendingPaused: Boolean, shouldPlay: Boolean, isPlaying: Boolean, driftMs: Long): PendingApply = when {
         shouldPlay == pendingPaused -> PendingApply.Superseded
         isPlaying == pendingPaused -> PendingApply.Waiting

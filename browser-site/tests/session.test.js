@@ -1425,3 +1425,36 @@ test('regular leave reaches the backend even while channel removal is pending, a
   assert.equal(f.session.closing, null);
   assert.equal(f.calls.filter(([name]) => name === 'watch_party_leave').length, 1);
 });
+
+test('a new browser-host party starts in event sync and announces it; the host can switch to live', async t => {
+  const f = fixture(); t.after(() => f.session.close());
+  const movie = {type: 'movie', meta_type: 'movie', meta_id: 'tt1234567', title: 'Catalog title'};
+  const original = f.client.rpc;
+  f.client.rpc = async (name, args) => name === 'watch_party_create'
+    ? {data: {...snapshot(), member_id: 'host', party: {...snapshot().party, media: movie}}} : original(name, args);
+  await f.session.create(movie, 'Host', 0);
+  assert.equal(f.session.isHost(), true);
+  assert.equal(f.session.syncMode, 'event');
+  assert.equal(f.session.presencePayload().sync, 'event'); // Actively announced, not a protocol fallback.
+  assert.equal(f.session.presencePayload().sync_all, 1);
+  f.session.sendPresence = async () => {};
+  await f.session.setHostSyncMode('live');
+  assert.equal(f.session.syncMode, 'live');
+  assert.equal('sync' in f.session.presencePayload(), false); // Live = the unchanged legacy payload.
+});
+
+test('sync_all counts only from the current host; the persisted row never carries the wire field', async t => {
+  const f = fixture(); t.after(() => f.session.close());
+  await f.session.join('UXZ83H', 'Guest');
+  const room = f.session.room, host = room.info.host_member_id;
+  const base = {seq: 9, paused: false, position_ms: 1000, rate: 1, at: 1, media_key: 'movie|tt1||', sync_all: 'sa-1'};
+  assert.equal(f.session.isSyncAllAlignment({...base, member_id: host}), true);
+  assert.equal(f.session.isSyncAllAlignment({...base, member_id: 'someone-else'}), false);
+  assert.equal(f.session.isSyncAllAlignment({...base, member_id: host, waiting: true}), false);
+  assert.equal(f.session.isSyncAllAlignment({...base, member_id: host, sync_all: undefined}), false);
+  let stored = null;
+  f.session.rpc = async (name, args) => { stored = args.p_playback; return {party: null}; };
+  await f.session.persistControl(room, f.session.generation, {...base, member_id: room.memberId});
+  assert.equal('sync_all' in stored, false);
+  assert.equal(stored.seq, 9);
+});

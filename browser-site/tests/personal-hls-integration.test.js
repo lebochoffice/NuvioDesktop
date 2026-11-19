@@ -51,7 +51,7 @@ class FakeHls {
 // existing tests keep the manual flow, so the default here is a stored 'off'.
 // joined: party code remembered in this tab (reload rejoin); fakeJoin records
 // joins instead of calling the backend and leaves the room empty until then.
-async function harness({debug = false, guestControl = false, guestJoin = false, rpc = null, path = '/', autoHost = false, joined = null, fakeJoin = false, share = null, catalog = null, searchCatalog = null, browserHostShare = false, hlsSupported = true} = {}) {
+async function harness({debug = false, guestControl = false, guestJoin = false, rpc = null, path = '/', autoHost = false, joined = null, fakeJoin = false, share = null, catalog = null, searchCatalog = null, browserHostShare = false, hlsSupported = true, storedQuality = null} = {}) {
   const elements = new Map(), storageWrites = [], sent = [], timers = [], historyCalls = [], mediaActions = new Map(), copiedLinks = [];
   const location = {pathname: path, origin: 'https://watch.example.test'};
   let clock = 0, tick = () => {};
@@ -110,7 +110,8 @@ async function harness({debug = false, guestControl = false, guestJoin = false, 
     loadRoomTitle: (type, id) => loadRoomTitle(type, id, async () => ({ok: true, json: async () => ({meta: catalog})})),
     roomMediaForEpisode,
     sessionStorage: {getItem: key => key === 'nuvio-party-debug' ? (debug ? '1' : null) : key === 'nuvio-party-joined' ? joined : 'test-device', setItem: (...args) => storageWrites.push(args)},
-    localStorage: {getItem: key => key === 'nuvio-party-auto-host-stream' && autoHost !== null ? (autoHost ? '1' : '0') : null, setItem: (...args) => storageWrites.push(args)},
+    localStorage: {getItem: key => key === 'nuvio-party-auto-host-stream' && autoHost !== null ? (autoHost ? '1' : '0')
+      : key === 'nuvio.browser.videoQuality' ? storedQuality : null, setItem: (...args) => storageWrites.push(args)},
     crypto: {randomUUID: () => 'test-id'}, performance: {now: () => clock},
     // Timeouts are collected and only run via runTimers().
     setInterval: callback => { tick = callback; return 1; }, clearInterval() {},
@@ -765,7 +766,8 @@ test('native HLS shows fixed browser quality; hls.js offers only actual variants
   instance.emit(FakeHls.Events.MANIFEST_PARSED);
   assert.equal(android.get('quality').disabled, false); assert.equal(android.get('qualityNote').hidden, true);
   assert.deepEqual(android.get('quality').children.map(o => o.textContent), ['Beste Qualität', 'Automatisch (adaptiv)', '4K / 2160p', '1080p', '720p']);
-  assert.equal(instance.loadLevel, 2);
+  // Without a stored choice: the highest supported variant ("Beste Qualität").
+  assert.equal(android.get('quality').value, 'best'); assert.equal(instance.loadLevel, 2);
   android.get('quality').value = '1080'; android.get('quality').fire('change'); assert.equal(instance.loadLevel, 1);
   instance.emit(FakeHls.Events.LEVEL_SWITCHED, {level: 1});
   assert.equal(android.get('qualityNote').textContent, 'Aktiv: 1080p'); // The actually playing variant is visible.
@@ -2943,7 +2945,11 @@ test('event sync: the host announcement switches the mode; a status without the 
   assert.equal(h.session.syncMode, 'event');
   assert.equal(h.get('syncModeLabel').textContent, 'Ereignis-Sync');
   assert.equal(h.get('drawerResync').textContent, 'Jetzt synchronisieren');
-  assert.equal(h.get('syncModeChoice').hidden, true); // Guests see the mode but cannot change it.
+  // Guests see the mode as a read-only choice.
+  assert.equal(h.get('syncModeChoice').hidden, false);
+  assert.equal(h.get('syncModeEvent').getAttribute('aria-checked'), 'true');
+  assert.equal(h.get('syncModeLive').disabled, true); assert.equal(h.get('syncModeEvent').disabled, true);
+  assert.equal(h.get('syncModeChoice').getAttribute('aria-readonly'), 'true');
   hostStatus(h, null); // An older host or a switch back: no field = live.
   assert.equal(h.session.syncMode, 'live');
   // A guest's own status can never change the party mode.
@@ -3085,7 +3091,8 @@ test('HLS analysis: segments slower than real time at a fixed quality are measur
   const instance = h.desktopHls();
   instance.levels = [{height: 720, bitrate: 3e6}, {height: 1080, bitrate: 6e6}, {height: 2160, bitrate: 25e6, videoCodec: 'hvc1.2.4.L153.B0'}];
   instance.emit(FakeHls.Events.MANIFEST_PARSED);
-  assert.equal(instance.loadLevel, 2); // Default "Beste Qualität" keeps the top variant (unchanged).
+  h.get('quality').value = 'best'; h.get('quality').fire('change'); // An explicit fixed top quality.
+  assert.equal(instance.loadLevel, 2);
   instance.currentLevel = 2; instance.autoLevelEnabled = false;
   instance.emit(FakeHls.Events.FRAG_LOADED, slowSegment(1));
   instance.emit(FakeHls.Events.FRAG_LOADED, slowSegment(2));
@@ -3130,4 +3137,135 @@ test('HLS analysis: an incompatible HEVC/4K-only source fails with the codec mes
   instance.emit(FakeHls.Events.ERROR, {fatal: true, type: FakeHls.ErrorTypes.MEDIA_ERROR, details: 'manifestIncompatibleCodecsError'});
   assert.match(h.get('message').textContent, /Videoformat nicht unterstützt/);
   assert.equal(h.sync(), false);
+});
+
+// --- "Alle synchronisieren" as an explicit one-time alignment (both modes).
+for (const mode of ['live', 'event']) {
+  test(`sync all (${mode}): one host revision aligns once; duplicates and older copies never seek again`, async () => {
+    const h = await playingGuest(); hostStatus(h, mode === 'event' ? 'event' : null);
+    const seeks = countSeeks(h, 9); // 4 s ahead of the party (event sync would never correct this).
+    h.session.receive('state', {...playback, seq: 6, paused: false, position_ms: 5000, sync_all: 'sa-a'});
+    assert.equal(seeks.writes, 1); assert.equal(seeks.current, 5);
+    h.session.receive('state', {...playback, seq: 6, paused: false, position_ms: 5000, sync_all: 'sa-a'}); // Duplicate.
+    h.session.receive('state', {...playback, seq: 5, paused: false, position_ms: 5000, sync_all: 'sa-old'}); // Late, older.
+    seeks.current = 9; // Drifted again afterwards.
+    if (mode === 'event') { for (let i = 0; i < 4; i++) { h.advance(2500); h.tick(); } assert.equal(seeks.writes, 1); } // No drift correction switched on.
+  });
+}
+
+test('sync all respects the host pause and is ignored from anyone but the host', async () => {
+  const h = await playingGuest(); hostStatus(h, 'event');
+  h.session.room.info.host_only = false; h.session.room.members = [{id: 'host'}, {id: 'guest'}, {id: 'g2'}];
+  const seeks = countSeeks(h, 9);
+  h.session.receive('state', {...playback, seq: 6, member_id: 'g2', paused: false, position_ms: 5000, sync_all: 'sa-g2'});
+  assert.equal(seeks.writes, 0); // A guest cannot request the alignment.
+  h.session.receive('state', {...playback, seq: 7, paused: true, position_ms: 5000, sync_all: 'sa-host'});
+  assert.equal(seeks.writes, 1); assert.equal(seeks.current, 5); assert.equal(h.player.paused, true);
+});
+
+test('sync all leaves a guest watching alone untouched', async () => {
+  const h = await playingGuest(); hostStatus(h, 'event');
+  h.get('ctlSolo').fire('click');
+  const seeks = countSeeks(h, 40);
+  h.session.receive('state', {...playback, seq: 6, paused: false, position_ms: 5000, sync_all: 'sa-a'});
+  h.tick();
+  assert.equal(seeks.writes, 0); assert.equal(seeks.current, 40);
+});
+
+test('browser host: "Alle synchronisieren" stays available in event sync and publishes a sequenced sync_all revision', async () => {
+  const h = await readyGuest();
+  h.session.room.info.host_member_id = 'guest'; h.session.room.memberId = 'guest'; h.session.room.members = [{id: 'guest'}, {id: 'g2'}];
+  h.session.setSyncMode(h.session.hostSyncMode); h.session.handlers.room(h.session.room);
+  assert.equal(h.session.syncMode, 'event'); // New browser-host party defaults to event sync.
+  assert.equal(h.get('hostSyncAll').hidden, false);
+  const sent = [];
+  h.session.channel = {send: async message => { sent.push(message); return 'ok'; }, track: async () => 'ok', state: 'joined'};
+  h.session.rpc = async () => ({party: null});
+  await h.session.hostPublish({paused: false, positionMs: 7000, syncAll: true});
+  const state = sent.find(m => m.event === 'state').payload;
+  assert.match(state.sync_all, /^sa-/); assert.equal(state.member_id, 'guest'); assert.equal(state.seq, 2);
+});
+
+test('mode info is collapsed by default, opens accessibly and survives re-renders', async () => {
+  const h = await readyGuest(); hostStatus(h, 'event');
+  assert.equal(h.get('syncModeInfo').hidden, true);
+  assert.equal(h.get('syncModeInfoToggle').getAttribute('aria-expanded'), 'false');
+  h.get('syncModeInfoToggle').fire('click');
+  assert.equal(h.get('syncModeInfo').hidden, false);
+  assert.equal(h.get('syncModeInfoToggle').getAttribute('aria-expanded'), 'true');
+  hostStatus(h, null); h.tick(); hostStatus(h, 'event'); // Ordinary refreshes and mode changes.
+  assert.equal(h.get('syncModeInfo').hidden, false); // Not collapsed by a refresh.
+  h.get('syncModeInfoToggle').fire('click');
+  assert.equal(h.get('syncModeInfo').hidden, true);
+});
+
+test('switching from live to event sync drops an active tempo correction at once', async () => {
+  const h = await playingGuest();
+  h.player.currentTime = 4.7; h.tick(); assert.equal(h.player.playbackRate, 1.05); // Live nudge.
+  hostStatus(h, 'event');
+  assert.equal(h.player.playbackRate, 1);
+  h.player.currentTime = 4.6; h.tick(); h.tick();
+  assert.equal(h.player.playbackRate, 1);
+});
+
+test('HLS quality: without a stored choice the highest supported variant, never lowered for bandwidth', async () => {
+  const h = await playingSharedGuest({debug: true});
+  const instance = h.desktopHls();
+  instance.levels = [{height: 720, bitrate: 3e6}, {height: 1080, bitrate: 8e6}, {height: 2160, bitrate: 40e6}];
+  instance.emit(FakeHls.Events.MANIFEST_PARSED);
+  assert.equal(h.get('quality').value, 'best');
+  assert.equal(instance.startLevel, 2); assert.equal(instance.loadLevel, 2); // Fixed top level: ABR cannot lower it.
+  // A slow link changes nothing: the hint is display only.
+  for (let i = 0; i < 4; i++) instance.emit(FakeHls.Events.FRAG_LOADED, slowSegment(i, {level: 2}));
+  assert.equal(instance.loadLevel, 2);
+  // hls.js dropped an unsupported variant: still the highest supported one.
+  instance.levels = [{height: 720, bitrate: 3e6}, {height: 1080, bitrate: 8e6}]; instance.emit(FakeHls.Events.LEVELS_UPDATED);
+  assert.equal(instance.loadLevel, 1);
+  assert.ok(h.get('quality').children.some(o => o.value === 'auto')); // Adaptive stays a manual option.
+});
+
+for (const [stored, expectedValue, expectedLevel] of [['best', 'best', 2], ['auto', 'auto', -1], ['1080', '1080', 1]]) {
+  test(`HLS quality: a stored "${stored}" choice is respected`, async () => {
+    const h = await playingSharedGuest({storedQuality: stored});
+    const instance = h.desktopHls();
+    instance.levels = [{height: 720, bitrate: 3e6}, {height: 1080, bitrate: 8e6}, {height: 2160, bitrate: 40e6}];
+    instance.emit(FakeHls.Events.MANIFEST_PARSED);
+    assert.equal(h.get('quality').value, expectedValue); assert.equal(instance.loadLevel, expectedLevel);
+  });
+}
+
+test('HLS quality: a single fixed variant plays unchanged and never claims adaptivity', async () => {
+  for (const storedQuality of [null, 'auto']) {
+    const h = await playingSharedGuest({storedQuality});
+    const instance = h.desktopHls();
+    instance.levels = [{height: 2160, bitrate: 40e6}]; instance.emit(FakeHls.Events.MANIFEST_PARSED);
+    assert.deepEqual(h.get('quality').children.map(o => o.textContent), ['4K / 2160p · festgelegt']);
+    assert.equal(h.get('quality').disabled, true); assert.equal(instance.loadLevel, 0);
+  }
+});
+
+test('HLS: real segment bitrate, download speed and the byte-limited forward buffer are measured', async () => {
+  const h = await playingSharedGuest({debug: true});
+  const instance = h.desktopHls();
+  instance.levels = [{height: 2160, bitrate: 40e6}]; instance.emit(FakeHls.Events.MANIFEST_PARSED);
+  instance.currentLevel = 0;
+  instance.emit(FakeHls.Events.FRAG_LOADED, slowSegment(1, {bytes: 20e6, duration: 4, loadMs: 5000, level: 0})); // 40 Mbit/s media, 32 Mbit/s link.
+  instance.emit(FakeHls.Events.FRAG_LOADED, slowSegment(2, {bytes: 25e6, duration: 4, loadMs: 6000, level: 0})); // 50 Mbit/s peak.
+  const data = debugData(h);
+  assert.equal(data.averageSegmentBitrateKbps, 45000); assert.equal(data.maxSegmentBitrateKbps, 50000);
+  assert.equal(data.averageThroughputKbps, 32667);
+  assert.equal(data.forwardBufferLimitSeconds, 9.6); // 60 MB at 50 Mbit/s: far below 30 s.
+  h.player.fire('waiting'); h.tick();
+  assert.equal(h.get('syncChip').textContent, 'Verbindung langsamer als Video'); // Not reported as a short hiccup.
+});
+
+test('drift samples record position, offset and rate every report interval (diagnostics only)', async () => {
+  const h = await playingGuest({debug: true});
+  for (let i = 0; i < 3; i++) { h.advance(10_000); h.tick(); }
+  const samples = debugData(h).playbackEvents.filter(e => e.event === 'drift_sample');
+  assert.ok(samples.length >= 2);
+  for (const sample of samples) {
+    assert.equal(typeof sample.driftSeconds, 'number'); assert.equal(sample.playbackRate, 1);
+    assert.equal(typeof sample.clockOffsetMs, 'number'); assert.equal(typeof sample.positionSeconds, 'number');
+  }
 });

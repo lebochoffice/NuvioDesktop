@@ -515,8 +515,8 @@ function renderPartyRoom() {
   const room = session?.room, host = session?.isHost?.() === true;
   renderProposalForm();
   $('tabHost').hidden = !host;
-  // Event sync has no host-wide re-anchor; each guest uses "Jetzt synchronisieren".
-  $('hostSyncAll').hidden = !host || session?.syncMode === 'event';
+  // Both modes: "Alle synchronisieren" sends an explicit one-time alignment.
+  $('hostSyncAll').hidden = !host;
   if (!room) {
     $('roomOverview').hidden = true;
     hostShared = null; hostMenuRoom = null; awaitingHandoff = false; proposals.length = 0;
@@ -599,14 +599,27 @@ function hostPlayerReady() {
   return session?.isHost() && session.canControl() && !connectionLost && !soloMode &&
     !!hostShared && !!loadedStream && player.readyState >= 1;
 }
-async function publishHostPlayer(paused) {
-  try { await session.hostPublish({paused, positionMs: player.currentTime * 1000}); return true; }
+async function publishHostPlayer(paused, syncAll = false) {
+  try { await session.hostPublish({paused, positionMs: player.currentTime * 1000, syncAll}); return true; }
   catch { status('Party-Zeit konnte nicht gesendet werden.', true); return false; }
+}
+// Members that announce the one-time alignment; older apps and TV clients do not.
+function syncAllAudience() {
+  const room = session?.room, statuses = session?.memberStatus;
+  const others = (room?.members || []).filter(member => member.id !== room.memberId);
+  const supported = others.filter(member => statuses?.get(member.id)?.sync_all === 1).length;
+  return {supported, unsupported: others.length - supported};
 }
 $('hostSyncAll').addEventListener('click', async () => {
   if (!hostPlayerReady() || hostCountdownBusy || hostSyncBusy) return;
   hostSyncBusy = true; renderPlayerUi();
-  try { if (await publishHostPlayer(player.paused)) status('Aktuelle Party-Zeit gesendet.'); }
+  try {
+    if (await publishHostPlayer(player.paused, true)) {
+      const {supported, unsupported} = syncAllAudience();
+      status(`Alle synchronisieren gesendet: ${supported} Teilnehmer springen einmal zur Party-Zeit.` +
+        (unsupported ? ` ${unsupported} ohne bestätigte Unterstützung (ältere App/TV) werden nicht als synchronisiert gezählt.` : ''));
+    }
+  }
   finally { hostSyncBusy = false; renderPlayerUi(); }
 });
 $('hostCountdown').addEventListener('click', async () => {
@@ -973,6 +986,9 @@ function applySync(forcePlay = false) {
     else if (p.waiting) prioritySeek = null;
     else if (Math.abs(p.position_ms - expectedPositionMs(lastSyncPlayback, p.at)) >
         (p.paused ? SYNC.seekPausedS : SYNC.seekPlayingS) * 1000) prioritySeek = 'host_jump';
+    // "Alle synchronisieren" (both modes): one explicit alignment, only from the
+    // current host; the revision identity makes duplicates and old copies no-ops.
+    if (session?.isSyncAllAlignment?.(p)) prioritySeek = 'sync_all';
   }
   if (p !== lastSyncPlayback) recordPlaybackEvent('party_state');
   lastSyncPlayback = p;
@@ -1200,7 +1216,9 @@ player.audioTracks?.addEventListener('change', () => {
 // host changes? The host name itself is never kept beyond the comparison.
 let hlsHealth = null;
 const freshHlsHealth = () => ({segments: 0, slowSegments: 0, slowStreak: 0, hostChanges: 0, lastHost: null,
-  fragmentRetries: 0, lastBytes: null, lastThroughputKbps: null, lastLevelBitrateKbps: null, hintShown: false});
+  fragmentRetries: 0, lastBytes: null, lastThroughputKbps: null, lastLevelBitrateKbps: null, hintShown: false,
+  // Real media bitrate of the loaded segments (bytes / duration) and download speed.
+  segmentBitrateSumKbps: 0, segmentBitrateCount: 0, maxSegmentBitrateKbps: null, throughputSumKbps: 0, throughputCount: 0});
 let streamLoads = 0;
 function noteSegmentHealth(instance, frag, loadMs, durationS) {
   const health = hlsHealth ??= freshHlsHealth();
@@ -1210,6 +1228,12 @@ function noteSegmentHealth(instance, frag, loadMs, durationS) {
   health.lastBytes = Number.isFinite(bytes) && bytes > 0 ? bytes : null;
   health.lastThroughputKbps = health.lastBytes && loadMs > 0 ? Math.round(health.lastBytes * 8 / loadMs) : null;
   health.lastLevelBitrateKbps = Number.isFinite(levelBitrate) && levelBitrate > 0 ? Math.round(levelBitrate / 1000) : null;
+  if (health.lastBytes && Number.isFinite(durationS) && durationS > 0) {
+    const segmentKbps = Math.round(health.lastBytes * 8 / (durationS * 1000));
+    health.segmentBitrateSumKbps += segmentKbps; health.segmentBitrateCount++;
+    health.maxSegmentBitrateKbps = Math.max(health.maxSegmentBitrateKbps ?? 0, segmentKbps);
+  }
+  if (health.lastThroughputKbps) { health.throughputSumKbps += health.lastThroughputKbps; health.throughputCount++; }
   // Slower than real time: the segment took longer to load than to play.
   const slow = Number.isFinite(durationS) && durationS > 0 && Number.isFinite(loadMs) && loadMs > durationS * 1000;
   if (slow) { health.slowSegments++; health.slowStreak++; } else health.slowStreak = 0;
@@ -1227,6 +1251,14 @@ function noteSegmentHealth(instance, frag, loadMs, durationS) {
     $('qualityNote').textContent = `Segmente laden langsamer als die Wiedergabe${have && need ? ` (${(have / 1000).toFixed(1)} von ${(need / 1000).toFixed(1)} Mbit/s)` : ''}. „Automatisch (adaptiv)“ kann das Puffern vermeiden.`;
     $('qualityNote').hidden = false;
   }
+}
+function forwardBufferLimitSeconds(instance) {
+  if (!instance) return null;
+  const bitrate = Number(hlsHealth?.maxSegmentBitrateKbps) * 1000 || Number(instance.levels?.[instance.currentLevel]?.bitrate);
+  const bytes = Number(instance.config?.maxBufferSize ?? Hls.DefaultConfig?.maxBufferSize ?? 60 * 1000 * 1000);
+  const seconds = Number(instance.config?.maxBufferLength ?? Hls.DefaultConfig?.maxBufferLength ?? 30);
+  if (!(bitrate > 0) || !(bytes > 0)) return Number.isFinite(seconds) ? seconds : null;
+  return Math.round(Math.min(seconds, bytes * 8 / bitrate) * 10) / 10;
 }
 const videoCodecFamily = codec => {
   const value = String(codec || '').toLowerCase();
@@ -1287,6 +1319,9 @@ function watchHlsInstance(instance) {
   });
 }
 const QUALITY_PREFERENCE_KEY = 'nuvio.browser.videoQuality';
+// Default: the highest supported variant ("Beste Qualität"), never lowered for
+// bandwidth. "Automatisch (adaptiv)" stays a manual option; an explicitly stored
+// choice always wins; a single fixed variant stays "festgelegt".
 let qualityPreference = 'best';
 try { qualityPreference = globalThis.localStorage?.getItem(QUALITY_PREFERENCE_KEY) || 'best'; } catch { /* Default to best. */ }
 
@@ -1417,23 +1452,32 @@ function controlBlockedReason() {
   if (session.waitingForHostState) return 'host_state_pending';
   return 'allowed';
 }
-const SYNC_MODE_HINT = {
-  live: 'Live-Sync: Abweichungen werden automatisch korrigiert; bei anhaltendem Puffern wartet die Party.',
-  event: 'Ereignis-Sync: Nur Play, Pause, Spulen und „Jetzt synchronisieren“ gelten für alle. Jeder spielt mit eigenem Puffer weiter, ohne automatische Korrekturen.',
-};
+// The descriptions live in the (static) info region; renderSyncMode never
+// opens or closes it, only the toggle does.
 function renderSyncMode() {
   const room = session?.room, mode = session?.syncMode === 'event' ? 'event' : 'live';
   $('syncModeCard').hidden = !room;
   if (!room) return;
   const host = session.isHost();
   $('syncModeLabel').textContent = mode === 'event' ? 'Ereignis-Sync' : 'Live-Sync';
-  $('syncModeChoice').hidden = !host;
-  $('syncModeLive').setAttribute('aria-checked', String(mode === 'live'));
-  $('syncModeEvent').setAttribute('aria-checked', String(mode === 'event'));
-  $('syncModeHint').textContent = SYNC_MODE_HINT[mode] + (host ? '' : ' Der Host bestimmt den Modus.');
-  $('hostSyncAll').hidden = !host || mode === 'event';
+  for (const [id, value] of [['syncModeLive', 'live'], ['syncModeEvent', 'event']]) {
+    $(id).setAttribute('aria-checked', String(mode === value));
+    $(id).disabled = !host;
+  }
+  $('syncModeChoice').setAttribute('aria-readonly', String(!host));
+  $('syncModeHint').textContent = host ? '' : 'Vom Host gewählt.';
+  $('syncModeHint').hidden = host;
+  $('hostSyncAll').hidden = !host;
   $('drawerResync').textContent = mode === 'event' ? 'Jetzt synchronisieren' : 'Mich synchronisieren';
 }
+// Collapsed by default; afterwards only the toggle changes it.
+$('syncModeInfo').hidden = true;
+$('syncModeInfoToggle').setAttribute('aria-expanded', 'false');
+$('syncModeInfoToggle').addEventListener('click', () => {
+  const open = $('syncModeInfoToggle').getAttribute('aria-expanded') !== 'true';
+  $('syncModeInfoToggle').setAttribute('aria-expanded', String(open));
+  $('syncModeInfo').hidden = !open;
+});
 function chooseSyncMode(mode) {
   if (!session?.isHost?.()) return;
   session.setHostSyncMode(mode).catch(() => status('Synchronisierungsmodus nicht gesendet. Party-Verbindung prüfen.', true));
@@ -1504,6 +1548,8 @@ function renderPlayerUi() {
     : waitingForTarget ? ['Warte auf suchbare Position …', 'warn']
     : pendingPlay ? ['Starte Wiedergabe …', 'warn']
     : !syncEnabled ? ['Nicht synchron', 'off']
+    // Never call it a short hiccup when the segments load slower than they play.
+    : buffering && (hlsHealth?.slowStreak ?? 0) >= 2 ? ['Verbindung langsamer als Video', 'warn']
     : buffering ? [bufferingSinceMs != null && performance.now() - bufferingSinceMs >= BUFFER_NOTICE_MS ? 'Videopuffer leer' : 'Lade Video …', 'warn']
     : ['Synchron', ''];
   $('syncChip').hidden = !loadedStream;
@@ -2561,6 +2607,12 @@ function renderSyncDebug() {
     videoCodecFamily: currentHls() ? videoCodecFamily(currentHls().levels?.[currentHls().currentLevel]?.videoCodec) : null,
     lastSegmentBytes: number(hlsHealth?.lastBytes), lastSegmentThroughputKbps: number(hlsHealth?.lastThroughputKbps),
     lastSegmentLevelBitrateKbps: number(hlsHealth?.lastLevelBitrateKbps),
+    averageSegmentBitrateKbps: hlsHealth?.segmentBitrateCount ? number(Math.round(hlsHealth.segmentBitrateSumKbps / hlsHealth.segmentBitrateCount)) : null,
+    maxSegmentBitrateKbps: number(hlsHealth?.maxSegmentBitrateKbps),
+    averageThroughputKbps: hlsHealth?.throughputCount ? number(Math.round(hlsHealth.throughputSumKbps / hlsHealth.throughputCount)) : null,
+    // hls.js stops loading ahead at maxBufferSize bytes: at high bitrates the forward
+    // buffer is far shorter than maxBufferLength seconds.
+    forwardBufferLimitSeconds: forwardBufferLimitSeconds(currentHls()),
     segmentsLoaded: number(hlsHealth?.segments), segmentsSlowerThanRealtime: number(hlsHealth?.slowSegments),
     slowSegmentStreak: number(hlsHealth?.slowStreak), fragmentRetries: number(hlsHealth?.fragmentRetries),
     cdnHostChanges: number(hlsHealth?.hostChanges), sourceLoads: number(streamLoads),
@@ -2602,6 +2654,9 @@ setInterval(() => {
   if (session?.room && loadedStream && performance.now() - lastPositionReportAt >= POSITION_REPORT_MS) {
     lastPositionReportAt = performance.now();
     session.reportPosition?.().catch?.(() => {});
+    // Opt-in diagnostics: periodic drift samples (local/host position, rate, clock
+    // offset) show whether an offset is constant (start/seek) or grows (speed).
+    recordPlaybackEvent('drift_sample');
   }
   if (session?.room && !$('infoDrawer').hidden) renderMembers(session.room);
   $('drawerResync').disabled = $('resync').disabled;

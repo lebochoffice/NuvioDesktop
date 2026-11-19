@@ -228,15 +228,16 @@ internal fun PlayerScreenRuntime.syncMeWithParty() {
 }
 
 /**
- * "Alle synchronisieren" (host): publish the host's current party time as a
- * new revision through the existing publish path, then ask for immediate
- * status reports. Members already in sync stay put (existing tolerances);
- * paused stays paused; members watching alone are not pulled back.
+ * "Alle synchronisieren" (host, both sync modes): publish the host's current
+ * party time as a sequenced host revision with a one-time alignment ID, then ask
+ * for immediate status reports. Supporting members jump once to that time (the
+ * host's play/pause applies), afterwards everyone continues independently; no
+ * drift correction is switched on. Members watching alone are not pulled back.
  */
 internal fun PlayerScreenRuntime.syncEveryone() {
     val party = PartyRepository.state.value.party ?: return
-    if (!party.isHost || party.media.key != partyKey || !isPartySynced) return
-    publishPartyPlayback()
+    if (!party.isHost || party.media.key != partyKey || !isPartySynced || partySolo) return
+    PartyRepository.publishSyncAll(paused = !shouldPlay, positionMs = currentPlaybackPositionMs(), rate = partyBaseRate())
     PartyRepository.requestStatusReports()
     partySyncAllAt = PartyRepository.nowMs()
 }
@@ -938,13 +939,16 @@ internal fun PlayerScreenRuntime.BindPartyEffects() {
             val allowDriftSeek = partyAutoSync && partyAutoSeek && !eventSync
             if (identity != lastSeq) {
                 val forced = lastSeq == null
+                // "Alle synchronisieren": one explicit alignment in both modes, only
+                // from the current host; the seq identity makes it run once.
+                val syncAll = PartySync.isSyncAllAlignment(playback, party)
                 // Legacy revisions have no action type. A change to the party timeline
                 // is a remote jump; local distance from an unchanged timeline is drift.
                 revisionNeedsPosition = if (eventSync) {
                     // Play/pause keep the own position; app resume is not a join.
-                    PartySync.eventNeedsPosition(lastPlayback, playback, align = forced && (lastPlayback == null || alignNext))
+                    PartySync.eventNeedsPosition(lastPlayback, playback, align = syncAll || (forced && (lastPlayback == null || alignNext)))
                 } else {
-                    PartySync.needsImmediatePosition(lastPlayback, playback, forced)
+                    PartySync.needsImmediatePosition(lastPlayback, playback, forced || syncAll)
                 }
                 alignNext = false
                 lastPlayback = playback

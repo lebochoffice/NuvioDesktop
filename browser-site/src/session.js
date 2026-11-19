@@ -15,6 +15,8 @@ export async function callRpc(client, name, args = {}) {
 export const COMMAND_PROTOCOL = 1;
 // Optional host status field "sync": only "event" switches to event sync.
 export const syncModeOf = value => value === 'event' ? 'event' : 'live';
+// Version of the one-time "Alle synchronisieren" alignment a member announces.
+export const SYNC_ALL_PROTOCOL = 1;
 // Technical timeout for a missing host answer; never a lock on new commands.
 export const ACK_TIMEOUT_MS = 4000;
 const COMMAND_TRANSMISSIONS = 2; // first send + one retry with the same ID
@@ -66,8 +68,9 @@ export class PartySession {
     this.closing = null;
     this.hostCommands = false; this.commands = new Map(); this.latestCommand = null;
     // Party sync mode: announced by the host in its status ("sync": "event");
-    // absent means live sync. A browser host announces its own choice.
-    this.syncMode = 'live'; this.hostSyncMode = 'live';
+    // absent means live sync (older hosts). A browser host announces its own
+    // choice, which starts as event sync for every new party.
+    this.syncMode = 'live'; this.hostSyncMode = 'event';
     this.browserHostLinksEnabled = false;
     this.browserHostLinks = false;
     this.hostStream = null; // Browser host only: the link it currently shares (memory only).
@@ -294,11 +297,14 @@ export class PartySession {
   }
   // Host's own play/pause/seek: broadcast first, then persisted by the
   // authorized watch_party_update (the same order as Nuvio Desktop).
-  hostPublish({paused, positionMs, previousSeq}, check) {
+  // syncAll: "Alle synchronisieren" - the same sequenced host revision plus a
+  // one-time alignment ID (wire-only, never persisted), honored only from the host.
+  hostPublish({paused, positionMs, previousSeq, syncAll = false}, check) {
     if (!this.isHost()) return Promise.reject(Object.assign(new Error('host_only'), {code: 'host_only'}));
     const {room, gen, playback} = this.prepareControl({paused, positionMs});
     if (Number.isSafeInteger(previousSeq) && previousSeq < Number.MAX_SAFE_INTEGER)
       playback.seq = Math.max(playback.seq, previousSeq + 1);
+    if (syncAll) playback.sync_all = `sa-${playback.at.toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
     return this.publishLikeDesktop(room, gen, playback, check);
   }
   async sendHostCountdown(startAt, seconds) {
@@ -375,7 +381,9 @@ export class PartySession {
   async persistControl(room, gen, playback, check = () => {}) {
     const d = this.diagnostics;
     try {
-      const result = await this.rpc('watch_party_update', {p_party_id: room.info.id, p_device_id: this.deviceId, p_playback: playback});
+      // The one-time alignment ID is wire-only; the stored row keeps the existing schema.
+      const stored = playback && 'sync_all' in playback ? (({sync_all: _wireOnly, ...rest}) => rest)(playback) : playback;
+      const result = await this.rpc('watch_party_update', {p_party_id: room.info.id, p_device_id: this.deviceId, p_playback: stored});
       check();
       if (gen !== this.generation || room !== this.room) return;
       const party = result?.party;
@@ -559,6 +567,8 @@ export class PartySession {
         !snapshot.members?.some(member => member.id === snapshot.member_id))) throw new Error('Das Backend hat die Host-Mitgliedschaft nicht bestätigt.');
     this.room = {info: snapshot.party, memberId: snapshot.member_id, members: snapshot.members || []};
     if (Number.isFinite(snapshot.server_time_ms)) this.clockOffset = snapshot.server_time_ms - (sent + Date.now()) / 2;
+    // A host's own party follows its own (announced) mode from the first render.
+    if (this.isHost()) this.setSyncMode(this.hostSyncMode);
     this.emit('room', this.room);
     this.acceptPlayback(snapshot.party.playback, 'snapshot');
     try {
@@ -915,7 +925,8 @@ export class PartySession {
     if (payload.media_key && payload.media_key !== mediaKey(room.info.media)) { this.memberStatus.delete(id); return; }
     const number = v => Number.isFinite(v) ? v : undefined;
     this.memberStatus.set(id, {status: ['browsing', 'loading', 'buffering', 'ready', 'behind'].includes(payload.status) ? payload.status : 'browsing',
-      media_key: payload.media_key, position_ms: number(payload.position_ms), position_at: number(payload.position_at), playing: payload.playing === true});
+      media_key: payload.media_key, position_ms: number(payload.position_ms), position_at: number(payload.position_at), playing: payload.playing === true,
+      sync_all: payload.sync_all === SYNC_ALL_PROTOCOL ? SYNC_ALL_PROTOCOL : undefined});
     this.emit('members', this.memberStatus);
   }
   positionFields() {
@@ -933,7 +944,14 @@ export class PartySession {
   presencePayload(fields = this.positionFields()) {
     return {...this.presence, member_id: this.room.memberId, media_key: mediaKey(this.room.info.media), ...fields,
       ...(this.isHost() ? {browser_host_links: Number(this.browserHostLinksEnabled)} : {}),
-      ...(this.isHost() && this.hostSyncMode === 'event' ? {sync: 'event'} : {})};
+      ...(this.isHost() && this.hostSyncMode === 'event' ? {sync: 'event'} : {}),
+      // This client understands the one-time "Alle synchronisieren" alignment.
+      sync_all: SYNC_ALL_PROTOCOL};
+  }
+  // "Alle synchronisieren" counts only from the current host, never from a guest.
+  isSyncAllAlignment(playback) {
+    return !!playback?.sync_all && !playback.waiting && !this.isHost() &&
+      !!this.room?.info?.host_member_id && playback.member_id === this.room.info.host_member_id;
   }
   setSyncMode(mode) {
     const next = syncModeOf(mode);
@@ -1067,7 +1085,7 @@ export class PartySession {
     this.hostOfferDeferred = false;
     this.browserHostLinks = false;
     this.hostCommands = false; this.commands.clear(); this.latestCommand = null; this.memberStatus.clear(); this.resetHostOffer();
-    this.syncMode = 'live'; this.hostSyncMode = 'live';
+    this.syncMode = 'live'; this.hostSyncMode = 'event';
     this.commandTimers.forEach(clearTimeout); this.commandTimers.clear();
     if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
     this.reconnectAttempts = 0;

@@ -398,33 +398,53 @@ const buildPartyMembers = party => {
 // keeps every player independent between shared actions.
 const PARTY_SYNC_MODES = [
   ["live", "Live-Sync", "Kontinuierliche Synchronisierung: Abweichungen werden automatisch korrigiert, bei Puffern wartet die Party."],
-  ["event", "Ereignis-Sync", "Nur gemeinsame Aktionen: Play, Pause, Spulen und „Jetzt synchronisieren“. Jeder spielt mit eigenem Puffer weiter, ohne automatische Korrekturen."],
+  ["event", "Ereignis-Sync", "Nur gemeinsame Aktionen: Play, Pause, Spulen, „Jetzt synchronisieren“ und „Alle synchronisieren“. Jeder spielt mit eigenem Puffer weiter, ohne automatische Korrekturen."],
 ];
+const PARTY_SYNC_TV_NOTE = "Offizielle Nuvio-TV-Apps kennen den Ereignis-Sync nicht und korrigieren weiter automatisch.";
+// Survives the party panel's re-renders: the info only opens or closes on a click.
+let partySyncInfoOpen = false;
 const buildPartySyncMode = party => {
   const mode = party.syncMode === "event" ? "event" : "live";
+  const editable = Boolean(party.syncModeEditable);
   const card = partyElement("div", "party-card party-sync-mode");
   card.appendChild(partyElement("p", "party-card-title", "Synchronisierung"));
-  if (party.syncModeEditable) {
-    const row = partyElement("div", "party-inline-row");
-    row.setAttribute("role", "radiogroup");
-    row.setAttribute("aria-label", "Synchronisierungsmodus der Party");
-    PARTY_SYNC_MODES.forEach(([value, label]) => {
-      const button = partyCompactButton(label, `syncMode:${value}`, () => {
-        if (value !== mode) send("partySyncMode", value === "event" ? 1 : 0);
-      }, value === mode ? "primary" : "");
-      button.setAttribute("role", "radio");
-      button.setAttribute("aria-checked", String(value === mode));
-      row.appendChild(button);
+  const group = partyElement("div", "party-sync-mode-options");
+  group.setAttribute("role", "radiogroup");
+  group.setAttribute("aria-label", editable ? "Synchronisierungsmodus der Party" : "Synchronisierungsmodus (vom Host gewählt)");
+  if (!editable) group.setAttribute("aria-readonly", "true");
+  PARTY_SYNC_MODES.forEach(([value, label]) => {
+    const checked = value === mode;
+    const option = partyAction(partyElement("button", checked ? "party-sync-option checked" : "party-sync-option"), `syncMode:${value}`, () => {
+      if (editable && !checked) send("partySyncMode", value === "event" ? 1 : 0);
     });
-    card.appendChild(row);
-  } else {
-    card.appendChild(partyElement("p", "party-row-label", mode === "event" ? "Ereignis-Sync (vom Host gewählt)" : "Live-Sync (vom Host gewählt)"));
-  }
-  const explanation = PARTY_SYNC_MODES.find(([value]) => value === mode)[2];
-  card.appendChild(partyElement("p", "party-detail", explanation));
-  if (mode === "event" && party.isHost) {
-    card.appendChild(partyElement("p", "party-detail", "Offizielle Nuvio-TV-Apps kennen diesen Modus nicht und korrigieren weiter automatisch."));
-  }
+    option.setAttribute("role", "radio");
+    option.setAttribute("aria-checked", String(checked));
+    option.disabled = !editable && !checked;
+    if (!editable) option.setAttribute("aria-disabled", "true");
+    option.appendChild(partyElement("span", "party-sync-radio", checked ? "●" : "○"));
+    option.appendChild(partyElement("span", "", label));
+    group.appendChild(option);
+  });
+  card.appendChild(group);
+  if (!editable) card.appendChild(partyElement("p", "party-detail", "Vom Host gewählt."));
+  const infoId = "partySyncModeInfo";
+  const toggle = partyAction(partyElement("button", "party-link-button left party-sync-info-toggle"), "syncModeInfo", () => {
+    partySyncInfoOpen = !partySyncInfoOpen;
+    toggle.setAttribute("aria-expanded", String(partySyncInfoOpen));
+    info.hidden = !partySyncInfoOpen;
+  });
+  toggle.setAttribute("aria-expanded", String(partySyncInfoOpen));
+  toggle.setAttribute("aria-controls", infoId);
+  toggle.appendChild(partyElement("span", "", "Wie funktioniert dieser Modus?"));
+  card.appendChild(toggle);
+  const info = partyElement("div", "party-sync-info");
+  info.id = infoId;
+  info.hidden = !partySyncInfoOpen;
+  PARTY_SYNC_MODES.forEach(([value, label, text]) => {
+    info.appendChild(partyElement("p", value === mode ? "party-detail current" : "party-detail", `${label}: ${text}`));
+  });
+  info.appendChild(partyElement("p", "party-detail", PARTY_SYNC_TV_NOTE));
+  card.appendChild(info);
   return card;
 };
 
